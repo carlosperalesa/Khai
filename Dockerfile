@@ -3,18 +3,11 @@ FROM python:3.10-slim
 # Evitar prompts interactivos durante la instalación
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Instalar dependencias del sistema (ffmpeg vital para Agente 5, docker.io para self-maintenance)
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    make \
-    docker.io \
-    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
-    && apt-get install -y nodejs \
+# El Core no administra Docker ni utiliza Node.js; el proxy posee el cliente Docker.
+RUN apt-get update && apt-get install -y make \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar OpenClaw globalmente
-RUN npm install -g openclaw
+# Khai uses its Python coordinator; no unrelated agent runtime is installed.
 
 # Configurar directorio de trabajo
 WORKDIR /app

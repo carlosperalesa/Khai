@@ -5,3 +5,13 @@ data/rendered
 data/audio
 data/videos
 *.tar.gz
+.git
+.env
+*.env
+data
+tests
+.agents
+other
+.test-temp
+scripts/refactor_layout.py
+scripts/connect_architecture.py

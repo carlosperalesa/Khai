@@ -5,37 +5,41 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - secrets.env
     ports:
       - "8000:8000"
       - "8443:8443"
     volumes:
-      # Persistencia para que no se borren los videos ni la base de datos al reiniciar
       - ./data:/app/data
-      # Montamos las skills y modulos por si quieres editarlas en vivo en el servidor
-      - ./modules:/app/modules
-      - ./config:/app/config
-      - ./orchestrator.py:/app/orchestrator.py
+      - ./config:/app/config:ro
+      - ./other:/app/other
     environment:
-      - TZ=America/Santiago
-      - PROXY_URL=http://docker_proxy:8001/run-skill
+      TZ: America/Santiago
+      DATA_DIR: /app/data
+      KHAI_RUNTIME: docker
+      PROXY_URL: http://docker_proxy:8001
+      PROXY_TOKEN: ${PROXY_TOKEN:?Define PROXY_TOKEN in .env}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:?Define TELEGRAM_WEBHOOK_SECRET in .env}
     networks:
-      - openclaw_net
+      - control
 
   docker_proxy:
-    build: ./docker_proxy
+    build:
+      context: .
+      dockerfile: docker_proxy/Dockerfile
     container_name: openclaw_docker_proxy
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
     environment:
-      - TZ=America/Santiago
-      - HOST_DATA_DIR=${PWD:-.}/data
-      - HOST_MODULES_DIR=${PWD:-.}/modules
-      - HOST_ENV_FILE=${PWD:-.}/.env
+      TZ: America/Santiago
+      DATA_DIR: /app/data
+      HOST_DATA_DIR: ${KHAI_HOST_ROOT:?Absolute Linux project path required}/data
+      HOST_RUNTIME_DIR: ${KHAI_HOST_ROOT:?Absolute Linux project path required}/app/voice/runtime
+      PROXY_TOKEN: ${PROXY_TOKEN:?Define PROXY_TOKEN in .env}
     networks:
-      - openclaw_net
+      - control
 
 networks:
-  openclaw_net:
+  control:
     driver: bridge

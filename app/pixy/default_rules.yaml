@@ -1,0 +1,69 @@
+# OpenClaw V3 - Constitution
+# Leyes inmutables y de alto peso evaluadas de forma determinista (AST) por Pixy.
+
+# Llamadas y funciones estrictamente prohibidas en cualquier agente.
+# Formato: "modulo.funcion" para llamadas calificadas (ej: subprocess.run)
+#           "funcion" para llamadas globales peligrosas (ej: exec, eval)
+banned_calls:
+  - "exec"         # exec() global
+  - "eval"         # eval() global
+
+  - "rmtree"       # shutil.rmtree()
+  - "Popen"        # subprocess.Popen()
+
+# Combinaciones calificadas: "modulo.funcion" que Pixy evalúa como par (import + call)
+banned_qualified_calls:
+  - module: "subprocess"
+    call: "run"
+  - module: "subprocess"
+    call: "call"
+  - module: "os"
+    call: "system"
+  - module: "os"
+    call: "popen"
+
+# Módulos estrictamente prohibidos para su importación (riesgo de escape del contenedor).
+banned_imports:
+  - "pty"
+  - "shlex"
+  - "requests"
+  - "urllib"
+  - "httpx"
+  - "socket"
+  - "aiohttp"
+  - "subprocess"
+  - "ctypes"
+  - "multiprocessing"
+  - "importlib"
+
+# Structural rules cannot be relaxed by advisory user guidance.
+network_access: voice_only
+secrets_access: voice_only
+artifact_integrity: required
+
+# Reglas de rutas permitidas (Path Traversal Protection)
+allowed_write_paths:
+  - "/app/data/public"
+  - "/app/data/agent_workspace"
+
+# Capacidades y sus módulos asociados (Validación Contextual AST)
+capabilities:
+  "Network":
+    allowed_modules:
+      - "requests"
+      - "urllib"
+      - "httpx"
+      - "socket"
+      - "aiohttp"
+  "FileSystem":
+    allowed_modules:
+      - "os"
+      - "shutil"
+      - "pathlib"
+      - "csv"
+      - "json"
+  "Database":
+    allowed_modules:
+      - "sqlite3"
+      - "psycopg2"
+      - "sqlalchemy"

@@ -2,7 +2,7 @@
 
 
 # Variables
-OPENCLAW_CMD=python orchestrator.py
+OPENCLAW_CMD=python -m app.voice.voice
 PYTHON_CMD=python
 ENV_FILE=.env
 
@@ -32,7 +32,7 @@ health: ## Alias para stats
 
 setup: ## Configura el entorno inicial (carpetas y BD)
 	@echo "Creando directorios y configurando BD..."
-	mkdir -p data/logs data/memory data/llm data/skills data/certs data/public data/agent_logs
+	$(PYTHON_CMD) -m scripts.migrate_architecture
 	@echo "Setup completado."
 
 update: ## Actualiza el repositorio e instala nuevas dependencias
@@ -41,9 +41,11 @@ update: ## Actualiza el repositorio e instala nuevas dependencias
 	pip install -r requirements.txt
 	@echo "Actualización completada."
 
-test: ## Ejecuta una prueba (dry run) de importación de módulos
-	@echo "Verificando importación de módulos..."
-	$(PYTHON_CMD) -c "from modules import ModuleManager; print('✅ Todos los módulos importados correctamente.')"
+test: ## Pruebas locales; Docker, Telegram y LLM simulados
+	$(PYTHON_CMD) -B -m unittest discover -s tests -v
+
+migrate: ## Migración offline con copia SQLite consistente; detener servicios primero
+	$(PYTHON_CMD) -m scripts.migrate_architecture
 
 clean: ## Limpia archivos temporales, logs > 7 días y caché
 	@echo "Limpiando caché y logs antiguos..."
@@ -62,15 +64,11 @@ docker-down: ## Detiene y elimina el contenedor de Docker
 docker-logs: ## Muestra los logs del contenedor Docker en vivo
 	docker compose logs -f --tail=50 bot
 
-backupdb: ## Comprime la base de datos de SQLite para sincronización
-	@echo "Realizando backup de la base de datos..."
-	@mkdir -p data
-	tar -czf data/db_backup.tar.gz -C data openclaw.db
+backupdb: ## Respalda offline datos y bases SQLite mediante backup consistente
+	$(PYTHON_CMD) -m scripts.backup_data backup
 
-restoredb: ## Descomprime la base de datos de SQLite
-	@echo "Restaurando la base de datos..."
-	@mkdir -p data
-	tar -xzf data/db_backup.tar.gz -C data
+restoredb: ## Restaura a carpeta nueva: make restoredb BACKUP=... DEST=...
+	$(PYTHON_CMD) -m scripts.backup_data restore --source "$(BACKUP)" --output "$(DEST)"
 
 backuplogs: ## Comprime las carpetas de logs para sincronización
 	@echo "Realizando backup de los logs..."

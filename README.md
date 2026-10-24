@@ -1,108 +1,91 @@
-# OpenClaw V3: Framework Agéntico Semi-Autónomo
+# Khai — ejecución controlada y aprendizaje con evidencia
 
-## 📋 Descripción
+Khai es un asistente personal para Telegram que interpreta objetivos, genera o reutiliza código Python y lo ejecuta mediante Voice con DockerRuntime o LocalRuntime aislado. Mantiene estado en SQLite para recuperar el trabajo sin repetir automáticamente operaciones de resultado incierto.
 
-OpenClaw V3 es un sistema operativo multi-agente impulsado por IA, diseñado no solo para programar y ejecutar Habilidades (Skills) al vuelo, sino para **aprender, consolidar, adaptarse y protegerse** sin depender de corrección manual constante.
+El proyecto conserva nombres históricos de OpenClaw en contenedores y tablas. Su motor de ejecución es propio; no utiliza el Gateway de OpenClaw ni el runtime de Hermes Agent. Ambos proyectos sirvieron como referencias de diseño.
 
-A diferencia de los asistentes estáticos o de la versión V2 (reactiva), OpenClaw V3 aplica el **Método Científico** sobre su propia existencia: genera hipótesis a partir de sus fallos, las somete a prueba empírica, las consolida como *Guidelines* si funcionan, y cuenta con un *Garbage Collector Cognitivo* que destruye reglas inútiles o contradictorias para evitar la degradación del conocimiento a largo plazo.
+## Estado de esta revisión
 
-- **Stack**: FastAPI + SQLite + Gemini API / Azure OpenAI + Docker (Dinámico + Proxy)
-- **Hosting**: Linux VPS (Ubuntu)
-- **Comunicación**: Telegram Webhooks
+La migración de `plan.md` está implementada en `app/`. Consulta
+[la guía de migración](docs/ARCHITECTURE_MIGRATION.md) para los cambios de datos,
+configuración, Runtime y comandos de galería. Esta revisión requiere validación
+real en el host antes de retirar los adaptadores; los despliegues anteriores de
+`DEPLOYMENT_LOG.md` no acreditan el despliegue de esta migración.
 
----
+## Comportamiento actual
 
-## 🧠 Filosofía V3: El Método Científico
+- Un `update_id` de Telegram crea como máximo un objetivo durable. Se comprueban el secreto del webhook y la identidad del usuario, también para callbacks.
+- Cada objetivo conserva su presupuesto: 4 generaciones, 4 ejecuciones, 16 intentos de proveedor y 30 minutos de plazo por defecto. Los reintentos y las hipótesis alternativas comparten esos límites.
+- SkillForge genera código; Pixy lo revisa; Coordinator decide las transiciones; Docker Proxy administra contenedores identificados por `execution_id`.
+- La revisión y la aprobación se vinculan al SHA256 del archivo. Cambiar el código invalida la autorización; Pixy no reescribe un artefacto después de revisarlo.
+- Cada habilidad dispone de un workspace propio. No recibe la base de datos, los módulos, los secretos ni el socket Docker del Core.
+- Salir con código `0` significa que el proceso terminó. El objetivo permanece `UNVERIFIED` hasta comprobar un archivo con un SHA256 esperado por el usuario, o recibir una verificación explícita del usuario.
+- Lanzar un servicio AGENT produce `started`, no éxito verificado. Su proceso se supervisa hasta el plazo del objetivo.
+- Solo observaciones verificadas alimentan el aprendizaje. Los recibos se deduplican por ejecución; las reglas nuevas pasan por estado `proposed` y aprobación explícita.
+- Khai mantiene una personalidad cercana y aprende preferencias explícitas sin convertir conversaciones aisladas o resultados no verificados en memoria permanente.
+- Pixy tiene una voz juguetona, pero sus facultades siguen limitadas a revisar, informar, solicitar aprobación y cancelar según las reglas del sistema.
 
-La arquitectura V3 resuelve el mayor desafío de los sistemas autónomos a largo plazo: **La degradación del conocimiento**.
+## Componentes
 
-1. **Hipótesis en lugar de Leyes Ciegas**: Heart nunca genera reglas estáticas basadas en un solo error. En su lugar, registra múltiples *Hipótesis* con niveles de confianza y las somete a prueba empírica.
-2. **Fallback Cognitivo**: Si la hipótesis activa falla y existen alternativas, SkillForge promueve la siguiente hipótesis y relanza la tarea con el mismo `task_id`, sin pedirle a CoreMind un análisis desde cero.
-3. **Contexto Empírico**: Las hipótesis acumulan éxitos y fracasos por contexto en `hypothesis_contexts`, permitiendo distinguir dónde una estrategia funciona y dónde se rompe.
-4. **Ciclo de Consolidación**: Si una hipótesis eleva la tasa de éxito de las Skills creadas por Khai, se promueve a *Dynamic Guideline*.
-5. **Garbage Collection Cognitivo**: Si una regla o hipótesis reduce la tasa de éxito, el sistema la marca automáticamente como `deprecated` (olvido algorítmico).
-6. **Resolución de Contradicciones**: El sistema reconoce cuando el entorno muta (ej. un paquete de Linux cambia de nombre) y superpone reglas nuevas sobre las antiguas mediante el rastreo de `supersedes`.
+| Componente | Responsabilidad |
+| --- | --- |
+| Orquestador | Autenticar Telegram y persistir entradas; ofrecer comandos explícitos. |
+| Coordinator / ControlStore | Presupuesto, estados, aprobaciones, recuperación y cancelación. |
+| CoreMind | Clasificar intenciones y proponer causas; no despachar contenedores. |
+| SkillForge | Generar scripts y guardar artefactos identificados por hash. |
+| Pixy | Filtro AST y revisión semántica; el sandbox aplica los límites efectivos. |
+| Docker Proxy / Engine | Preparar imágenes, ejecutar, supervisar y reconciliar contenedores. |
+| Dreams / Memory | Evidencia, métricas por contexto, propuestas de reglas y reversión. |
+| Heart / Senses | Diagnóstico basal y consultas de observabilidad acotadas. |
 
----
+## Modos de ejecución
 
-## 👥 Ecosistema de Agentes y Componentes V3
+| Modo | Uso | Autorización |
+| --- | --- | --- |
+| SAFE | Script corto en workspace privado. | Revisión de Pixy; aprobación humana si solicita red, instala dependencias o Pixy la requiere. |
+| AGENT | Proceso de larga duración, sin puertos publicados automáticamente. | Siempre requiere aprobación humana del artefacto. |
+| GOD | Compatibilidad con `DynamicSkill(BaseSkill)` y checkpoints locales. | Siempre requiere aprobación humana; no otorga acceso al host. |
 
-| Entidad | Módulo | Función en V3 |
-|---------|------------|---------|
-| **Khai** | `CoreMind` / `SkillForge` | **El Ingeniero en Jefe**. Su directriz absoluta es el éxito de la tarea. Ante un error, genera causas alternativas con confianza explícita, utiliza sus "ojos" para diagnóstico autónomo y corrige al vuelo. Si una hipótesis falla, promueve otra sin reiniciar el razonamiento causal. |
-| **Pixy** | `PixyMind` | **DevOps y La Constitución**. Ahora posee un motor determinista (AST). Antes de consultar al LLM, analiza estáticamente el código de Khai contra el `constitution.yaml`. Si Khai rompe una regla inmutable (ej. `os.system`), Pixy destruye el código a costo de **0 Tokens**. |
-| **Heart** | `CoreHeart` | **El Consolidador**. Posee dos motores: **FastBeat** (monitoreo vital barato, detección de loops, drift de confianza y abuso de Eyes) y **SlowBeat** (motor cognitivo asíncrono que procesa el cementerio de contenedores para formular hipótesis JSON). |
-| **Eyes** | `CoreEyes` | **Observabilidad Segura**. Una capa de abstracción absoluta. Khai no puede ejecutar comandos shell de lectura. Solo puede pedir recursos a través de IDs autorizados (`core_logs`, `agent_logs_X`), siempre indicando una razón de investigación y blindando al host contra ataques de *Path Traversal*. |
+El nombre GOD es histórico: no permite administrar el VPS, modificar el Core ni controlar Docker. La administración del host se realiza por un operador fuera del agente.
 
----
-
-## 🧪 Capa Causal y Antibucle
-
-La Fase 3 añade un pipeline causal explícito para que OpenClaw no caiga en el sesgo de "la primera explicación gana":
-
-- `CoreMind` separa intents normales de análisis de fallo y exige `possible_causes`, `confidence`, `proposed_fix`, `evidence` e `investigate_reason` cuando corresponde investigar.
-- `CoreHeart.register_multiple_hypotheses()` guarda la hipótesis principal y sus alternativas; `StateManager` conserva la lista en `alternative_hypotheses`.
-- `SkillForge` actualiza métricas por contexto y, ante error definitivo, llama a `promote_next_hypothesis()` para relanzar automáticamente con la siguiente causa probable.
-- `FastBeat` distingue un síntoma sano de aprendizaje (misma hipótesis perdiendo confianza) de un loop real sin progreso.
-- Cada lectura de `CoreEyes` guarda un hash del output. Si Khai lee tres veces el mismo recurso con el mismo hash sin generar código entre medio, Pixy activa Panic Mode para cortar la fábrica de tokens.
-
----
-
-## 🔄 Arquitectura de Ejecución (Modes)
-
-El orquestador principal (`openclaw_core`) **nunca ejecuta código dinámico nativamente**. Todo código viaja a través del Docker Proxy hacia entornos herméticos.
-
-1. **SAFE MODE**: Para tareas analíticas o lógicas cortas. El script corre en un sandbox efímero que se destruye al terminar.
-2. **AGENT MODE**: Para servidores, bots y procesos largos. El proxy levanta un contenedor Daemon (`docker run -d`) independiente que sobrevive a reinicios del Core.
-3. **GOD MODE**: Para administración del sistema host. Se somete a la auditoría estricta AST de Pixy y requiere aprobación manual por el usuario.
-
----
-
-## 📁 Estructura del Proyecto
+## Uso desde Telegram
 
 ```text
-DOopenclawYT/
-├── config/                            # Archivos de Configuración del Ecosistema
-│   ├── config.yaml                    # Configuración estática general
-│   └── constitution.yaml              # Leyes Inmutables de Seguridad evaluadas vía AST por Pixy
-├── modules/                           # Componentes Core
-│   ├── core_mind.py                   # Orquestador Semántico (Prompt System V3 de Khai)
-│   ├── skill_forge.py                 # Creador de Skills, Auto-corrección e inyección PIP
-│   ├── core_heart.py                  # Consolidador Cognitivo (FastBeat & SlowBeat)
-│   ├── memory_engine.py               # SQLite V3 (Tabla de Hipótesis y Guidelines con GC)
-│   ├── pixy.py                        # Evaluador Determinista AST y DevOps LLM
-│   └── core_eyes.py                   # Lector Abstraído de Recursos (Lista Blanca)
-├── docker_proxy/                      # API aislada con acceso al docker.sock del Host
-├── data/                              # Volumen persistente (SQLite, identidades vivas y cementerio)
-│   ├── memory/agent.md                # Personalidad mutable de Khai
-│   └── public/                        # Único directorio expuesto de salida de archivos
-├── orchestrator.py                    # Servidor Webhook FastAPI
+/make objetivo
+/tasks
+/artifact TASK_ID
+/approve TASK_ID TOKEN
+/deny TASK_ID TOKEN
+/cancel TASK_ID
+/expect TASK_ID archivo_relativo SHA256_ESPERADO
+/verify TASK_ID EXECUTION_ID success
+/verify TASK_ID EXECUTION_ID failure
+/rules
+/rule approve RULE_ID [RULE_ID_SUSTITUIDA]
+/rule rollback RULE_ID
 ```
 
----
+`/expect` se registra antes de ejecutar. `/verify` se usa sobre el resultado `UNVERIFIED` de una ejecución concreta. Una cancelación en curso se confirma consultando `/tasks`.
 
-## 💾 Respaldos de Base de Datos y Logs Locales (Makefile)
+## Instalación y operación
 
-La base de datos SQLite activa (`data/openclaw.db`), los certificados y los logs (`data/logs/`, `data/agent_logs/`) están excluidos de Git para mantener el repositorio limpio y proteger información sensible de la interacción del agente.
+El despliegue está pensado para Linux con Docker Engine y Compose. Configura los valores de [runtime.env.example](config/runtime.env.example), mantén las credenciales fuera de Git y sigue [la guía de operación](docs/OPERATIONS.md). Core y proxy deben actualizarse juntos porque el protocolo de ejecución cambió.
 
-Para respaldar y restaurar de forma local los datos del sistema, se pueden utilizar los comandos implementados en el `Makefile` (los archivos `.tar.gz` resultantes están excluidos de Git en `.gitignore` para evitar subidas accidentales a GitHub):
+## Pruebas
 
-* **Respaldo de Base de Datos SQLite:**
-  - `make backupdb`: Comprime la base de datos activa `data/openclaw.db` a `data/db_backup.tar.gz`.
-  - `make restoredb`: Descomprime `data/db_backup.tar.gz` a `data/openclaw.db`.
+```bash
+python -m pip install -r requirements-dev.txt
+python -B -m unittest discover -s tests -v
+```
 
-* **Respaldo de Registros de Logs:**
-  - `make backuplogs`: Crea un archivo comprimido `data/logs_backup.tar.gz` con el contenido de las carpetas de logs.
-  - `make restorelogs`: Descomprime `data/logs_backup.tar.gz` en sus carpetas correspondientes.
+Las pruebas no requieren credenciales ni un daemon Docker. La validación real
+con Docker, Bubblewrap, Telegram y proveedores de esta migración debe realizarse
+en el host de despliegue. No se ha desplegado esta revisión desde este trabajo.
 
----
+## Documentación
 
-## 🔐 Privacidad y Gestión de Llaves
-
-- **Unified Fallback**: Si una API Key (ej. Gemini) se agota, el `llm_manager.py` hace switch automáticamente a llaves secundarias (Azure / OpenAI), garantizando la continuidad operativa sin romper los flujos asíncronos de Heart o Khai.
-- **Protección de Salida**: Todas las Habilidades que generen multimedia o archivos tienen prohibido escribir fuera de `/app/data/public/`.
-
----
-
-## 📄 Licencia
-MIT License
+- [Migración actual y arquitectura corporal](docs/ARCHITECTURE_MIGRATION.md).
+- [Arquitectura anterior, contratos y estados](docs/ARCHITECTURE.md).
+- [Configuración, migración, operación y recuperación](docs/OPERATIONS.md).
+- [Cambios, validación y límites pendientes](docs/IMPLEMENTATION.md).
+- [Registro histórico de despliegue](DEPLOYMENT_LOG.md).

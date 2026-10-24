@@ -1,0 +1,5 @@
+# Only explicitly configured named operations are reachable by skills.
+# Credentials are keys from data/voice/secrets.env, never literal values.
+# Example operation fields: url, method, parameters, content_types,
+# max_bytes, timeout, per_minute, credential, credential_header.
+services: {}
