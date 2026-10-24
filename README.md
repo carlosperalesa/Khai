@@ -6,11 +6,10 @@ El proyecto conserva nombres históricos de OpenClaw en contenedores y tablas. S
 
 ## Estado de esta revisión
 
-La migración de `plan.md` está implementada en `app/`. Consulta
-[la guía de migración](docs/ARCHITECTURE_MIGRATION.md) para los cambios de datos,
-configuración, Runtime y comandos de galería. Esta revisión requiere validación
-real en el host antes de retirar los adaptadores; los despliegues anteriores de
-`DEPLOYMENT_LOG.md` no acreditan el despliegue de esta migración.
+La arquitectura actual está implementada en `app/` y desplegada en la VM de
+Azure siguiendo [la guía de operación](docs/OPERATIONS.md). Los adaptadores de
+compatibilidad se conservan porque todavía forman parte del contrato de
+despliegue y no deben usarse para código nuevo.
 
 ## Comportamiento actual
 
@@ -78,14 +77,14 @@ python -m pip install -r requirements-dev.txt
 python -B -m unittest discover -s tests -v
 ```
 
-Las pruebas no requieren credenciales ni un daemon Docker. La validación real
-con Docker, Bubblewrap, Telegram y proveedores de esta migración debe realizarse
-en el host de despliegue. No se ha desplegado esta revisión desde este trabajo.
+Las pruebas no requieren credenciales ni un daemon Docker. La validación local
+completó la suite del proyecto; la validación real de Docker, HTTPS, Telegram y
+proveedores se realiza en el host de despliegue y se describe en
+[OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Documentación
 
 - [Migración actual y arquitectura corporal](docs/ARCHITECTURE_MIGRATION.md).
-- [Arquitectura anterior, contratos y estados](docs/ARCHITECTURE.md).
+- [Arquitectura, contratos y estados](docs/ARCHITECTURE.md).
 - [Configuración, migración, operación y recuperación](docs/OPERATIONS.md).
 - [Cambios, validación y límites pendientes](docs/IMPLEMENTATION.md).
-- [Registro histórico de despliegue](DEPLOYMENT_LOG.md).

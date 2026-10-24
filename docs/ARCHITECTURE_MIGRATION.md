@@ -1,9 +1,9 @@
 # Migración de arquitectura de Khai
 
-La implementación de `plan.md` vive en `app/`. Los imports de `modules/` y
+La implementación actual vive en `app/`. Los imports de `modules/` y
 `orchestrator.py` son adaptadores de despliegue; no deben usarse para código nuevo.
-Se conservan hasta validar esta revisión en producción. `DEPLOYMENT_LOG.md`
-describe despliegues anteriores, no acredita el despliegue de esta migración.
+Se conservan porque todavía forman parte del contrato de compatibilidad del
+despliegue.
 
 ## Propiedad y ejecución
 
@@ -103,6 +103,7 @@ métricas separadas, contratos de Runtime y rechazo de acceso directo a red.
 Docker, Telegram y LLM se simulan en las pruebas normales; el worker sí ejecuta
 un fixture controlado en un proceso separado.
 
-La validación real de Docker, Bubblewrap, Telegram y proveedores requiere el host
-de despliegue. Hasta completarla no retirar los adaptadores de compatibilidad.
-No considerar el paso de pruebas locales como autorización ni prueba de despliegue.
+La validación real de Docker, HTTPS, Telegram y proveedores se realiza en el host
+de despliegue. La instancia activa se comprueba con `docker compose ps` y los
+endpoints `/docs` y `/openapi.json`; los adaptadores de compatibilidad no deben
+retirarse sin una migración coordinada de ese host.

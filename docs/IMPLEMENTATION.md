@@ -1,6 +1,4 @@
-> Referencia de la revisión anterior. Para la migración corporal actual, usar [ARCHITECTURE_MIGRATION.md](ARCHITECTURE_MIGRATION.md).
-
-# Implementación local — 24 de octubre de 2026
+# Implementación — 24 de octubre de 2026
 
 ## Cambios principales
 
@@ -23,15 +21,25 @@ SAFE mantiene el formato de script con `# MODE:` y dependencias opcionales `# PI
 
 Los antiguos marcadores de Pixy para inyectar secretos, agregar reglas sin evidencia o controlar Docker no producen mutaciones. La administración del sistema se realiza fuera del agente. `/new`, `/compact` y `/restart` muestran ayuda en vez de eliminar evidencia o reiniciar servicios.
 
-Los archivos de identidad existentes no se modificaron. El registro de despliegue previo se conserva como antecedente y no acredita la activación de esta revisión.
+Los archivos de identidad existentes no se modificaron. La revisión está
+desplegada en la VM de Azure; la configuración operativa y las comprobaciones
+de salud se mantienen en [OPERATIONS.md](OPERATIONS.md).
 
 ## Validación
 
-La suite `tests/test_control.py` contiene 40 pruebas. La ejecución local completó las 40 correctamente; los detalles de infraestructura real permanecen pendientes. Cubre entradas duplicadas y simultáneas, presupuesto persistente, propietario exclusivo, cancelación, aprobaciones ligadas a contenido, denegación, recibos de aprobación, resultado incierto, falso éxito, daemon iniciado, agotamiento de hipótesis, reintentos tras timeout de transporte, métricas y reglas, migración de conocimiento, protocolo, autenticación y aislamiento de montajes.
+La suite se ejecuta con `python -B -m unittest discover -s tests -v` y completó
+70 pruebas correctamente. Cubre entradas duplicadas y simultáneas, presupuesto
+persistente, propietario exclusivo, cancelación, aprobaciones ligadas a
+contenido, denegación, recibos de aprobación, resultado incierto, falso éxito,
+daemon iniciado, agotamiento de hipótesis, reintentos tras timeout de transporte,
+métricas y reglas, migración de conocimiento, protocolo, autenticación y
+aislamiento de montajes.
 
 Incluye un flujo completo offline con Docker/Telegram/LLM simulados y una prueba real del runner en un subproceso local inofensivo: guarda un checkpoint, pausa solicitando aprobación y completa después de recibir el permiso. Esa prueba no utiliza Docker ni contacta servicios.
 
-Las dependencias de prueba se instalaron en un directorio de trabajo separado. No se utilizaron las credenciales del proyecto y no se ejecutaron despliegues ni llamadas a modelos.
+Las pruebas locales no utilizan las credenciales del proyecto. La validación del
+despliegue se realiza por separado en el host y no debe confundirse con la suite
+local.
 
 ## Límites y trabajo posterior
 

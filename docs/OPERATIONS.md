@@ -1,5 +1,3 @@
-> Referencia de la revisión anterior. Para la migración corporal actual, usar [ARCHITECTURE_MIGRATION.md](ARCHITECTURE_MIGRATION.md).
-
 # Operación y migración
 
 ## Configuración necesaria
@@ -46,6 +44,25 @@ Genere dos secretos independientes con `python -c "import secrets; print(secrets
 
 El Core utiliza HTTPS en 8443 si encuentra `data/certs/cert.pem` y `data/certs/key.pem`; en caso contrario escucha HTTP en 8000. Para Telegram hace falta una URL HTTPS válida, mediante esos certificados o un reverse proxy correctamente configurado. No basta con publicar HTTP.
 
+## Actualización de la instancia activa
+
+La revisión actual se activó en la VM de Azure. Core y proxy se reconstruyen y
+reinician juntos; no se debe reemplazar solo uno de ellos porque comparten el
+protocolo de ejecución.
+
+```bash
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+curl -kfsS https://127.0.0.1:8443/docs >/dev/null
+curl -kfsS https://127.0.0.1:8443/openapi.json >/dev/null
+```
+
+Antes de actualizar, cree un respaldo coherente de `data`, `.env`, `secrets.env`,
+certificados y código. No copie una SQLite en caliente ignorando sus archivos
+WAL/SHM. Mantenga `data/voice/secrets.env` con permisos restringidos después de
+la migración.
+
 ## Migración desde la revisión anterior
 
 Esta sección es un procedimiento para un despliegue futuro; la edición local de código no ejecuta estos pasos.
@@ -58,7 +75,7 @@ Esta sección es un procedimiento para un despliegue futuro; la edición local d
 6. Registre en Telegram el mismo `TELEGRAM_WEBHOOK_SECRET`. `scripts/set_webhook.py` envía `secret_token` y usa el certificado de `data/certs/cert.pem`; ese script hace una llamada real a Telegram y se ejecuta deliberadamente al activar.
 7. Compruebe `/tasks` y revise los objetivos históricos `UNKNOWN`. Ejecute primero una tarea offline con un resultado conocido y verifique su artefacto.
 
-En el despliegue activo, compruebe el resultado con:
+Para una comprobación posterior, use:
 
 ```bash
 docker compose ps
