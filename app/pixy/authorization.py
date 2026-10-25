@@ -12,21 +12,27 @@ STATUSES = {'pending', 'approved', 'denied', 'consumed', 'expired', 'superseded'
 class AuthorizationStore:
     def __init__(self, path, ttl=900):
         self.path, self.ttl = path, ttl
-        migrate(path, [[
-            '''CREATE TABLE IF NOT EXISTS pixy_authorizations(authorization_id TEXT PRIMARY KEY,
-               case_id TEXT NOT NULL UNIQUE, issued_by TEXT NOT NULL, authorized_for TEXT NOT NULL,
-               requested_by TEXT NOT NULL, capabilities TEXT NOT NULL, target TEXT NOT NULL,
-               plan_hash TEXT NOT NULL, nonce TEXT NOT NULL, status TEXT NOT NULL,
-               created_at REAL NOT NULL, expires_at REAL NOT NULL, decided_at REAL, decided_by TEXT,
-               consumed_at REAL, consumed_by TEXT)''',
-            '''CREATE TRIGGER IF NOT EXISTS pixy_authorizations_no_delete BEFORE DELETE ON pixy_authorizations
-               BEGIN SELECT RAISE(ABORT,'authorization history is immutable'); END''',
-            '''CREATE TRIGGER IF NOT EXISTS pixy_authorizations_terms BEFORE UPDATE ON pixy_authorizations
-               WHEN NEW.capabilities IS NOT OLD.capabilities OR NEW.target IS NOT OLD.target
-                 OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.nonce IS NOT OLD.nonce
-                 OR NEW.case_id IS NOT OLD.case_id OR NEW.expires_at IS NOT OLD.expires_at
-               BEGIN SELECT RAISE(ABORT,'authorization terms are immutable'); END''',
-        ]], component='pixy-authorizations')
+        migrate(path, [
+            [
+                '''CREATE TABLE IF NOT EXISTS pixy_authorizations(authorization_id TEXT PRIMARY KEY,
+                   case_id TEXT NOT NULL UNIQUE, issued_by TEXT NOT NULL, authorized_for TEXT NOT NULL,
+                   requested_by TEXT NOT NULL, capabilities TEXT NOT NULL, target TEXT NOT NULL,
+                   plan_hash TEXT NOT NULL, nonce TEXT NOT NULL, status TEXT NOT NULL,
+                   created_at REAL NOT NULL, expires_at REAL NOT NULL, decided_at REAL, decided_by TEXT,
+                   consumed_at REAL, consumed_by TEXT)''',
+                '''CREATE TRIGGER IF NOT EXISTS pixy_authorizations_no_delete BEFORE DELETE ON pixy_authorizations
+                   BEGIN SELECT RAISE(ABORT,'authorization history is immutable'); END''',
+                '''CREATE TRIGGER IF NOT EXISTS pixy_authorizations_terms BEFORE UPDATE ON pixy_authorizations
+                   WHEN NEW.capabilities IS NOT OLD.capabilities OR NEW.target IS NOT OLD.target
+                     OR NEW.plan_hash IS NOT OLD.plan_hash OR NEW.nonce IS NOT OLD.nonce
+                     OR NEW.case_id IS NOT OLD.case_id OR NEW.expires_at IS NOT OLD.expires_at
+                   BEGIN SELECT RAISE(ABORT,'authorization terms are immutable'); END''',
+            ],
+            [
+                'ALTER TABLE pixy_authorizations ADD COLUMN trace_id TEXT',
+                'CREATE INDEX IF NOT EXISTS idx_pixy_auth_trace ON pixy_authorizations(trace_id)',
+            ]
+        ], component='pixy-authorizations')
 
     @staticmethod
     def _row(row):
@@ -46,12 +52,58 @@ class AuthorizationStore:
             return self._row(conn.execute('SELECT * FROM pixy_authorizations WHERE authorization_id=?',
                                           (authorization_id,)).fetchone())
 
-    def issue(self, case_id, capabilities, target, plan_hash, requested_by):
+    def get_by_trace(self, trace_id):
+        if not trace_id:
+            return None
+        with connection(self.path) as conn:
+            self._expire(conn)
+            row = conn.execute(
+                'SELECT * FROM pixy_authorizations WHERE (trace_id=? OR case_id=?) ORDER BY created_at DESC LIMIT 1',
+                (str(trace_id), str(trace_id))).fetchone()
+            return self._row(row)
+
+    def verify_by_trace(self, trace_id, capability=None, target=None):
+        auth = self.get_by_trace(trace_id)
+        if not auth or auth['status'] != 'approved':
+            return None
+        if capability and capability not in auth['capabilities']:
+            return None
+        if target and auth['target'] != target:
+            return None
+        return auth
+
+    def consume_by_trace(self, trace_id, capability=None, consumer='hand'):
+        auth_id = None
+        with connection(self.path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            self._expire(conn)
+            row = conn.execute(
+                'SELECT * FROM pixy_authorizations WHERE (trace_id=? OR case_id=?) AND status="approved" ORDER BY created_at DESC LIMIT 1',
+                (str(trace_id), str(trace_id))).fetchone()
+            if not row:
+                return None
+            record = self._row(row)
+            if capability and capability not in record['capabilities']:
+                return None
+            auth_id = record['authorization_id']
+            conn.execute(
+                'UPDATE pixy_authorizations SET status="consumed", consumed_at=?, consumed_by=? WHERE authorization_id=?',
+                (time.time(), str(consumer), auth_id))
+        return self.get(auth_id) if auth_id else None
+
+    def issue(self, case_id, capabilities, target, plan_hash, requested_by, trace_id=None):
         validate_case_id(case_id)
         if target not in TARGETS or not isinstance(capabilities, list) or not capabilities:
             raise ValueError('Autorización sin alcance válido')
         now = time.time()
-        record = dict(authorization_id='auth_' + uuid.uuid4().hex, case_id=case_id, issued_by='pixy',
+        tid = trace_id or (case_id if str(case_id).startswith(('req-', 'trace-', 'tr-')) else None)
+        if not tid:
+            try:
+                from app.common.tracing import get_trace_id
+                tid = get_trace_id() or case_id
+            except Exception:
+                tid = case_id
+        record = dict(authorization_id='auth_' + uuid.uuid4().hex, case_id=case_id, trace_id=tid, issued_by='pixy',
                       authorized_for='hand', requested_by=str(requested_by), capabilities=sorted(capabilities),
                       target=target, plan_hash=plan_hash, nonce=secrets.token_hex(16), status='pending',
                       created_at=now, expires_at=now + self.ttl)
@@ -60,10 +112,10 @@ class AuthorizationStore:
             self._expire(conn)
             # Only one question may be open: a bare "y" must never approve an older plan.
             conn.execute('UPDATE pixy_authorizations SET status="superseded" WHERE status="pending"')
-            conn.execute('''INSERT INTO pixy_authorizations(authorization_id,case_id,issued_by,authorized_for,
+            conn.execute('''INSERT INTO pixy_authorizations(authorization_id,case_id,trace_id,issued_by,authorized_for,
                 requested_by,capabilities,target,plan_hash,nonce,status,created_at,expires_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (record['authorization_id'], case_id, 'pixy', 'hand', record['requested_by'],
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (record['authorization_id'], case_id, tid, 'pixy', 'hand', record['requested_by'],
                  json.dumps(record['capabilities']), target, plan_hash, record['nonce'], 'pending', now,
                  record['expires_at']))
         return record

@@ -54,6 +54,9 @@ class ControlStore:
                     max_executions=4, max_llm_calls=16, revision=0, guidelines=[],
                     hypothesis_id=None, alternatives=[], result=None)
         task.update(extra)
+        if not task.get('trace_id'):
+            from app.common.tracing import get_trace_id, new_trace_id
+            task['trace_id'] = get_trace_id() or new_trace_id()
         with self.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO control_tasks VALUES (?, ?, ?)",
                          (task["id"], source, json.dumps(task)))

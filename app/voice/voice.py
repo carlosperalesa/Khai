@@ -11,6 +11,7 @@ from app.bootstrap import ModuleManager
 from app.mind.coordinator import Coordinator
 from app.pixy.control import InstanceLock
 from app.common.database import connection
+from app.common.tracing import TracingFilter, trace_scope, new_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ async def lifespan(app):
     root_logger.setLevel(logging.INFO)
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(log_path.resolve()) for h in root_logger.handlers):
         handler = logging.FileHandler(log_path, encoding='utf-8')
-        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
+        handler.addFilter(TracingFilter())
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(trace_id)s %(name)s %(message)s'))
         root_logger.addHandler(handler)
     owner_lock = InstanceLock(Path(os.getenv('DATA_DIR','data'))/'coordinator.lock')
     owner_lock.acquire()
@@ -195,20 +197,23 @@ async def webhook(request: Request):
         import json
         data = json.loads(body)
         manager = request.app.state.manager
-        source, text = authenticated_message(data, manager.telegram.user_id)
-        try:
-            reply = await asyncio.to_thread(command, manager, source, text)
-        except Exception as exc:
-            logger.exception("Error procesando comando: %s", exc)
-            err_str = str(exc)
-            if "Unified Fallback" in err_str or "API keys" in err_str:
-                reply = "Servicio de IA no disponible temporalmente. Intenta en unos momentos."
+        update_id = data.get('update_id', 'msg')
+        trace_id = new_trace_id(prefix=f"req_{update_id}")
+        with trace_scope(trace_id):
+            source, text = authenticated_message(data, manager.telegram.user_id)
+            try:
+                reply = await asyncio.to_thread(command, manager, source, text)
+            except Exception as exc:
+                logger.exception("Error procesando comando: %s", exc)
+                err_str = str(exc)
+                if "Unified Fallback" in err_str or "API keys" in err_str:
+                    reply = "Servicio de IA no disponible temporalmente. Intenta en unos momentos."
+                else:
+                    reply = "No se pudo procesar la solicitud en este momento."
+            if reply is not None:
+                await asyncio.to_thread(manager.coordinator.notify, reply)
             else:
-                reply = "No se pudo procesar la solicitud en este momento."
-        if reply is not None:
-            await asyncio.to_thread(manager.coordinator.notify, reply)
-        else:
-            manager.coordinator.intake(source, text)
+                manager.coordinator.intake(source, text, trace_id=trace_id)
         return {'ok': True}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc

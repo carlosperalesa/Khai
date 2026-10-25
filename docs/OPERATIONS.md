@@ -143,6 +143,28 @@ Los targets históricos `make backupdb` y `make restoredb` solo abarcan el forma
 
 Consulte `/tasks`, `/rules`, los logs de ambos servicios y `control_events`. El diagnóstico basal de Heart permanece activo; el antiguo ciclo de promoción automática de reglas se sustituye por LearningLedger. El historial de evidencia no se borra con `/new` ni `/compact`; esos comandos muestran ayuda.
 
+### Trazabilidad Distribuida (`trace_id`)
+Cada solicitud entrante por Telegram u otro transporte recibe inmediatamente un `trace_id` único (ej: `req_<update_id>-<timestamp>-<rand>`). Mediante `contextvars`, este identificador se propaga automáticamente por toda la tubería (`Voice` -> `Mind` -> `Coordinator` -> `Hand` -> `Senses` -> `Pixy` -> `Heart`).
+Los logs de `openclaw.log` se escriben con el formato `%(asctime)s %(levelname)s [%(trace_id)s] %(name)s %(message)s`, permitiendo aislar el camino completo de cada ejecución e incidente.
+
+### Autorizaciones Unificadas (Security Context Broker)
+Pixy actúa como la única fuente de verdad para autorizaciones sensibles, utilizando el `trace_id` como clave unificada:
+- Las autorizaciones se emiten y consultan directamente con `trace_id`.
+- Hand y Heart consultan a Pixy (`pixy.check_authorization(trace_id, capability)`).
+- Al ejecutarse la acción mutante, el permiso se marca atómicamente como `consumed` para prevenir ataques de repetición (anti-replay).
+
+### Diagnóstico por Sesión y Boot Epoch (Heart)
+Heart clasifica los errores de `openclaw.log` discriminando por el hito de arranque (`boot_time`):
+- Los errores ocurridos en sesiones o despliegues anteriores no mantienen el sistema en estado falso `degraded` tras un reinicio.
+- Las fallas a nivel de lógica o tarea (que no requieren reinicio de contenedores Docker) son analizadas por Pixy para ofrecer al usuario una explicación técnica clara y pasos de solución accionables (reintentar tarea, ajustar parámetros o revisar artefactos) en lugar de un críptico `Plan: None`.
+
+### Normalización Resiliente de Manifiestos
+El coordinador sanitiza automáticamente los manifiestos generados por el LLM:
+- Remueve delimitadores markdown (```` ```json ````).
+- Desempaqueta estructuras anidadas (`manifest`, `data`, `result`).
+- Convierte capacidades expresadas como cadenas separadas por comas a listas normalizadas (`Network`, `FileSystem`, `Database`).
+- Emplea el objetivo de la solicitud como fallback seguro para evitar excepciones `ValueError: Manifiesto inválido`.
+
 Los reinicios del host y el control arbitrario de Docker se realizan fuera del agente. Los marcadores LLM de Pixy (`DOCKER_CONTROL`, `INJECT_ENV`, `ADD_RULE`) ya no ejecutan mutaciones.
 
 No elimine archivos de ejecuciones activas. La retención automática de imágenes, workspaces y registros sigue pendiente; supervise el disco y defina cuotas y respaldos del host antes de un uso sostenido. Los montajes no implementan por sí solos una cuota de disco.
@@ -150,3 +172,4 @@ No elimine archivos de ejecuciones activas. La retención automática de imágen
 ## Validación antes de producción
 
 La suite local simula Docker, Telegram y modelos. En un entorno Linux de pruebas, antes de usar credenciales reales, compruebe: montajes y usuario efectivos; red deshabilitada; límites CPU/RAM/procesos; rechazo de secretos; timeout con eliminación; reinicio Core/proxy; recibos duplicados; aprobación GOD y cierre de AGENT. Confirme la cuota de disco y las reglas de salida de red del host.
+

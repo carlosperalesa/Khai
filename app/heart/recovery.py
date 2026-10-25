@@ -10,6 +10,7 @@ import time
 import uuid
 from app.common.database import connection, migrate
 from app.common.recovery import plan_hash, requires_approval, validate_plan, validate_case_id
+from app.common.tracing import parse_log_errors, BOOT_TIME
 
 ACTIVE = ('AUTHORIZED', 'HAND_CREATING', 'HAND_EXECUTING', 'VERIFYING')
 TERMINAL = {'RECOVERED', 'FAILED', 'DENIED', 'UNKNOWN', 'DIAGNOSED'}
@@ -166,9 +167,16 @@ class Recovery:
         if core.get('oom_killed'):
             add('core_oom_history', 'warning', 'El último cierre del Core fue por falta de memoria (OOMKilled).')
         text = (evidence.get('core_logs') or {}).get('text', '')
-        errors = [line for line in text.splitlines() if LOG_ERRORS.search(line)]
-        if len(errors) >= 5:
-            add('core_error_burst', 'warning', f'{len(errors)} errores recientes en core_logs. Último: {errors[-1][-300:]}')
+        boot_epoch = evidence.get('boot_time') if 'boot_time' in evidence else BOOT_TIME
+        parsed = parse_log_errors(text, boot_time=boot_epoch)
+        active_errors = [e for e in parsed if e['is_active']]
+        raw_errors = [line for line in text.splitlines() if LOG_ERRORS.search(line)]
+        
+        # Considerar ráfaga si hay 5 o más errores activos en la sesión actual
+        count = len(active_errors) if parsed else len(raw_errors)
+        if count >= 5:
+            last_msg = active_errors[-1]['summary'] if active_errors else (raw_errors[-1][-300:] if raw_errors else '')
+            add('core_error_burst', 'warning', f'{count} errores recientes en core_logs. Último: {last_msg}')
         status = 'critical' if any(f['severity'] == 'critical' for f in findings) else \
                  'degraded' if findings else 'ok'
         return {'status': status, 'findings': findings}

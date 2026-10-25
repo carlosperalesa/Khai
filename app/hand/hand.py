@@ -273,8 +273,16 @@ class Hand:
             if self.tree_hash(draft) != v['artifact_hash']:
                 raise ValueError('Draft changed after review')
             audit = self.pixy.audit_artifact(draft,json.loads(v['manifest']),v['artifact_hash'])
-            if not audit['safe'] or (audit.get('requires_approval') and not user_approved):
-                raise PermissionError(audit.get('reason','Approval required'))
+            if not audit['safe']:
+                raise PermissionError(audit.get('reason','Artifact not safe'))
+            if audit.get('requires_approval') and not user_approved:
+                from app.common.tracing import get_trace_id
+                trace = correlation_id or get_trace_id()
+                if trace and hasattr(self.pixy, 'check_authorization') and self.pixy.check_authorization(trace):
+                    self.pixy.consume_authorization(trace, consumer='hand:' + vid)
+                    user_approved = True
+                else:
+                    raise PermissionError(audit.get('reason','Approval required'))
             current = self.active(name)
             if active.exists() and not current:
                 raise ValueError('Unregistered active directory')

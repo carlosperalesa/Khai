@@ -7,12 +7,12 @@ import hashlib
 import json
 import re
 
-TARGETS = {'core': 'khai_core', 'proxy': 'khai_docker_proxy'}
+TARGETS = {'core': 'khai_core', 'proxy': 'khai_docker_proxy', 'hand': 'khai_hand', 'skill': 'khai_skill'}
 ACTIONS = {
     'restart_container': {'capability': 'DockerRestart', 'mutating': True},
     'health_check': {'capability': 'HealthCheck', 'mutating': False},
 }
-CASE_ID = re.compile(r'case-[a-z0-9]{6,32}')
+CASE_ID = re.compile(r'(case|req|tr|trace|task)-[a-zA-Z0-9_-]{6,64}')
 ACTION_ID = re.compile(r'rec_[a-f0-9]{32}')
 FINAL_STEP = {'completed', 'failed', 'unknown'}
 

@@ -55,6 +55,16 @@ class PixyMind:
                                              'audio/mpeg','video/mp4','application/json','text/csv'})
         return self._audit('publication',{'safe':safe,'reason':'' if safe else 'Publication denied'},metadata.get('hash',''))
 
+    def check_authorization(self, trace_id, capability=None, target=None):
+        if not self.authorizations or not trace_id:
+            return False
+        return self.authorizations.verify_by_trace(trace_id, capability, target) is not None
+
+    def consume_authorization(self, trace_id, capability=None, consumer='hand'):
+        if not self.authorizations or not trace_id:
+            return None
+        return self.authorizations.consume_by_trace(trace_id, capability, consumer)
+
     def _analyze_code_ast(self, code, manifest=None):
         try:
             rules = yaml.safe_load(Path(__file__).with_name('default_rules.yaml').read_text(encoding='utf-8'))
@@ -163,14 +173,25 @@ class PixyMind:
             if plan and plan.get('requires_approval') and self.authorizations:
                 auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'], case['plan_hash'], requested_by=source)
                 self.manager.heart.recovery.await_approval(case['case_id'], auth)
-            prompt = (
-                f"Explica este diagnóstico de Heart como Pixy, supervisora técnica de Khai.\n"
-                f"Caso: {case['case_id']}\n"
-                f"Diagnóstico: {json.dumps(case.get('diagnosis'), ensure_ascii=False)}\n"
-                f"Plan: {json.dumps(plan, ensure_ascii=False) if plan else 'Sin plan de recuperación automatizado'}\n"
-                "Indica evidencia, causa probable y la propuesta estructurada de Heart (objetivo, alcance, riesgo e impacto). "
-                "No inventes datos ni afirmes haber modificado nada. "
-            )
+            if plan:
+                prompt = (
+                    f"Explica este diagnóstico de Heart como Pixy, supervisora técnica de Khai.\n"
+                    f"Caso: {case['case_id']}\n"
+                    f"Diagnóstico: {json.dumps(case.get('diagnosis'), ensure_ascii=False)}\n"
+                    f"Plan: {json.dumps(plan, ensure_ascii=False)}\n"
+                    "Indica evidencia, causa probable y la propuesta estructurada de Heart (objetivo, alcance, riesgo e impacto). "
+                    "No inventes datos ni afirmes haber modificado nada. "
+                )
+            else:
+                prompt = (
+                    f"Explica este diagnóstico de Heart como Pixy, supervisora técnica de Khai.\n"
+                    f"Caso: {case['case_id']}\n"
+                    f"Diagnóstico: {json.dumps(case.get('diagnosis'), ensure_ascii=False)}\n"
+                    "No hay un plan automático de infraestructura (Docker) porque el incidente no corresponde a un contenedor caído. "
+                    "Indica la evidencia encontrada, la causa probable del error y los pasos concretos que el usuario puede realizar para solucionarlo "
+                    "(ej: reintentar la tarea con /tasks o /make, verificar parámetros o consultar logs específicos). "
+                    "Sé concisa, técnica y directa sin sermones."
+                )
             if auth:
                 prompt += 'Termina exactamente con: apruebas: y/n'
             raw = self.llm.generate_content(prompt, response_format=None)

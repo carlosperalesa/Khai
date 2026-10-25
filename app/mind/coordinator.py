@@ -11,8 +11,61 @@ from app.pixy.budget import current_budget
 from app.pixy.control import ControlStore, InstanceLock, BudgetExceeded, TERMINAL
 from app.voice.runtime.contract import digest, manifest_from_request, proxy_url, proxy_headers, verify_result, skill_metadata
 from app.dreams.legacy_learning import LearningLedger
+from app.common.tracing import trace_scope, get_trace_id, new_trace_id
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_manifest(raw, default_purpose):
+    """Limpia y valida el manifiesto tolerando markdown, JSON anidado y listas de capacidades en string."""
+    data = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = [l for l in text.splitlines() if not l.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+        try:
+            data = json.loads(text)
+        except Exception:
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(text[start:end + 1])
+                except Exception:
+                    data = {}
+            else:
+                data = {}
+
+    if not isinstance(data, dict):
+        data = {}
+
+    for key in ('manifest', 'data', 'result', 'response'):
+        if isinstance(data.get(key), dict):
+            data = data[key]
+            break
+
+    purpose = data.get('purpose')
+    if not isinstance(purpose, str) or not purpose.strip():
+        purpose = str(default_purpose or 'Objetivo no especificado').strip()
+
+    caps = data.get('capabilities')
+    if isinstance(caps, str):
+        caps = [c.strip() for c in caps.split(',') if c.strip()]
+    elif isinstance(caps, list):
+        caps = [str(c).strip() for c in caps if str(c).strip()]
+    else:
+        caps = []
+
+    allowed = {'Network', 'FileSystem', 'Database'}
+    caps = [c for c in caps if c in allowed]
+
+    lower_purpose = purpose.lower()
+    if not caps and any(kw in lower_purpose for kw in ('clima', 'tiempo', 'api', 'http', 'web', 'descargar', 'buscar', 'url')):
+        caps = ['Network']
+
+    return {'purpose': purpose, 'capabilities': caps}
+
 
 
 from app.voice.runtime.docker_runtime import DockerRuntime as ProxyClient
@@ -35,8 +88,9 @@ class Coordinator:
         except Exception:
             logger.warning('No se pudo notificar; el estado durable permanece disponible')
 
-    def intake(self, source, text):
-        return self.store.create(source, text)
+    def intake(self, source, text, trace_id=None):
+        tid = trace_id or get_trace_id() or new_trace_id()
+        return self.store.create(source, text, trace_id=tid)
 
     def cancel(self, task_id, source):
         def apply(task):
@@ -151,6 +205,12 @@ class Coordinator:
 
     def advance(self, task):
         tid, state = task['id'], task['state']
+        trace = task.get('trace_id') or tid
+        with trace_scope(trace):
+            self._advance_scoped(task)
+
+    def _advance_scoped(self, task):
+        tid, state = task['id'], task['state']
         if self.store.get(tid)['state'] != state:
             return
         if state == 'ROUTING':
@@ -166,13 +226,18 @@ class Coordinator:
                 goal = intent.get('extracted_goal') or request
                 manifest = manifest_from_request(goal)
                 if not manifest:
-                    manifest = json.loads(self.manager.llm.generate_content(
-                        'Devuelve JSON con purpose (objetivo concreto) y capabilities '
-                        '(lista de Network, FileSystem, Database segÃºn necesidad). '
-                        'Esto declara intenciÃ³n, no autoriza permisos. Solicitud: ' + request,
-                        response_format={'type': 'json_object'}))
-                if not isinstance(manifest.get('purpose'), str) or not isinstance(manifest.get('capabilities'), list):
-                    raise ValueError('Manifiesto invÃ¡lido')
+                    try:
+                        raw = self.manager.llm.generate_content(
+                            'Devuelve JSON con purpose (objetivo concreto) y capabilities '
+                            '(lista de Network, FileSystem, Database según necesidad). '
+                            'Esto declara intención, no autoriza permisos. Solicitud: ' + request,
+                            response_format={'type': 'json_object'})
+                    except Exception as exc:
+                        logger.warning('Fallo generando contenido para manifiesto con LLM: %s', exc)
+                        raw = {}
+                    manifest = normalize_manifest(raw, default_purpose=goal)
+                else:
+                    manifest = normalize_manifest(manifest, default_purpose=goal)
                 if hasattr(self.manager, 'hand') and not self.manager.pixy.preflight(manifest)['safe']:
                     raise PermissionError('Pixy rejected the objective')
                 context = manifest['purpose'][:160]
