@@ -15,27 +15,30 @@ despliegue y no deben usarse para código nuevo.
 
 - Un `update_id` de Telegram crea como máximo un objetivo durable. Se comprueban el secreto del webhook y la identidad del usuario, también para callbacks.
 - Cada objetivo conserva su presupuesto: 4 generaciones, 4 ejecuciones, 16 intentos de proveedor y 30 minutos de plazo por defecto. Los reintentos y las hipótesis alternativas comparten esos límites.
-- SkillForge genera código; Pixy lo revisa; Coordinator decide las transiciones; Docker Proxy administra contenedores identificados por `execution_id`.
+- Si no existe una habilidad previa para una petición en lenguaje natural, Coordinator consulta al usuario antes de crearla (`WAITING_CREATION_APPROVAL`).
+- Hand genera y versiona código; Pixy lo revisa; Coordinator decide las transiciones; Docker Proxy administra contenedores identificados por `execution_id`.
+- Se declaran hitos de progreso explícitos en cada fase sin emplear emoticones ni emojis.
 - La revisión y la aprobación se vinculan al SHA256 del archivo. Cambiar el código invalida la autorización; Pixy no reescribe un artefacto después de revisarlo.
 - Cada habilidad dispone de un workspace propio. No recibe la base de datos, los módulos, los secretos ni el socket Docker del Core.
 - Salir con código `0` significa que el proceso terminó. El objetivo permanece `UNVERIFIED` hasta comprobar un archivo con un SHA256 esperado por el usuario, o recibir una verificación explícita del usuario.
 - Lanzar un servicio AGENT produce `started`, no éxito verificado. Su proceso se supervisa hasta el plazo del objetivo.
-- Solo observaciones verificadas alimentan el aprendizaje. Los recibos se deduplican por ejecución; las reglas nuevas pasan por estado `proposed` y aprobación explícita.
-- Khai mantiene una personalidad cercana y aprende preferencias explícitas sin convertir conversaciones aisladas o resultados no verificados en memoria permanente.
-- Pixy tiene una voz juguetona, pero sus facultades siguen limitadas a revisar, informar, solicitar aprobación y cancelar según las reglas del sistema.
+- Dreams aprende exclusivamente por detonadores (event-driven: éxito verificado o fallo de proceso); las reglas nuevas pasan por estado `proposed` y aprobación explícita.
+- Heart actúa como el médico exclusivo del sistema: diagnostica anomalías con Senses y ejecuta planes de remediación auditados mediante Hand.
+- Pixy actúa como auditora determinista y canal de supervisión (`/p`), delegando cualquier remediación a Heart.
 
 ## Componentes
 
 | Componente | Responsabilidad |
 | --- | --- |
-| Orquestador | Autenticar Telegram y persistir entradas; ofrecer comandos explícitos. |
-| Coordinator / ControlStore | Presupuesto, estados, aprobaciones, recuperación y cancelación. |
-| Mind | Clasificar intenciones y proponer causas; no despachar contenedores. |
-| SkillForge | Generar scripts y guardar artefactos identificados por hash. |
-| Pixy | Filtro AST y revisión semántica; el sandbox aplica los límites efectivos. |
-| Docker Proxy / Engine | Preparar imágenes, ejecutar, supervisar y reconciliar contenedores. |
-| Dreams / Memory | Evidencia, métricas por contexto, propuestas de reglas y reversión. |
-| Heart / Senses | Diagnóstico basal y consultas de observabilidad acotadas. |
+| Orquestador / Voice | Autenticar Telegram (Webhook HTTPS 8443), persistir entradas y gestionar gateways. |
+| Coordinator / ControlStore | Presupuesto, estados, transiciones, aprobaciones y trazabilidad (`trace_id`). |
+| Mind | Clasificar intenciones y proponer hipótesis cognitivas. |
+| Hand | Artesano único: generar scripts, guardar snapshots SHA256, versionar y ejecutar remediaciones. |
+| Pixy | Auditora de seguridad, filtro AST y Ledger de autorizaciones duraderas. |
+| Docker Proxy / Engine | Preparar imágenes, ejecutar, supervisar y aislar contenedores. |
+| Dreams / Memory | Aprendizaje por detonador, métricas empíricas verificadas y propuestas de reglas. |
+| Heart | Médico del sistema: signos vitales basales y máquina de estados de recuperación. |
+| Senses | Observabilidad acotada de solo lectura (logs con epoch, estado de BD, contenedores). |
 
 ## Modos de ejecución
 

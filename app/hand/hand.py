@@ -1,4 +1,4 @@
-"""Skill lifecycle, immutable archives and recoverable activation."""
+import ast
 import hashlib
 import json
 import re
@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from app.common.database import connection, migrate
 from app.common.recovery import FINAL_STEP, canonical, plan_hash, validate_case_id, validate_plan
 from app.pixy.control import InstanceLock
+from app.voice.runtime.contract import digest, skill_metadata
 
 RECOVERY_STEP_TIMEOUT = 300
 
@@ -21,11 +22,11 @@ def sha(raw):
 
 
 class Hand:
-    def __init__(self, root, pixy, events=None, recovery_executor=None):
+    def __init__(self, root, pixy, events=None, recovery_executor=None, llm=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root/'hand.sqlite3'
-        self.pixy, self.events = pixy, events
+        self.pixy, self.events, self.llm = pixy, events, llm
         self.recovery_executor = recovery_executor
         self.recovery_root = self.root/'heart'
         self._mutex = threading.RLock()
@@ -97,6 +98,50 @@ class Hand:
                 yield
             finally:
                 lock.release()
+
+    def generate(self, task, guidelines, hypothesis=None):
+        if not self.llm:
+            raise RuntimeError('Hand requiere un proveedor LLM para generar código')
+        prompt = f'''Escribe Python autónomo para el objetivo: {task['request']}
+Devuelve SOLO un bloque de código Python. Primera línea: # MODE: SAFE (script corto),
+# MODE: AGENT (servicio) o # MODE: GOD (DynamicSkill derivada de BaseSkill).
+Segunda línea opcional: # PIP: paquete==version. No uses shell ni instrucciones Docker.
+El entorno está aislado en contenedor; no uses subprocess, ctypes, multiprocessing ni librerías de escape del sistema.
+Si el manifiesto declara la capacidad 'Network', puedes usar urllib.request, requests o httpx para consultar APIs públicas externas directamente.
+El script debe manejar posibles errores e imprimir el resultado claro y formateado en stdout, o escribir en /app/data/public.
+NO uses emoticones ni emojis en las salidas impresas ni en el código.
+Los servicios AGENT escuchan en 8080 dentro del contenedor; no se publican puertos.
+GOD permite la API BaseSkill desde modules.skill_forge; tampoco da permisos al host.
+No uses BaseSkill en SAFE. No inventes aprobaciones o resultados verificados.
+Manifiesto: {json.dumps(task.get('manifest', {}), ensure_ascii=False)}
+Reglas aplicables: {json.dumps(guidelines, ensure_ascii=False)}
+Hipótesis a probar: {hypothesis or ''}
+Resultado/rechazo anterior: {str(task.get('feedback', ''))[:8000]}
+Código anterior: {str(task.get('code', ''))[:24000]}
+'''
+        code = self.llm.generate_content(prompt)
+        if '```python' in code:
+            code = code.split('```python', 1)[1].split('```', 1)[0]
+        elif '```' in code:
+            code = code.split('```', 1)[1].split('```', 1)[0]
+        code = code.strip()
+        ast.parse(code)
+        mode, deps = skill_metadata(code)
+        return code, mode, deps
+
+    def snapshot(self, code):
+        root = self.root.parent / 'artifacts'
+        root.mkdir(parents=True, exist_ok=True)
+        raw = code.encode('utf-8')
+        sha_val = digest(raw)
+        path = root / (sha_val + '.py')
+        try:
+            with path.open('xb') as stream:
+                stream.write(raw)
+        except FileExistsError:
+            if digest(path.read_bytes()) != sha_val:
+                raise ValueError('Artefacto existente alterado')
+        return str(path.resolve()), sha_val
 
     def _name(self, name):
         if not isinstance(name,str) or not re.fullmatch('[a-z][a-z0-9-]{0,63}',name):

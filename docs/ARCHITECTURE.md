@@ -10,8 +10,8 @@ flowchart LR
     Ingress --> Store[(ControlStore / SQLite)]
     Store --> Coordinator
     Coordinator --> Mind
-    Coordinator --> SkillForge
-    SkillForge --> Artifact[Artefacto SHA256]
+    Coordinator --> Hand
+    Hand --> Artifact[Artefacto SHA256]
     Coordinator --> Pixy
     Pixy --> Review[Decisión vinculada al hash]
     Review --> Coordinator

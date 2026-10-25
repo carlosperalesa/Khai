@@ -312,15 +312,16 @@ class Coordinator:
                 rules = [r for r in self.manager.memory.get_guidelines_by_tags(tags) if r['id'] in eligible]
             hypothesis = self.manager.memory.get_hypothesis(task['hypothesis_id']) if task.get('hypothesis_id') else None
             try:
+                crafter = getattr(self.manager, 'hand', None) or self.manager.forge
                 if reusable:
                     code = reusable['code']
                     mode, deps = skill_metadata(code)
                 else:
-                    code, mode, deps = self.manager.forge.generate(task, rules, hypothesis)
+                    code, mode, deps = crafter.generate(task, rules, hypothesis)
             except (ValueError, SyntaxError) as exc:
                 self.store.update(tid, expected={'GENERATING'}, feedback=str(exc))
                 return
-            artifact, sha = self.manager.forge.snapshot(code)
+            artifact, sha = crafter.snapshot(code)
             if hasattr(self.manager, 'hand'):
                 existing = self.manager.hand.active(reusable['skill_name']) if reusable and reusable.get('skill_name') else None
                 if existing and existing['version_id'] == reusable.get('version_id'):

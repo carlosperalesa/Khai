@@ -47,9 +47,9 @@ class ModuleManager:
         self.mind = Mind(self.llm,self.memory)
         self.pixy = PixyMind(self)
         self.rules = Rules(self.data_dir/'pixy'/'rules.sqlite3')
-        self.hand = Hand(self.data_dir/'hand',self.pixy,self.events,recovery_executor=self.recovery_executor)
-        self.forge = SkillForge(self.llm,str(self.data_dir/'hand'))
-        self.forge.manager = self
+        self.hand = Hand(self.data_dir/'hand',self.pixy,self.events,recovery_executor=self.recovery_executor,llm=self.llm)
+        self.hand.manager = self
+        self.forge = self.hand
         self.gateway = ExternalGateway(Path(config_dir)/'gateways.yaml',self.secrets,self.events,self.data_dir/'voice'/'voice.sqlite3')
         choice = os.getenv('KHAI_RUNTIME','docker')
         if choice not in {'docker','local'}:
