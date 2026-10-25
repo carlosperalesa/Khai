@@ -106,7 +106,8 @@ class LLMManager:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
         
         generation_config = {"maxOutputTokens": 8192}
-        if kwargs.get("response_format", {}).get("type") == "json_object":
+        rf = kwargs.get("response_format")
+        if isinstance(rf, dict) and rf.get("type") == "json_object":
             generation_config["responseMimeType"] = "application/json"
             
         payload = {"contents": [{"parts": [{"text": prompt}]}]}

@@ -326,6 +326,16 @@ class ContractTests(Fixture):
             current_budget.reset(token)
         self.assertEqual(self.store.get(task['id'])['llm_calls'], 2)
 
+    def test_gemini_none_response_format(self):
+        llm = LLMManager('config', str(self.root/'llm'), self.memory)
+        with patch('requests.post') as mock_post:
+            mock_post.return_value.status_code = 200
+            mock_post.return_value.json.return_value = {
+                "candidates": [{"content": {"parts": [{"text": "respuesta directa"}]}}]
+            }
+            res = llm._generate_gemini("hola", "dummy_key", {"response_format": None})
+            self.assertEqual(res, "respuesta directa")
+
     def test_callback_identity_checked(self):
         with self.assertRaises(PermissionError):
             authenticated_message({'update_id':1, 'callback_query':{'from':{'id':'attacker'},'data':'/approve x y'}}, 'owner')
