@@ -196,7 +196,11 @@ async def webhook(request: Request):
         data = json.loads(body)
         manager = request.app.state.manager
         source, text = authenticated_message(data, manager.telegram.user_id)
-        reply = await asyncio.to_thread(command, manager, source, text)
+        try:
+            reply = await asyncio.to_thread(command, manager, source, text)
+        except Exception as exc:
+            logger.exception("Error procesando comando: %s", exc)
+            reply = f"Error al procesar mensaje: {str(exc)}"
         if reply is not None:
             await asyncio.to_thread(manager.coordinator.notify, reply)
         else:
@@ -206,6 +210,9 @@ async def webhook(request: Request):
         raise HTTPException(403, str(exc)) from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Error procesando webhook de Telegram: %s", exc)
+        return {'ok': True}
 
 
 if __name__ == '__main__':

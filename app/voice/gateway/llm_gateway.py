@@ -87,10 +87,11 @@ class LLMManager:
             if time.time() <= status.get(current_cred['id'], 0):
                 continue
             budget = current_budget.get()
-            if budget is None:
-                raise RuntimeError('Toda llamada LLM requiere un objetivo y presupuesto')
-            task = budget()
-            kwargs['_timeout'] = max(1, min(60, task['deadline'] - time.time()))
+            if budget is not None:
+                task = budget()
+                kwargs['_timeout'] = max(1, min(60, task['deadline'] - time.time()))
+            else:
+                kwargs['_timeout'] = min(60, kwargs.get('_timeout', 60))
             try:
                 generate = getattr(self, '_generate_' + current_cred['type'])
                 return generate(prompt, current_cred['key'], kwargs)
