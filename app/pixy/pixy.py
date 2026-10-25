@@ -142,14 +142,16 @@ class PixyMind:
                 self.pending_approval = None
                 return pending['resolve'](answer)
             return 'No hay una aprobación pendiente de Pixy.'
-        lowered = request.lower()
+        lowered = request.lower().strip()
+        if lowered in {'hola', 'buenas', 'buen dia', 'buenos dias', 'buenos días', 'buenas tardes', 'buenas noches', 'hey', 'que tal', 'qué tal'}:
+            return 'Hola Carlo, aquí Pixy. ¿Qué necesitas revisar del sistema?'
         if any(term in lowered for term in ('diagn', 'estado', 'error', 'log', 'salud', 'health', 'status', 'recuper')):
             return self.diagnose(request, source=source)
         raw = self.llm.generate_content(
-            'Responde como Pixy, supervisora técnica de Khai. Explica el problema con claridad, '
-            'separa evidencia de hipótesis y propone una solución concreta. No inventes acceso ni resultados. '
-            'Si una acción requiere autorización, termina exactamente con "apruebas: y/n".\n'
-            + request,
+            'Eres Pixy, supervisora técnica de Khai. Sé concisa, técnica y directa; ve al grano sin relleno, discursos ni sermones. '
+            'No inventes fallos, incidentes ni accesos que no existen. Si es una pregunta o consulta técnica, responde con precisión. '
+            'Nunca pidas confirmaciones como "apruebas: y/n" a menos que se haya formulado una propuesta de acción técnica real.\n\n'
+            f'Mensaje del usuario: {request}',
             response_format=None)
         return str(raw).strip()
 

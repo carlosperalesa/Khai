@@ -200,7 +200,11 @@ async def webhook(request: Request):
             reply = await asyncio.to_thread(command, manager, source, text)
         except Exception as exc:
             logger.exception("Error procesando comando: %s", exc)
-            reply = f"Error al procesar mensaje: {str(exc)}"
+            err_str = str(exc)
+            if "Unified Fallback" in err_str or "API keys" in err_str:
+                reply = "Servicio de IA no disponible temporalmente. Intenta en unos momentos."
+            else:
+                reply = "No se pudo procesar la solicitud en este momento."
         if reply is not None:
             await asyncio.to_thread(manager.coordinator.notify, reply)
         else:

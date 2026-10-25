@@ -68,6 +68,8 @@ class Mind:
             return {"action": "PS", "reply": ""}
         if msg_lower in ["limpiar", "/limpiar", "cleanup", "/cleanup"]:
             return {"action": "CLEANUP", "reply": ""}
+        if msg_lower in ["hola", "buenas", "buen dia", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "hey", "que tal", "qué tal"]:
+            return {"action": "GENERAL_CHAT", "reply": "Hola Carlo. ¿En qué trabajamos hoy?"}
             
         return None
         
@@ -116,6 +118,7 @@ REGLAS PARA EL JSON:
 - En 'failure_analysis_intent', OBLIGATORIAMENTE debes llenar 'possible_causes' con MÚLTIPLES hipótesis de la causa del fallo con diferentes niveles de confianza (ej. API caída 0.7, URL mal 0.2).
 - INVESTIGATE: Si decides investigar, debes proporcionar 'investigate_target' Y OBLIGATORIAMENTE 'investigate_reason' (¿qué buscas y por qué?).
 - MANIFEST RICO: Si la acción es ACTION_REQUIRED, 'extracted_goal' DEBE terminar con un bloque [MANIFEST] en formato JSON. IMPORTANTE: El campo 'purpose' del manifest DEBE SER MUY DETALLADO (ej. "Calculadora de divisas que consulta a una API externa REST"). No uses propósitos cortos o Pixy lo rechazará.
+- CONCISIÓN: Sé directo y conciso en 'reply' (máximo 1 o 2 oraciones). Cero relleno robótico, discursos o sermones.
 - ¡Devuelve el raw JSON válido directamente!
 """
         try:
