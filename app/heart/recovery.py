@@ -22,7 +22,7 @@ TRANSITIONS = {
     'DIAGNOSED': {'SOLUTION_PROPOSED'},
     'SOLUTION_PROPOSED': {'WAITING_USER_APPROVAL', 'AUTHORIZED', 'DENIED'},
     'WAITING_USER_APPROVAL': {'AUTHORIZED', 'DENIED'},
-    'AUTHORIZED': {'HAND_CREATING', 'FAILED', 'DENIED'},
+    'AUTHORIZED': {'HAND_CREATING', 'FAILED', 'DENIED', 'RECOVERED'},
     'HAND_CREATING': {'HAND_EXECUTING', 'FAILED'},
     'HAND_EXECUTING': {'VERIFYING', 'FAILED', 'UNKNOWN'},
     'VERIFYING': {'RECOVERED', 'FAILED', 'UNKNOWN'},
@@ -104,13 +104,13 @@ class Recovery:
         """Heart decides which telemetry resources to request from Senses based on the inquiry."""
         q = (question or '').lower()
         if any(term in q for term in ('memoria', 'ram', 'disco', 'disk', 'espacio')):
-            return ['storage', 'core_logs']
+            return ['storage', 'core_logs', 'pixy']
         if any(term in q for term in ('proxy', 'docker', 'contenedor', 'container')):
-            return ['container_state_proxy', 'container_state_core', 'core_logs']
+            return ['container_state_proxy', 'container_state_core', 'core_logs', 'pixy']
         if any(term in q for term in ('db', 'database', 'sqlite', 'tabla', 'integridad')):
-            return ['storage']
+            return ['storage', 'pixy']
         # Basal diagnostic profile determined by Heart
-        return ['storage', 'container_state_core', 'container_state_proxy', 'core_logs']
+        return ['storage', 'container_state_core', 'container_state_proxy', 'core_logs', 'pixy']
 
     # ------------------------------------------------------------- case intake
     def open_case(self, question, requested_by):
@@ -177,6 +177,18 @@ class Recovery:
         if count >= 5:
             last_msg = active_errors[-1]['summary'] if active_errors else (raw_errors[-1][-300:] if raw_errors else '')
             add('core_error_burst', 'warning', f'{count} errores recientes en core_logs. Último: {last_msg}')
+
+        # Observar fallos en tareas recientes (ControlStore vía Pixy)
+        pixy_data = evidence.get('pixy') or {}
+        tasks = pixy_data.get('recent_tasks') or evidence.get('tasks') or []
+        failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED'}]
+        if failed_tasks:
+            latest = failed_tasks[0]
+            err = latest.get('error') or latest.get('feedback') or 'Fallo no especificado'
+            add('task_failure', 'high',
+                f"La tarea {latest['id']} ('{latest.get('request', '')[:80]}') terminó con estado {latest['state']}: {str(err)[:300]}.",
+                remedy=f"retry_task:{latest['id']}")
+
         status = 'critical' if any(f['severity'] == 'critical' for f in findings) else \
                  'degraded' if findings else 'ok'
         return {'status': status, 'findings': findings}
@@ -190,6 +202,20 @@ class Recovery:
         remedies = [f for f in findings if f['remedy']]
         if not remedies:
             return None
+
+        # Si el fallo corresponde a una tarea detenida/agotada, formular plan de reactivación y remediación
+        task_remedy = next((f for f in remedies if f['remedy'].startswith('retry_task:')), None)
+        if task_remedy:
+            tid = task_remedy['remedy'].split(':', 1)[1]
+            steps = [{'action': 'retry_task', 'target': 'task'}]
+            plan = {'target': 'task', 'steps': steps, 'capabilities': ['TaskRemediate']}
+            validate_plan(plan)
+            plan.update(task_id=tid, reason=task_remedy['code'],
+                        summary=f'Restablecer y reintentar la tarea {tid} tras solventar el diagnóstico de fallo.',
+                        risk='low', impact=f'La tarea {tid} se reactivará y regenerará su código con las reglas y presupuesto actualizados.',
+                        reversible=True, requires_approval=requires_approval(plan))
+            return plan
+
         chosen = next((f for f in remedies if f['remedy'] == 'restart:proxy'), remedies[0])
         target = chosen['remedy'].split(':', 1)[1]
         steps = [{'action': 'restart_container', 'target': target}, {'action': 'health_check', 'target': target}]
@@ -265,6 +291,25 @@ class Recovery:
             except PermissionError as exc:
                 return self._move(case_id, 'DENIED', expected={'AUTHORIZED'},
                                   error='Pase a Hand denegado: autorización de Pixy no válida: ' + str(exc))
+            if case['plan']['target'] == 'task':
+                tid = case['plan'].get('task_id')
+                if not tid and case.get('diagnosis'):
+                    for f in case['diagnosis'].get('findings', []):
+                        if f.get('remedy', '').startswith('retry_task:'):
+                            tid = f['remedy'].split(':', 1)[1]
+                            break
+                coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
+                if tid and coord:
+                    try:
+                        coord.retry_task(tid)
+                        execution = {'status': 'completed', 'steps': [{'action': 'retry_task', 'target': 'task', 'status': 'completed'}]}
+                        return self._move(case_id, 'RECOVERED', expected={'AUTHORIZED'}, execution=execution,
+                                          verification={'task_restarted': True, 'task_id': tid})
+                    except Exception as exc:
+                        return self._move(case_id, 'FAILED', expected={'AUTHORIZED'}, error=f'Fallo al reintentar la tarea: {exc}')
+                else:
+                    return self._move(case_id, 'FAILED', expected={'AUTHORIZED'}, error='Coordinador o task_id no disponible para reactivar la tarea.')
+
             self._move(case_id, 'HAND_CREATING', expected={'AUTHORIZED'})
             state = 'HAND_CREATING'
         if state == 'HAND_CREATING':

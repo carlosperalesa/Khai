@@ -353,6 +353,102 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 # Verify skill created under data/hand/heart/<case_id>
                 self.assertTrue((root / 'hand' / 'heart' / case_id / 'app' / 'recovery.json').exists())
 
+    def test_task_failure_remediation_cycle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'data'
+            (root / 'memory').mkdir(parents=True)
+            (root / 'memory' / 'agent.md').write_text('Identity', encoding='utf-8')
+            with patch.dict(os.environ, {'KHAI_DB_PATH': str(root / 'openclaw.db'), 'KHAI_RUNTIME': 'local',
+                                         'TELEGRAM_BOT_TOKEN': 'token', 'TELEGRAM_USER_ID': 'owner'}):
+                from app.bootstrap import ModuleManager
+                from app.mind.coordinator import Coordinator
+                manager = ModuleManager(data_dir=str(root))
+                coordinator = Coordinator(manager)
+                manager.coordinator = coordinator
+                manager.heart.recovery.coordinator = coordinator
+                manager.llm.generate_content = Mock(return_value='Diagnóstico: fallo en tarea. apruebas: y/n')
+                manager.telegram = Mock()
+
+                # Create an EXHAUSTED task
+                task = coordinator.store.create('test_source', 'consultar clima manana',
+                                                state='EXHAUSTED', error='Presupuesto agotado: generations',
+                                                generations=4, manifest={'purpose': 'clima', 'capabilities': ['Network']})
+                tid = task['id']
+
+                # Mock Senses evidence returning the failed task in pixy observer
+                manager.senses.evidence = Mock(return_value={
+                    'storage': {'vitals': {'ram_percent': 30, 'disk_free': 20 * 1024**3}, 'integrity': {'status': 'ok'}},
+                    'container_core': {'running': True, 'started_at': 100},
+                    'container_proxy': {'running': True, 'status': 'running'},
+                    'core_logs': {'text': 'OK'},
+                    'pixy': {'recent_tasks': [coordinator.store.get(tid)]}
+                })
+
+                # Pixy receives user request for error diagnosis
+                pixy_reply = manager.pixy.direct_response('por que fallo la tarea?', source='telegram:201')
+                self.assertIn('apruebas: y/n', pixy_reply)
+
+                pending_auth = manager.pixy.authorizations.pending()
+                self.assertIsNotNone(pending_auth)
+                case_id = pending_auth['case_id']
+
+                # User approves remediation with 'y'
+                approval_reply = manager.pixy.direct_response('y', source='telegram:202')
+                self.assertIn('Autorización', approval_reply)
+
+                # Heart advances the case
+                manager.heart.recovery.tick()
+                case = manager.heart.recovery.get(case_id)
+                self.assertEqual(case['state'], 'RECOVERED')
+
+                # Verify task was retried and reset to GENERATING with generations=0
+                retried_task = coordinator.store.get(tid)
+                self.assertEqual(retried_task['state'], 'GENERATING')
+                self.assertEqual(retried_task['generations'], 0)
+                self.assertIsNone(retried_task['error'])
+
+    def test_skill_creation_approval_flow(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'data'
+            (root / 'memory').mkdir(parents=True)
+            (root / 'memory' / 'agent.md').write_text('Identity', encoding='utf-8')
+            with patch.dict(os.environ, {'KHAI_DB_PATH': str(root / 'openclaw.db'), 'KHAI_RUNTIME': 'local',
+                                         'TELEGRAM_BOT_TOKEN': 'token', 'TELEGRAM_USER_ID': 'owner'}):
+                from app.bootstrap import ModuleManager
+                from app.mind.coordinator import Coordinator
+                manager = ModuleManager(data_dir=str(root))
+                coordinator = Coordinator(manager)
+                manager.coordinator = coordinator
+                manager.telegram = Mock()
+
+                # Mock Mind deciding ACTION_REQUIRED
+                manager.mind.process_message = Mock(return_value={
+                    'action': 'ACTION_REQUIRED',
+                    'extracted_goal': 'Consultar pronóstico del clima mañana'
+                })
+                manager.llm.generate_content = Mock(return_value=json.dumps({
+                    'purpose': 'Consultar el clima de mañana',
+                    'capabilities': ['Network']
+                }))
+
+                # Intake a user message
+                task = coordinator.intake('tg:1', 'Khai que clima voy a tener?')
+                tid = task['id']
+
+                # First tick processes ROUTING -> WAITING_CREATION_APPROVAL
+                coordinator.tick()
+                current = coordinator.store.get(tid)
+                self.assertEqual(current['state'], 'WAITING_CREATION_APPROVAL')
+
+                # Verify notification asked for approval
+                notifications = [call.args[0] for call in manager.telegram.send_message.call_args_list]
+                self.assertTrue(any('No dispongo de una herramienta' in n and 'apruebas: y/n' in n for n in notifications))
+
+                # User approves via Pixy with 'y'
+                manager.pixy.direct_response('y', source='tg:2')
+                current = coordinator.store.get(tid)
+                self.assertEqual(current['state'], 'GENERATING')
+
 
 if __name__ == '__main__':
     unittest.main()

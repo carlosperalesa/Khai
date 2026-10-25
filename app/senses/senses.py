@@ -51,7 +51,7 @@ class Senses:
             raw = self.observe(resource_id,reason)
         except Exception as exc:
             return {'status':'unavailable','error':type(exc).__name__}
-        if isinstance(raw,str) and raw.startswith('❌'):
+        if isinstance(raw,str) and (raw.startswith('❌') or '[Error]' in raw[:40]):
             return {'status':'unavailable','error':raw[:500]}
         try:
             value = json.loads(raw)

@@ -96,9 +96,9 @@ class PixyMind:
                         return {'safe': False, 'reason': 'Referencia prohibida: ' + name}
             if imports & set(rules.get('banned_imports', [])):
                 return {'safe': False, 'reason': 'Import prohibido'}
-            if imports & {'requests','urllib','httpx','socket','aiohttp','http','ftplib','smtplib',
-                          'subprocess','ctypes','multiprocessing','importlib','builtins'}:
-                return {'safe': False, 'reason': 'Use Voice Gateway; direct network/process access is forbidden'}
+            process_escapes = {'subprocess', 'ctypes', 'multiprocessing', 'importlib', 'builtins', 'pty', 'shlex'}
+            if imports & process_escapes:
+                return {'safe': False, 'reason': 'Acceso directo a procesos o sistema prohibido'}
             if not manifest or not isinstance(manifest.get('purpose'), str) or not manifest['purpose'].strip():
                 return {'safe': False, 'reason': 'Manifiesto requerido'}
             for cap, spec in rules.get('capabilities', {}).items():
@@ -134,33 +134,59 @@ class PixyMind:
             return ('Pixy directa: puedo explicar errores, consultar el estado y pedir evidencia a Heart y Senses. '
                     'Para operaciones sensibles responderé `apruebas: y/n`.')
         if request.lower() in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
+            approve = request.lower() in {'y', 'yes', 'sí', 'si'}
             if self.authorizations:
                 pending = self.authorizations.pending()
                 if pending:
-                    approve = request.lower() in {'y', 'yes', 'sí', 'si'}
                     decided = self.authorizations.decide(pending['authorization_id'], approve, decided_by=source)
                     if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
                         self.manager.heart.recovery.receive_decision(pending['case_id'], decided)
                     if approve:
                         return (f"Autorización {decided['authorization_id']} emitida para {decided['case_id']}. "
                                 f"Objetivo: {decided['target']}, capacidades: {','.join(decided['capabilities'])}. "
-                                "Heart entregará la orden autorizada a Hand.")
+                                "Heart ejecutará la orden autorizada.")
                     return f"Propuesta rechazada. El caso {decided['case_id']} quedó DENIED sin modificaciones en el sistema."
             if self.pending_approval:
-                answer = request.lower() in {'y', 'yes', 'sí', 'si'}
                 pending = self.pending_approval
                 self.pending_approval = None
-                return pending['resolve'](answer)
-            return 'No hay una aprobación pendiente de Pixy.'
+                return pending['resolve'](approve)
+            c = getattr(self.manager, 'coordinator', None)
+            if c:
+                waiting = [t for t in c.store.all() if t.get('state') == 'WAITING_CREATION_APPROVAL']
+                if waiting:
+                    task = waiting[-1]
+                    if approve:
+                        c.store.update(task['id'], expected={'WAITING_CREATION_APPROVAL'}, state='GENERATING')
+                        c.notify(f"Aprobado. Iniciando creación de la skill mediante Hand para: {task['manifest']['purpose']}.")
+                        return f"Aprobado. Hand iniciará la creación de la skill para la tarea {task['id']}."
+                    else:
+                        c.store.update(task['id'], expected={'WAITING_CREATION_APPROVAL'}, state='CANCELLED')
+                        c.notify(f"Creación cancelada. El objetivo {task['id']} no se ejecutará.")
+                        return f"Creación cancelada. Tarea {task['id']} anulada."
+            return 'No hay una aprobación pendiente de Pixy ni creación pendiente.'
         lowered = request.lower().strip()
         if lowered in {'hola', 'buenas', 'buen dia', 'buenos dias', 'buenos días', 'buenas tardes', 'buenas noches', 'hey', 'que tal', 'qué tal'}:
             return 'Hola Carlo, aquí Pixy. ¿Qué necesitas revisar del sistema?'
-        if any(term in lowered for term in ('diagn', 'estado', 'error', 'log', 'salud', 'health', 'status', 'recuper')):
+        if any(term in lowered for term in ('diagn', 'estado', 'error', 'log', 'salud', 'health', 'status', 'recuper', 'fallo', 'falló', 'tarea', 'task')):
             return self.diagnose(request, source=source)
+
+        recent_tasks = []
+        c = getattr(self.manager, 'coordinator', None)
+        if c:
+            recent_tasks = c.store.all()[-5:]
+        tasks_summary = "\n".join(
+            f"- {t['id']}: estado={t['state']}, solicitud=\"{t.get('request', '')[:80]}\", error={t.get('error') or t.get('feedback') or 'ninguno'}"
+            for t in reversed(recent_tasks)
+        ) if recent_tasks else "No hay tareas recientes registradas."
+
         raw = self.llm.generate_content(
-            'Eres Pixy, supervisora técnica de Khai. Sé concisa, técnica y directa; ve al grano sin relleno, discursos ni sermones. '
-            'No inventes fallos, incidentes ni accesos que no existen. Si es una pregunta o consulta técnica, responde con precisión. '
-            'Nunca pidas confirmaciones como "apruebas: y/n" a menos que se haya formulado una propuesta de acción técnica real.\n\n'
+            'Eres Pixy, supervisora técnica y observadora de Khai. Sé concisa, técnica y directa; ve al grano sin relleno, discursos ni sermones. '
+            'PROHIBIDO EL USO DE EMOTICONES O EMOJIS: nunca uses emoticones ni emojis en tus respuestas. '
+            'No inventes fallos ni accesos inexistentes. '
+            'Pixy no remedia ni modifica tareas directamente; Heart es el único encargado del diagnóstico médico y la remediación del sistema. '
+            'Si el usuario pregunta por un fallo o problema técnico, indica la evidencia y sugiere el diagnóstico de Heart. '
+            'Nunca pidas confirmaciones como "apruebas: y/n" a menos que Heart haya formulado una propuesta de acción técnica real.\n\n'
+            f'Estado de tareas recientes:\n{tasks_summary}\n\n'
             f'Mensaje del usuario: {request}',
             response_format=None)
         return str(raw).strip()
@@ -180,7 +206,7 @@ class PixyMind:
                     f"Diagnóstico: {json.dumps(case.get('diagnosis'), ensure_ascii=False)}\n"
                     f"Plan: {json.dumps(plan, ensure_ascii=False)}\n"
                     "Indica evidencia, causa probable y la propuesta estructurada de Heart (objetivo, alcance, riesgo e impacto). "
-                    "No inventes datos ni afirmes haber modificado nada. "
+                    "No inventes datos ni afirmes haber modificado nada. PROHIBIDO EL USO DE EMOTICONES O EMOJIS. "
                 )
             else:
                 prompt = (
@@ -190,7 +216,7 @@ class PixyMind:
                     "No hay un plan automático de infraestructura (Docker) porque el incidente no corresponde a un contenedor caído. "
                     "Indica la evidencia encontrada, la causa probable del error y los pasos concretos que el usuario puede realizar para solucionarlo "
                     "(ej: reintentar la tarea con /tasks o /make, verificar parámetros o consultar logs específicos). "
-                    "Sé concisa, técnica y directa sin sermones."
+                    "Sé concisa, técnica y directa sin sermones ni emoticones. PROHIBIDO EL USO DE EMOTICONES O EMOJIS."
                 )
             if auth:
                 prompt += 'Termina exactamente con: apruebas: y/n'

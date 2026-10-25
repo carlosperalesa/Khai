@@ -37,6 +37,8 @@ async def lifespan(app):
         manager = ModuleManager(config_dir='config', data_dir=os.getenv('DATA_DIR', 'data'))
         manager.coordinator = Coordinator(manager)
         manager.coordinator.lock = owner_lock
+        if hasattr(manager, 'heart') and hasattr(manager.heart, 'recovery') and manager.heart.recovery:
+            manager.heart.recovery.coordinator = manager.coordinator
     except Exception:
         owner_lock.release()
         raise

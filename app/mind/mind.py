@@ -119,6 +119,7 @@ REGLAS PARA EL JSON:
 - INVESTIGATE: Si decides investigar, debes proporcionar 'investigate_target' Y OBLIGATORIAMENTE 'investigate_reason' (¿qué buscas y por qué?).
 - MANIFEST RICO: Si la acción es ACTION_REQUIRED, 'extracted_goal' DEBE terminar con un bloque [MANIFEST] en formato JSON. IMPORTANTE: El campo 'purpose' del manifest DEBE SER MUY DETALLADO (ej. "Calculadora de divisas que consulta a una API externa REST"). No uses propósitos cortos o Pixy lo rechazará.
 - CONCISIÓN: Sé directo y conciso en 'reply' (máximo 1 o 2 oraciones). Cero relleno robótico, discursos o sermones.
+- PROHIBIDO EL USO DE EMOTICONES O EMOJIS: Nunca uses emoticones ni emojis en 'reply' ni en ninguna parte del JSON.
 - ¡Devuelve el raw JSON válido directamente!
 """
         try:
@@ -144,7 +145,7 @@ REGLAS PARA EL JSON:
                 self.memory.append_long_term("khai_chat", intent.reply)
                 
             if not intent:
-                return {"action": "GENERAL_CHAT", "reply": "❌ Error interno: Falló la selección de intent."}
+                return {"action": "GENERAL_CHAT", "reply": "Error interno: Falló la selección de intent."}
             
             # Formatear el dict clásico
             out_dict = {
@@ -174,7 +175,7 @@ REGLAS PARA EL JSON:
             return {"action": "GENERAL_CHAT", "reply": "No pude interpretar la respuesta del proveedor. Reformularé la solicitud antes de fallar."}
         except Exception as e:
             logger.error("Error procesando mensaje en Mind: %s", e)
-            return {"action": "GENERAL_CHAT", "reply": f"❌ Error de IA: {str(e)}"}
+            return {"action": "GENERAL_CHAT", "reply": f"Error de IA: {str(e)}"}
 
     @staticmethod
     def _validate_response(raw: str) -> MindResponse:

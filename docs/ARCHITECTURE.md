@@ -59,24 +59,35 @@ Los modelos de tareas se guardan como documentos JSON en SQLite. Las transicione
 
 | Estado | Interpretación y siguiente paso |
 | --- | --- |
-| `ROUTING` | Interpretar la entrada y construir su manifiesto. |
-| `GENERATING` | Generar o reutilizar código verificado para la misma solicitud. |
-| `REVIEWING` | Revisar AST y congruencia semántica. |
-| `WAITING_APPROVAL` | Esperar un token humano asociado al hash y al plazo. |
-| `READY` | Autorización válida; preparar el siguiente intento. |
+| `ROUTING` | Interpretar la entrada y construir su manifiesto. Si no existe skill previa, transiciona a `WAITING_CREATION_APPROVAL`. |
+| `WAITING_CREATION_APPROVAL` | Preguntar al usuario si autoriza la creación de una nueva skill (`apruebas: y/n`). |
+| `GENERATING` | Hand genera o reutiliza código verificado para la misma solicitud, declarando hitos paso a paso. |
+| `REVIEWING` | Pixy revisa AST y congruencia semántica. |
+| `WAITING_APPROVAL` | Esperar un token humano asociado al hash y al plazo para ejecución sensible. |
+| `READY` | Autorización válida; preparar el siguiente intento en entorno controlado. |
 | `SUBMITTED` | Intento persistido; enviar o repetir el mismo envío idempotente. |
 | `RUNNING` | Consultar su recibo; no lanzar un segundo intento. |
 | `UNVERIFIED` | Proceso terminado o servicio iniciado sin criterio verificado. |
-| `VERIFYING` | Registrar una observación verificada, una sola vez por ejecución. |
+| `VERIFYING` | Registrar una observación verificada y entregar el resultado obtenido al usuario. |
 | `DIAGNOSING` | Elegir una hipótesis alternativa bajo el presupuesto original. |
 | `CANCELLING` | Cancelación solicitada; falta confirmar el resultado del proxy. |
-| `COMPLETED` | Interacción terminada o resultado de habilidad verificado. |
+| `COMPLETED` | Interacción terminada o resultado de habilidad verificado y entregado. |
 | `FAILED` | Fallo terminal sin hipótesis alternativas disponibles. |
-| `EXHAUSTED` | Límite de intentos, plazo o aprobación vencida. |
+| `EXHAUSTED` | Límite de intentos o presupuesto agotado; caso diagnosticable y remediable por Heart. |
 | `CANCELLED` | Cancelación confirmada o denegación antes de ejecutar. |
 | `UNKNOWN` | No hay evidencia suficiente para repetir con seguridad. |
 
 Una conversación ordinaria también termina en `COMPLETED`, pero no posee un recibo verificado ni alimenta las métricas de habilidades.
+
+## Hitos de Progreso y Filosofía Libre de Emoticones
+
+Khai y Pixy declaran explícitamente sus hitos en lenguaje técnico y sobrio, sin emoticones ni emojis:
+1. Consulta de autorización antes de crear herramientas (`WAITING_CREATION_APPROVAL`).
+2. Inicio de generación de skill por parte de Hand.
+3. Auditoría de seguridad del código por parte de Pixy.
+4. Ejecución en contenedor aislado.
+5. Verificación de evidencia y entrega del resultado real al usuario.
+6. En caso de error, delegación formal a Heart para diagnóstico médico y remediación estructurada (`retry_task`).
 
 ## Protocolo Core → Proxy
 

@@ -147,16 +147,20 @@ class HandTests(ArchitectureFixture):
 
 
 class PolicyTests(ArchitectureFixture):
-    def test_network_import_denied_even_when_declared(self):
-        for module in ('requests','socket','httpx','urllib.request','ctypes'):
-            result = self.pixy._analyze_code_ast('# MODE: SAFE\nimport '+module,
-                {'purpose':'fetch','capabilities':['Network']})
-            self.assertFalse(result['safe'])
+    def test_network_import_allowed_only_when_declared(self):
+        for module in ('requests', 'socket', 'httpx', 'urllib.request'):
+            result = self.pixy._analyze_code_ast('# MODE: SAFE\nimport ' + module,
+                {'purpose': 'fetch data', 'capabilities': ['Network']})
+            self.assertTrue(result['safe'], f"Expected {module} to be safe when Network declared, got {result}")
+            result_no_cap = self.pixy._analyze_code_ast('# MODE: SAFE\nimport ' + module,
+                {'purpose': 'fetch data', 'capabilities': []})
+            self.assertFalse(result_no_cap['safe'])
 
-    def test_broker_api_is_allowed(self):
-        result = self.pixy._analyze_code_ast('# MODE: SAFE\nfrom khai_gateway import request',
-            {'purpose':'fetch','capabilities':['Network']})
-        self.assertTrue(result['safe'])
+    def test_process_escapes_always_denied(self):
+        for module in ('ctypes', 'subprocess', 'multiprocessing', 'pty'):
+            result = self.pixy._analyze_code_ast('# MODE: SAFE\nimport ' + module,
+                {'purpose': 'escape', 'capabilities': ['Network', 'FileSystem']})
+            self.assertFalse(result['safe'])
 
     def test_rules_need_explicit_owner_and_keep_history(self):
         rules = Rules(self.root/'rules.sqlite3')

@@ -26,18 +26,13 @@ banned_qualified_calls:
 banned_imports:
   - "pty"
   - "shlex"
-  - "requests"
-  - "urllib"
-  - "httpx"
-  - "socket"
-  - "aiohttp"
   - "subprocess"
   - "ctypes"
   - "multiprocessing"
   - "importlib"
 
 # Structural rules cannot be relaxed by advisory user guidance.
-network_access: voice_only
+network_access: manifest_capabilities_only
 secrets_access: voice_only
 artifact_integrity: required
 
@@ -60,8 +55,6 @@ capabilities:
       - "os"
       - "shutil"
       - "pathlib"
-      - "csv"
-      - "json"
   "Database":
     allowed_modules:
       - "sqlite3"

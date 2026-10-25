@@ -105,6 +105,19 @@ class Coordinator:
                 pass  # Durable cancellation is retried by tick.
         return task
 
+    def retry_task(self, task_id):
+        def apply(task):
+            task['state'] = 'GENERATING'
+            task['generations'] = 0
+            task['executions'] = 0
+            task['llm_calls'] = 0
+            task['error'] = None
+            task['feedback'] = None
+            task['deadline'] = time.time() + 1800
+        retried = self.store.mutate(task_id, apply)
+        self.notify(f"Tarea {task_id} reiniciada por orden de Heart con presupuesto renovado. Iniciando generación...")
+        return retried
+
     def approval(self, task_id, token, approve, source):
         def apply(task):
             pending = task.get('approval', {})
@@ -167,7 +180,11 @@ class Coordinator:
                 continue
             if task['state'] == 'WAITING_APPROVAL' and time.time() < task['deadline']:
                 if time.time() > task['approval']['expires']:
-                    self.store.update(task['id'], expected={'WAITING_APPROVAL'}, state='EXHAUSTED', error='AprobaciÃ³n vencida')
+                    self.store.update(task['id'], expected={'WAITING_APPROVAL'}, state='EXHAUSTED', error='Aprobación vencida')
+                continue
+            if task['state'] == 'WAITING_CREATION_APPROVAL':
+                if time.time() >= task['deadline']:
+                    self.store.update(task['id'], expected={'WAITING_CREATION_APPROVAL'}, state='EXHAUSTED', error='Aprobación de creación vencida')
                 continue
             token = current_budget.set(lambda: self.store.consume(task['id'], 'llm_calls'))
             try:
@@ -180,7 +197,7 @@ class Coordinator:
                 self.advance(task)
             except BudgetExceeded as exc:
                 self.store.update(task['id'], state='EXHAUSTED', error=str(exc))
-                self.notify(f"{task['id']}: presupuesto agotado. No se crean tareas sucesoras.")
+                self.notify(f"{task['id']}: Presupuesto agotado ({str(exc)}). Registrado para diagnóstico y remediación de Heart.")
             except (requests.RequestException, ConnectionError) as exc:
                 # Submission/poll uncertainty must retain the SAME execution ID.
                 self.store.event(task['id'], 'transport_error', {'type': type(exc).__name__})
@@ -243,11 +260,27 @@ class Coordinator:
                 context = manifest['purpose'][:160]
                 hypotheses = [h for h in self.manager.memory.get_active_hypotheses() if h['topic'] == context]
                 hypotheses.sort(key=lambda h: h['confidence'], reverse=True)
+
+                reusable = next((t for t in reversed(self.store.all())
+                                 if t['id'] != tid and t['state'] == 'COMPLETED' and t.get('verification', {}).get('success')
+                                 and t['request'] == goal and t.get('code')), None)
+                existing_skill = None
+                if hasattr(self.manager, 'hand') and reusable and reusable.get('skill_name'):
+                    existing_skill = self.manager.hand.active(reusable['skill_name'])
+
+                if not direct and not existing_skill:
+                    self.store.update(tid, expected={'ROUTING'}, state='WAITING_CREATION_APPROVAL', request=goal,
+                                      manifest=manifest, context=context,
+                                      hypothesis_id=hypotheses[0]['id'] if hypotheses else None,
+                                      alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
+                    self.notify(f"No dispongo de una herramienta para: {manifest['purpose']}. ¿Deseas que cree una nueva skill para esto? (apruebas: y/n)")
+                    return
+
                 self.store.update(tid, expected={'ROUTING'}, state='GENERATING', request=goal,
                                   manifest=manifest, context=context,
                                   hypothesis_id=hypotheses[0]['id'] if hypotheses else None,
                                   alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
-                self.notify(f"Objetivo registrado: {tid}. /tasks para consultar su estado.")
+                self.notify(f"Objetivo registrado: {tid}. Reutilizando skill existente...")
             elif action == 'INVESTIGATE':
                 output = self.manager.senses.observe(intent.get('investigate_target', 'core_logs'), intent.get('investigate_reason', 'Consulta'))
                 self.store.event(tid, 'observation', {'output': output})
@@ -263,8 +296,9 @@ class Coordinator:
                 self.notify(json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False))
             else:
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
-                self.notify(intent.get('reply') or 'No se ejecutÃ³ ninguna acciÃ³n.')
+                self.notify(intent.get('reply') or 'No se ejecutó ninguna acción.')
         elif state == 'GENERATING':
+            self.notify(f"Hand generando código para el objetivo: {task['manifest']['purpose']}...")
             self.store.consume(tid, 'generations')
             reusable = next((t for t in reversed(self.store.all())
                              if t['id'] != tid and t['state'] == 'COMPLETED' and t.get('verification', {}).get('success')
@@ -299,6 +333,7 @@ class Coordinator:
                             self.manager.hand.reject(prior['version_id'], 'Replaced after diagnosis')
                     version = self.manager.hand.create(name, code, task['manifest'], correlation_id=tid)
                 self.store.update(tid, skill_name=name, version_id=version['version_id'])
+            self.notify(f"Hand ha generado el código del artefacto. Pixy auditando seguridad...")
             self.store.update(tid, expected={'GENERATING'}, state='REVIEWING', code=code, artifact=artifact,
                               artifact_hash=sha, mode=mode, dependencies=deps, grants=[], authorized_hash=None,
                               guidelines=[r['id'] for r in rules])
@@ -306,14 +341,16 @@ class Coordinator:
             review = self.manager.pixy.review(task['code'], task['manifest'])
             self.store.event(tid, 'review', {'artifact_hash': task['artifact_hash'], 'decision': review})
             if not review['safe']:
+                self.notify(f"Pixy rechazó el código generado ({review.get('reason')}). Reintentando generación...")
                 self.store.update(tid, expected={'REVIEWING'}, state='GENERATING', feedback=review.get('reason', 'Rechazado'))
             elif task['mode'] != 'SAFE' or task.get('dependencies') or 'Network' in task['manifest'].get('capabilities', []) or review['requires_approval']:
                 self._wait_approval(task, review.get('reason', '') + '\nModo: ' + task['mode'] + '; capacidades: ' + ','.join(task['manifest'].get('capabilities', [])) + '; dependencias: ' + ','.join(task.get('dependencies', [])))
             else:
+                self.notify(f"Auditoría de Pixy aprobada. Preparando ejecución en entorno controlado...")
                 self.store.update(tid, expected={'REVIEWING'}, state='READY', authorized_hash=task['artifact_hash'])
         elif state == 'READY':
             if task.get('authorized_hash') != task['artifact_hash'] or digest(Path(task['artifact']).read_bytes()) != task['artifact_hash']:
-                raise ValueError('El artefacto no coincide con la revisiÃ³n/autorizaciÃ³n')
+                raise ValueError('El artefacto no coincide con la revisión/autorización')
             if hasattr(self.manager, 'hand'):
                 self.manager.hand.approve(task['version_id'], user_approved=bool(task.get('approval')), correlation_id=tid)
                 self.manager.hand.use(task['skill_name'], tid)
@@ -327,6 +364,7 @@ class Coordinator:
                            grants=task.get('grants', []), deadline=task['deadline'])
             if hasattr(self.manager,'hand'):
                 payload['skill_artifact_hash'] = self.manager.hand.version(task['version_id'])['artifact_hash']
+            self.notify(f"Ejecutando skill en entorno controlado...")
             self.store.update(tid, expected={'READY'}, state='SUBMITTED', execution_id=execution_id, payload=payload)
         elif state == 'SUBMITTED':
             result = self.proxy.submit(task['payload'])
@@ -343,12 +381,14 @@ class Coordinator:
                 self._wait_approval(task, 'La habilidad solicita: ' + str(result.get('approval')), result.get('approval'))
             elif status == 'unknown' or (status in {'failed', 'timeout', 'cancelled'} and (task['mode'] != 'SAFE' or task.get('payload', {}).get('network') or 'Network' in task.get('manifest',{}).get('capabilities',[]))):
                 self.store.update(tid, expected={'RUNNING'}, state='UNKNOWN', result=result)
-                self.notify(f"{tid}: resultado incierto o con posibles efectos parciales. No se reejecutarÃ¡ automÃ¡ticamente.")
+                self.notify(f"{tid}: resultado incierto o con posibles efectos parciales. No se reejecutará automáticamente.")
             elif status in {'failed', 'timeout', 'cancelled'} or result.get('returncode', 0) != 0:
                 if result.get('evidence_kind') == 'process_exit':
                     self.learning.record(task, False, result)
                 self.store.update(tid, expected={'RUNNING'}, state='DIAGNOSING', result=result, feedback=result)
                 self.store.event(tid, 'execution_failure', result)
+                err = (result.get('stderr') or '').strip() or result.get('status', 'error')
+                self.notify(f"{tid}: Error en la ejecución de la skill ({err[:300]}). Iniciando diagnóstico.")
             elif status in {'finished', 'started'}:
                 workspace = self.root / 'workspaces' / tid / task['artifact_hash']
                 success, evidence = verify_result(result, task.get('criterion'), workspace)
@@ -362,13 +402,15 @@ class Coordinator:
                                       verification={'success': success, 'evidence': evidence})
             else:
                 self.store.update(tid, expected={'RUNNING'}, state='UNKNOWN', result=result)
-                self.notify(f'{tid}: respuesta del ejecutor desconocida; requiere inspecciÃ³n.')
+                self.notify(f'{tid}: respuesta del ejecutor desconocida; requiere inspección.')
         elif state == 'VERIFYING':
             v = task['verification']
             self.learning.record(task, v['success'], v['evidence'])
             self.store.update(tid, expected={'VERIFYING'}, state='COMPLETED' if v['success'] else 'DIAGNOSING', feedback=v)
             if v['success']:
-                self.notify(f"{tid}: resultado verificado. Evidencia registrada para {task['execution_id']}.")
+                stdout = (task.get('result') or {}).get('stdout', '')
+                out_msg = f"\nResultado:\n{stdout.strip()[:2000]}" if stdout and stdout.strip() else ""
+                self.notify(f"{tid}: Ejecución completada con éxito. Evidencia verificada para {task['execution_id']}.{out_msg}")
         elif state == 'DIAGNOSING':
             alternatives = list(task.get('alternatives', []))
             if not task.get('diagnosed'):
@@ -384,7 +426,7 @@ class Coordinator:
                         initial_confidence=cause['confidence']))
             if not alternatives:
                 self.store.update(tid, expected={'DIAGNOSING'}, state='FAILED', diagnosed=True)
-                self.notify(f"{tid}: hipÃ³tesis agotadas. Se conserva la evidencia.")
+                self.notify(f"{tid}: hipótesis agotadas. Se conserva la evidencia.")
             else:
                 chosen = alternatives.pop(0)
                 self.store.update(tid, expected={'DIAGNOSING'}, state='GENERATING', diagnosed=True,
@@ -407,7 +449,7 @@ class Coordinator:
                     try:
                         await self.manager.heart._fast_beat_basal()
                     except Exception:
-                        logger.exception('FallÃ³ el diagnÃ³stico; el coordinador continÃºa')
+                        logger.exception('Falló el diagnóstico; el coordinador continúa')
                     last_health = time.monotonic()
                 await asyncio.sleep(1)
         finally:

@@ -76,6 +76,19 @@ class ModuleManager:
             return {'skill_network':'denied','worker_secrets':'absent','mutable_rules':'advisory_only'}
         if name=='webhook':
             return {'authentication':'owner ID and webhook secret','configured':len(os.getenv('TELEGRAM_WEBHOOK_SECRET',''))>=32}
+        if name=='pixy':
+            tasks = []
+            if hasattr(self, 'coordinator') and self.coordinator:
+                tasks = [dict(t) for t in self.coordinator.store.all()[-10:]]
+            elif self.state:
+                try:
+                    import json
+                    with connection(self.state.db_path) as conn:
+                        rows = conn.execute("SELECT id, source, document FROM control_tasks ORDER BY rowid DESC LIMIT 10").fetchall()
+                        tasks = [json.loads(r['document']) for r in rows]
+                except Exception:
+                    tasks = []
+            return {'recent_tasks': tasks}
         with connection(self.events.path) as conn:
             row = conn.execute('SELECT COUNT(*) events,MAX(created_at) last_event FROM events WHERE module=?',(name,)).fetchone()
         return dict(row)

@@ -32,15 +32,14 @@ class SkillForge:
         self.llm, self.data_dir = llm, Path(data_dir)
 
     def generate(self, task, guidelines, hypothesis=None):
-        prompt = f'''Escribe Python para el objetivo: {task['request']}
-Devuelve SOLO un bloque de código. Primera línea: # MODE: SAFE (script corto),
+        prompt = f'''Escribe Python autónomo para el objetivo: {task['request']}
+Devuelve SOLO un bloque de código Python. Primera línea: # MODE: SAFE (script corto),
 # MODE: AGENT (servicio) o # MODE: GOD (DynamicSkill derivada de BaseSkill).
-Segunda línea opcional: # PIP: paquete==version. No shell ni instrucciones Docker.
-El entorno NO tiene acceso al host, módulos del Core, SQLite, credenciales ni proxy.
-No uses requests, socket, urllib ni Internet directo. Para operaciones externas usa
-from khai_gateway import request; request(service, operation, params).
-Solo funcionan servicios y operaciones configurados en Voice; no inventes endpoints.
-Escribe salidas únicamente en /app/data/public (workspace privado de esta tarea).
+Segunda línea opcional: # PIP: paquete==version. No uses shell ni instrucciones Docker.
+El entorno está aislado en contenedor; no uses subprocess, ctypes, multiprocessing ni librerías de escape del sistema.
+Si el manifiesto declara la capacidad 'Network', puedes usar urllib.request, requests o httpx para consultar APIs públicas externas directamente.
+El script debe manejar posibles errores e imprimir el resultado claro y formateado en stdout, o escribir en /app/data/public.
+NO uses emoticones ni emojis en las salidas impresas ni en el código.
 Los servicios AGENT escuchan en 8080 dentro del contenedor; no se publican puertos.
 GOD permite la API BaseSkill desde modules.skill_forge; tampoco da permisos al host.
 No uses BaseSkill en SAFE. No inventes aprobaciones o resultados verificados.
