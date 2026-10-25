@@ -7,7 +7,7 @@ from app.common.migration import migrate_data
 from app.mind.identity import Identity
 from app.mind.memory import MemoryEngine
 from app.mind.state import StateManager
-from app.mind.mind import CoreMind
+from app.mind.mind import Mind
 from app.mind.brain import Brain
 from app.hand.forge import SkillForge
 from app.hand.hand import Hand
@@ -39,7 +39,7 @@ class ModuleManager:
         self.telegram = TelegramHandler(self.secrets.get('TELEGRAM_BOT_TOKEN'),self.secrets.get('TELEGRAM_USER_ID'))
         provider = LLMManager(config_dir,str(self.data_dir/'voice'),self.memory,self.secrets,self.data_dir/'voice'/'voice.sqlite3')
         self.llm = Brain(provider)
-        self.core_mind = CoreMind(self.llm,self.memory)
+        self.mind = Mind(self.llm,self.memory)
         self.pixy = PixyMind(self)
         self.rules = Rules(self.data_dir/'pixy'/'rules.sqlite3')
         self.hand = Hand(self.data_dir/'hand',self.pixy,self.events)
@@ -52,13 +52,13 @@ class ModuleManager:
         self.runtime = LocalRuntime(self.data_dir) if choice=='local' else DockerRuntime()
         self.assets = AssetGateway(self.data_dir.parent/'other',self.data_dir/'voice'/'voice.sqlite3',self.pixy,self.events,self.hand)
         self.dreams = Dreams(self.data_dir/'dreams'/'dreams.sqlite3',self.rules,self.events)
-        self.core_heart = Beat(self.data_dir,self.events)
+        self.heart = Beat(self.data_dir,self.events)
         adapters = {name:lambda name=name:self._domain_snapshot(name) for name in OBSERVERS}
-        self.core_eyes = Senses(self.data_dir/'senses'/'senses.sqlite3',adapters,CoreEyes(str(self.data_dir)))
+        self.senses = Senses(self.data_dir/'senses'/'senses.sqlite3',adapters,CoreEyes(str(self.data_dir)))
 
     def _domain_snapshot(self, name):
         if name in {'database','storage','heart'}:
-            return self.core_heart.run_diagnostic_fast()
+            return self.heart.run_diagnostic_fast()
         if name in {'runtime','docker'}:
             return {'implementation':type(self.runtime).__name__,'status':'configured'}
         if name=='network':

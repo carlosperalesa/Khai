@@ -17,6 +17,12 @@ class Beat:
     def run_diagnostic_fast(self):
         return {'vitals':self.vitals.sample(),'integrity':self.check_integrity()}
 
+    def document_diagnostic(self, report):
+        with connection(self.path) as conn:
+            conn.execute('INSERT INTO beats VALUES (?,?)',(time.time(),json.dumps(report, ensure_ascii=False)))
+        self.events.emit('heart','diagnostic',metadata={'status':report.get('status','unknown')})
+        return report
+
     async def _fast_beat_basal(self):
         report = self.run_diagnostic_fast()
         with connection(self.path) as conn:

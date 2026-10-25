@@ -458,10 +458,10 @@ class CoreHeart:
         return {"status": "ok"}
 
     def _check_modules_health(self) -> dict:
-        """Verifica que todos los módulos core se puedan importar."""
+        """Verifica que los módulos heredados y actuales se puedan importar."""
         required_modules = [
-            "modules.core_mind", "modules.skill_forge", "modules.pixy",
-            "modules.core_eyes", "modules.memory_engine", "modules.state_manager"
+            "app.mind.mind", "app.hand.forge", "app.pixy.pixy",
+            "app.voice.gateway.observation_gateway", "app.mind.memory", "app.mind.state"
         ]
         failed = []
         for mod_name in required_modules:

@@ -94,6 +94,21 @@ Para volver a la versión anterior: detenga ambos servicios nuevos, restaure la 
 
 ## Flujo de una tarea
 
+### Comandos de usuario
+
+`/help` y `/?` muestran la ayuda completa. `/pixy <mensaje>` y `/p <mensaje>`
+abren el canal directo con Pixy. Por ejemplo:
+
+```text
+/p diagnóstico
+/p explica el último error
+```
+
+Pixy consulta `Heart` para el estado y `Senses` para logs u otra evidencia
+observacional; el diagnóstico se documenta en Heart antes de responder. Si una
+acción requiere autorización, Pixy termina con `apruebas: y/n`; responde
+simplemente `y` o `n`.
+
 1. Envíe `/make objetivo` o una solicitud natural.
 2. Consulte `/tasks` para obtener el `task_id`.
 3. Si conoce un archivo esperado, registre antes de ejecutar `/expect TASK_ID ruta_relativa SHA256`. Si la ejecución ya empezó se rechaza el cambio del criterio.

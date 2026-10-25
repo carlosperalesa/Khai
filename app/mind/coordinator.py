@@ -151,7 +151,7 @@ class Coordinator:
                 request = request.split(' ', 1)[1]
                 intent = {'action': 'ACTION_REQUIRED', 'extracted_goal': request}
             else:
-                intent = self.manager.core_mind.process_message(request)
+                intent = self.manager.mind.process_message(request)
             action = intent.get('action')
             if action == 'ACTION_REQUIRED':
                 goal = intent.get('extracted_goal') or request
@@ -175,18 +175,18 @@ class Coordinator:
                                   alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
                 self.notify(f"Objetivo registrado: {tid}. /tasks para consultar su estado.")
             elif action == 'INVESTIGATE':
-                output = self.manager.core_eyes.observe(intent.get('investigate_target', 'core_logs'), intent.get('investigate_reason', 'Consulta'))
+                output = self.manager.senses.observe(intent.get('investigate_target', 'core_logs'), intent.get('investigate_reason', 'Consulta'))
                 self.store.event(tid, 'observation', {'output': output})
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
                 self.notify(output)
             elif action in {'PS', 'LOGS'}:
                 resource = 'running_containers' if action == 'PS' else intent.get('target', 'core_logs')
-                output = self.manager.core_eyes.observe(resource, 'Consulta explÃ­cita del usuario')
+                output = self.manager.senses.observe(resource, 'Consulta explícita del usuario')
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
                 self.notify(output)
             elif action in {'HEALTH_CHECK', 'FASTBEAT', 'SLOWBEAT', 'CLEANUP'}:
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
-                self.notify(json.dumps(self.manager.core_heart.check_integrity(), ensure_ascii=False))
+                self.notify(json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False))
             else:
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
                 self.notify(intent.get('reply') or 'No se ejecutÃ³ ninguna acciÃ³n.')
@@ -298,7 +298,7 @@ class Coordinator:
         elif state == 'DIAGNOSING':
             alternatives = list(task.get('alternatives', []))
             if not task.get('diagnosed'):
-                intent = self.manager.core_mind.process_message(
+                intent = self.manager.mind.process_message(
                     '[SYSTEM_EVENT] Analiza el fallo sin ejecutar acciones. Objetivo: ' + task['request']
                     + '\nEvidencia: ' + json.dumps(task.get('feedback'), ensure_ascii=False)[:6000])
                 causes = (intent.get('failure_analysis') or {}).get('possible_causes', [])[:3]
@@ -331,7 +331,7 @@ class Coordinator:
                 await asyncio.to_thread(self.tick)
                 if time.monotonic() - last_health > 60:
                     try:
-                        await self.manager.core_heart._fast_beat_basal()
+                        await self.manager.heart._fast_beat_basal()
                     except Exception:
                         logger.exception('FallÃ³ el diagnÃ³stico; el coordinador continÃºa')
                     last_health = time.monotonic()

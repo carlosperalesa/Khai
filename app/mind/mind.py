@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Dict
 from pydantic import BaseModel, Field, ValidationError
 from app.pixy.control import BudgetExceeded
@@ -7,7 +8,7 @@ from app.pixy.control import BudgetExceeded
 from app.mind.brain import Brain as LLMManager
 from app.mind.memory import MemoryEngine
 
-logger = logging.getLogger("CoreMind")
+logger = logging.getLogger("Mind")
 
 from typing import Dict, Optional
 
@@ -35,14 +36,14 @@ class NormalIntent(BaseModel):
     investigate_target: str = Field(default="", description="Si la acción es INVESTIGATE, indica el ID del recurso a observar (ej. 'core_logs').")
     investigate_reason: str = Field(default="", description="Obligatorio si action=INVESTIGATE. ¿Por qué buscas esta información?")
 
-class CoreMindResponse(BaseModel):
+class MindResponse(BaseModel):
     is_failure_analysis: bool = Field(..., description="True si reaccionas a un fallo (usar failure_analysis_intent), False para operación normal (usar normal_intent).")
     normal_intent: Optional[NormalIntent] = Field(default=None)
     failure_analysis_intent: Optional[FailureAnalysisIntent] = Field(default=None)
 
-class CoreMind:
+class Mind:
     """
-    Khai: El cerebro central de OpenClaw.
+    Khai: el enrutador central de la mente.
     Analiza intenciones, filtra comandos y se comunica directamente con el usuario.
     """
     
@@ -86,12 +87,12 @@ class CoreMind:
         chat_history = self.memory.get_chat_history(limit=100)
 
         personality_prompt = self.memory.get_system_prompt()
-        schema = CoreMindResponse.model_json_schema()
+        schema = MindResponse.model_json_schema()
         
         prompt = f"""
 {personality_prompt}
 
-Estás actuando como el Router Central (Core Mind).
+Estás actuando como el Router Central de Mind.
 
 === HISTORIAL RECIENTE DE CONVERSACIÓN ===
 {chat_history}
@@ -127,8 +128,7 @@ REGLAS PARA EL JSON:
             if result_text.endswith("```"):
                 result_text = result_text[:-3]
                 
-            # Validacion Estricta con Pydantic
-            response = CoreMindResponse.model_validate_json(result_text.strip())
+            response = self._validate_response(result_text.strip())
             
             intent = response.failure_analysis_intent if response.is_failure_analysis else response.normal_intent
             
@@ -167,8 +167,18 @@ REGLAS PARA EL JSON:
         except BudgetExceeded:
             raise
         except ValidationError as ve:
-            logger.error(f"Error de validación Pydantic en CoreMind: {ve}")
-            return {"action": "GENERAL_CHAT", "reply": "❌ Error interno de validación al procesar tu solicitud."}
+            logger.error("Error de validación estructurada en Mind: %s", ve)
+            return {"action": "GENERAL_CHAT", "reply": "No pude interpretar la respuesta del proveedor. Reformularé la solicitud antes de fallar."}
         except Exception as e:
-            logger.error(f"Error procesando mensaje en CoreMind: {e}")
+            logger.error("Error procesando mensaje en Mind: %s", e)
             return {"action": "GENERAL_CHAT", "reply": f"❌ Error de IA: {str(e)}"}
+
+    @staticmethod
+    def _validate_response(raw: str) -> MindResponse:
+        try:
+            return MindResponse.model_validate_json(raw)
+        except ValidationError as original:
+            repaired = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
+            if repaired == raw:
+                raise original
+            return MindResponse.model_validate_json(repaired)

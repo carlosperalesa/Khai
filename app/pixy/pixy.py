@@ -13,6 +13,7 @@ class PixyMind:
         self.manager = manager
         self.llm, self.telegram = manager.llm, manager.telegram
         self.audit_db = getattr(manager, 'audit_db', None)
+        self.pending_approval = None
         if self.audit_db:
             migrate(self.audit_db, [[
                 'CREATE TABLE IF NOT EXISTS pixy_audits(audit_id TEXT PRIMARY KEY, kind TEXT, artifact_hash TEXT, safe INTEGER, reason TEXT, created_at REAL)',
@@ -109,8 +110,44 @@ class PixyMind:
         return result
 
     def process_request(self, message, is_automated=False):
-        self.telegram.send_message('Pixy: /tasks, /cancel ID, /approve ID TOKEN, /deny ID TOKEN. '
-                                   'Las decisiones se asocian al artefacto exacto.')
+        return self.direct_response(message)
+
+    def direct_response(self, message):
+        request = message.strip()
+        if not request:
+            return 'Pixy directa. Usa `/p diagnóstico`, `/p explica el último error` o `/p ayuda`.'
+        if request.lower() in {'ayuda', 'help', '?'}:
+            return ('Pixy directa: puedo explicar errores, consultar el estado y pedir evidencia a Heart y Senses. '
+                    'Para operaciones sensibles responderé `apruebas: y/n`.')
+        if request.lower() in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
+            if self.pending_approval:
+                answer = request.lower() in {'y', 'yes', 'sí', 'si'}
+                pending = self.pending_approval
+                self.pending_approval = None
+                return pending['resolve'](answer)
+            return 'No hay una aprobación pendiente de Pixy.'
+        lowered = request.lower()
+        if any(term in lowered for term in ('diagn', 'estado', 'error', 'log', 'salud', 'health')):
+            return self.diagnose(request)
+        raw = self.llm.generate_content(
+            'Responde como Pixy, supervisora técnica de Khai. Explica el problema con claridad, '
+            'separa evidencia de hipótesis y propone una solución concreta. No inventes acceso ni resultados. '
+            'Si una acción requiere autorización, termina exactamente con "apruebas: y/n".\n'
+            + request,
+            response_format=None)
+        return str(raw).strip()
+
+    def diagnose(self, request):
+        report = self.manager.heart.run_diagnostic_fast()
+        logs = self.manager.senses.observe('core_logs', 'Diagnóstico solicitado a Pixy')
+        report['logs'] = logs
+        self.manager.heart.document_diagnostic(report)
+        raw = self.llm.generate_content(
+            'Explica este diagnóstico como Pixy. Indica evidencia, causa probable y pasos de solución. '
+            'No afirmes que cambiaste nada. Si la solución requiere permiso, termina con "apruebas: y/n".\n'
+            + json.dumps(report, ensure_ascii=False),
+            response_format=None)
+        return str(raw).strip()
 
     def trigger_panic_mode(self, reason):
         coordinator = getattr(self.manager, 'coordinator', None)

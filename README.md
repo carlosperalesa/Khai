@@ -30,7 +30,7 @@ despliegue y no deben usarse para código nuevo.
 | --- | --- |
 | Orquestador | Autenticar Telegram y persistir entradas; ofrecer comandos explícitos. |
 | Coordinator / ControlStore | Presupuesto, estados, aprobaciones, recuperación y cancelación. |
-| CoreMind | Clasificar intenciones y proponer causas; no despachar contenedores. |
+| Mind | Clasificar intenciones y proponer causas; no despachar contenedores. |
 | SkillForge | Generar scripts y guardar artefactos identificados por hash. |
 | Pixy | Filtro AST y revisión semántica; el sandbox aplica los límites efectivos. |
 | Docker Proxy / Engine | Preparar imágenes, ejecutar, supervisar y reconciliar contenedores. |
@@ -50,6 +50,10 @@ El nombre GOD es histórico: no permite administrar el VPS, modificar el Core ni
 ## Uso desde Telegram
 
 ```text
+/help
+/?
+/pixy diagnóstico
+/p explica el último error
 /make objetivo
 /tasks
 /artifact TASK_ID
@@ -65,6 +69,12 @@ El nombre GOD es histórico: no permite administrar el VPS, modificar el Core ni
 ```
 
 `/expect` se registra antes de ejecutar. `/verify` se usa sobre el resultado `UNVERIFIED` de una ejecución concreta. Una cancelación en curso se confirma consultando `/tasks`.
+
+`/help` y `/?` muestran el listado completo de comandos. `/pixy` y `/p`
+dirigen el mensaje directamente a Pixy. Pixy consulta primero a Heart y, cuando
+necesita evidencia, a Senses; después documenta el diagnóstico en Heart y
+explica al usuario la evidencia, las hipótesis y la solución propuesta. Las
+preguntas de seguridad de Pixy se responden con `y` o `n`.
 
 ## Instalación y operación
 

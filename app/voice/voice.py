@@ -53,6 +53,27 @@ async def lifespan(app):
 
 app = FastAPI(title='Khai', lifespan=lifespan)
 
+HELP_TEXT = """Comandos disponibles:
+/help o /? - muestra esta ayuda.
+/pixy <mensaje> o /p <mensaje> - habla directamente con Pixy.
+/make <objetivo> - crea un objetivo ejecutable.
+/tasks - consulta objetivos activos y recientes.
+/artifact <ID> - muestra el artefacto de un objetivo.
+/approve <ID> <TOKEN> - aprueba una ejecución solicitada.
+/deny <ID> <TOKEN> - rechaza una ejecución solicitada.
+/cancel <ID> - cancela un objetivo.
+/expect <ID> <archivo> <SHA256> - fija una verificación antes de ejecutar.
+/verify <ID> <RUN_ID> success|failure - registra el resultado observado.
+/rules - consulta reglas de aprendizaje.
+/rule approve <ID> [ID_SUSTITUIDA] - activa una regla propuesta.
+/rule rollback <ID> - revierte una regla.
+/export <TASK_ID> <archivo> - pone un resultado en cuarentena.
+/fetch <servicio> <operación> <archivo> [JSON] - descarga mediante Voice.
+/publish <ASSET_ID> - publica un archivo aprobado.
+/asset <ASSET_ID> - entrega un archivo publicado.
+/unpublish <ASSET_ID> - retira un archivo.
+Las aprobaciones de Pixy se responden con y/n cuando ella lo solicite."""
+
 
 def authenticated_message(data, user_id):
     if not isinstance(data, dict):
@@ -90,6 +111,10 @@ def _command(manager, source, text):
     c = manager.coordinator
     parts = text.split()
     name = parts[0].lower()
+    if name in {'/help', '/?'}:
+        return HELP_TEXT
+    if name in {'/pixy', '/p'}:
+        return manager.pixy.direct_response(text.partition(' ')[2])
     if name == '/export' and len(parts) == 3:
         task = c.store.get(parts[1])
         if not task:

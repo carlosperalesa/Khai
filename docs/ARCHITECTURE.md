@@ -9,7 +9,7 @@ flowchart LR
     Telegram --> Ingress[Webhook autenticado]
     Ingress --> Store[(ControlStore / SQLite)]
     Store --> Coordinator
-    Coordinator --> CoreMind
+    Coordinator --> Mind
     Coordinator --> SkillForge
     SkillForge --> Artifact[Artefacto SHA256]
     Coordinator --> Pixy
@@ -24,7 +24,18 @@ flowchart LR
     Ledger --> Candidates[Reglas candidatas]
 ```
 
-El Core es el único propietario del estado de objetivos. Un bloqueo de proceso impide dos coordinadores sobre el mismo directorio. El proxy tiene su propia base y un bloqueo independiente; sus operaciones Docker no se delegan al modelo.
+Mind es el propietario de la interpretación y el Coordinator del estado de
+objetivos. Un bloqueo de proceso impide dos coordinadores sobre el mismo
+directorio. El proxy tiene su propia base y un bloqueo independiente; sus
+operaciones Docker no se delegan al modelo.
+
+Mind usa Brain para interpretar lenguaje natural, pero valida la salida
+estructurada antes de ejecutar acciones. Esa frontera no pretende limitar la
+conversación: permite tolerar texto mal formado del proveedor, separar
+evidencia de hipótesis y evitar que una respuesta ambigua autorice una
+operación. Las respuestas con JSON mal escapado se reparan de forma acotada;
+las decisiones que siguen siendo ambiguas se devuelven como explicación y no
+se ejecutan silenciosamente.
 
 Las llamadas HTTP del webhook no ejecutan modelos. Los objetivos se persisten antes de responder y el coordinador los avanza en segundo plano. No se utiliza una cola externa: SQLite conserva las fases y un único coordinador las procesa.
 
