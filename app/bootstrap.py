@@ -16,6 +16,9 @@ from app.pixy.rules import Rules
 from app.dreams.dreams import Dreams
 from app.heart.beat import Beat
 from app.senses.senses import Senses, OBSERVERS
+from app.pixy.authorization import AuthorizationStore
+from app.heart.recovery import Recovery
+from app.voice.runtime.recovery_runtime import ProxyRecoveryExecutor
 from app.voice.secrets import Secrets
 from app.voice.gateway.llm_gateway import LLMManager
 from app.voice.gateway.telegram_gateway import TelegramHandler
@@ -35,6 +38,8 @@ class ModuleManager:
         self.memory = MemoryEngine(str(self.data_dir/'mind'),self.data_dir/'mind'/'memory.sqlite3',self.identity)
         self.state = StateManager(str(self.data_dir/'pixy'),self.data_dir/'pixy'/'logs.sqlite3')
         self.audit_db = self.data_dir/'pixy'/'logs.sqlite3'
+        self.authorizations = AuthorizationStore(self.audit_db)
+        self.recovery_executor = ProxyRecoveryExecutor()
         self.secrets = Secrets(self.data_dir)
         self.telegram = TelegramHandler(self.secrets.get('TELEGRAM_BOT_TOKEN'),self.secrets.get('TELEGRAM_USER_ID'))
         provider = LLMManager(config_dir,str(self.data_dir/'voice'),self.memory,self.secrets,self.data_dir/'voice'/'voice.sqlite3')
@@ -42,7 +47,7 @@ class ModuleManager:
         self.mind = Mind(self.llm,self.memory)
         self.pixy = PixyMind(self)
         self.rules = Rules(self.data_dir/'pixy'/'rules.sqlite3')
-        self.hand = Hand(self.data_dir/'hand',self.pixy,self.events)
+        self.hand = Hand(self.data_dir/'hand',self.pixy,self.events,recovery_executor=self.recovery_executor)
         self.forge = SkillForge(self.llm,str(self.data_dir/'hand'))
         self.forge.manager = self
         self.gateway = ExternalGateway(Path(config_dir)/'gateways.yaml',self.secrets,self.events,self.data_dir/'voice'/'voice.sqlite3')
@@ -55,6 +60,7 @@ class ModuleManager:
         self.heart = Beat(self.data_dir,self.events)
         adapters = {name:lambda name=name:self._domain_snapshot(name) for name in OBSERVERS}
         self.senses = Senses(self.data_dir/'senses'/'senses.sqlite3',adapters,CoreEyes(str(self.data_dir)))
+        self.heart.recovery = Recovery(self.data_dir/'heart'/'heart.sqlite3',self.senses,self.hand,self.authorizations,self.events)
 
     def _domain_snapshot(self, name):
         if name in {'database','storage','heart'}:

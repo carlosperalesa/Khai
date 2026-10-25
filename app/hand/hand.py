@@ -10,7 +10,10 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from app.common.database import connection, migrate
+from app.common.recovery import FINAL_STEP, canonical, plan_hash, validate_case_id, validate_plan
 from app.pixy.control import InstanceLock
+
+RECOVERY_STEP_TIMEOUT = 300
 
 
 def sha(raw):
@@ -18,11 +21,13 @@ def sha(raw):
 
 
 class Hand:
-    def __init__(self, root, pixy, events=None):
+    def __init__(self, root, pixy, events=None, recovery_executor=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root/'hand.sqlite3'
         self.pixy, self.events = pixy, events
+        self.recovery_executor = recovery_executor
+        self.recovery_root = self.root/'heart'
         self._mutex = threading.RLock()
         migrate(self.db, [[
             '''CREATE TABLE IF NOT EXISTS versions(version_id TEXT PRIMARY KEY, skill_name TEXT NOT NULL,
@@ -39,6 +44,18 @@ class Hand:
             '''CREATE TRIGGER IF NOT EXISTS operations_completed BEFORE UPDATE ON operations
                WHEN OLD.completed_at IS NOT NULL BEGIN SELECT RAISE(ABORT,'completed operation is immutable'); END''',
         ]])
+        migrate(self.db, [[
+            '''CREATE TABLE IF NOT EXISTS recovery_skills(case_id TEXT PRIMARY KEY, authorization_id TEXT NOT NULL,
+               plan_hash TEXT NOT NULL, skill_hash TEXT NOT NULL, status TEXT NOT NULL,
+               created_at REAL NOT NULL, updated_at REAL NOT NULL)''',
+            '''CREATE TABLE IF NOT EXISTS recovery_steps(case_id TEXT NOT NULL, step_index INTEGER NOT NULL,
+               action TEXT NOT NULL, target TEXT NOT NULL, action_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+               receipt TEXT, submitted_at REAL NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(case_id,step_index))''',
+            '''CREATE TRIGGER IF NOT EXISTS recovery_skills_no_delete BEFORE DELETE ON recovery_skills
+               BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
+            '''CREATE TRIGGER IF NOT EXISTS recovery_steps_no_delete BEFORE DELETE ON recovery_steps
+               BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
+        ]], component='hand-recovery')
         self.recover()
 
     def recover(self):
@@ -84,7 +101,7 @@ class Hand:
     def _name(self, name):
         if not isinstance(name,str) or not re.fullmatch('[a-z][a-z0-9-]{0,63}',name):
             raise ValueError('Invalid skill name')
-        if name.lower() in {'con','prn','aux','nul'} or re.fullmatch('(com|lpt)[0-9]',name):
+        if name.lower() in {'con','prn','aux','nul','heart'} or re.fullmatch('(com|lpt)[0-9]',name):
             raise ValueError('Reserved skill name')
         return name
 
@@ -405,3 +422,174 @@ class Hand:
 
     def unpublish(self, name, asset_id):
         self.publication(name,asset_id,False)
+
+    # ------------------------------------------------------------------ recovery
+    def _recovery_order(self, order):
+        """Validate a Heart order. The header carries the verifiable Pixy authorization reference."""
+        if not isinstance(order,dict) or set(order) != {'header','plan'}:
+            raise ValueError('Orden de recuperación inválida')
+        header = order['header']
+        if not isinstance(header,dict) or set(header) != {'case_id','issued_by','authorization_id','nonce','plan_hash'}:
+            raise ValueError('Encabezado de recuperación inválido')
+        if header['issued_by'] != 'heart':
+            raise PermissionError('Solo Heart emite órdenes de recuperación')
+        case_id = validate_case_id(header['case_id'])
+        core = validate_plan(order['plan'])
+        if set(order['plan']) != {'target','steps','capabilities'}:
+            raise ValueError('La orden contiene campos fuera del contrato')
+        h = plan_hash(case_id,core)
+        if h != header['plan_hash']:
+            raise PermissionError('El plan no coincide con el hash autorizado')
+        return header,case_id,core,h
+
+    def _authorization_terms(self, header, case_id, core, h):
+        return (header['authorization_id'],header['nonce'],case_id,core['capabilities'],core['target'],h)
+
+    def _recovery_row(self, case_id):
+        with connection(self.db) as conn:
+            row = conn.execute('SELECT * FROM recovery_skills WHERE case_id=?',(case_id,)).fetchone()
+        return dict(row) if row else None
+
+    def _recovery_document(self, case_id, core, h):
+        return canonical({'case_id':case_id,'plan':core,'plan_hash':h}).encode('utf-8')
+
+    def _verify_recovery_skill(self, row, case_id, core, h):
+        folder = self.recovery_root/case_id
+        if folder.is_symlink() or not folder.is_dir() or folder.resolve().parent != self.recovery_root.resolve():
+            raise PermissionError('Skill de recuperación ausente o fuera de data/hand/heart')
+        if self.tree_hash(folder) != row['skill_hash']:
+            raise PermissionError('La skill de recuperación cambió fuera de Hand')
+        if (folder/'app'/'recovery.json').read_bytes() != self._recovery_document(case_id,core,h):
+            raise PermissionError('La skill de recuperación no coincide con la orden autorizada')
+        return folder
+
+    def create_recovery(self, order):
+        header,case_id,core,h = self._recovery_order(order)
+        authorizations = getattr(self.pixy,'authorizations',None)
+        if authorizations is None:
+            raise PermissionError('Pixy no tiene un registro de autorizaciones')
+        with self.locked():
+            row = self._recovery_row(case_id)
+            if row:
+                if row['plan_hash'] != h or row['authorization_id'] != header['authorization_id']:
+                    raise PermissionError('Ya existe otra skill de recuperación para este caso')
+                self._verify_recovery_skill(row,case_id,core,h)
+                return {'case_id':case_id,'path':'hand/heart/'+case_id,'skill_hash':row['skill_hash'],'status':row['status']}
+            authorizations.verify(*self._authorization_terms(header,case_id,core,h))
+            self.recovery_root.mkdir(exist_ok=True)
+            folder, draft = self.recovery_root/case_id, self.recovery_root/('.'+case_id)
+            if folder.exists():
+                raise ValueError('Carpeta de recuperación no registrada; se conserva para inspección')
+            if draft.exists():
+                if draft.is_symlink() or draft.resolve().parent != self.recovery_root.resolve():
+                    raise ValueError('Borrador de recuperación inseguro')
+                shutil.rmtree(draft)  # Unregistered draft from a crash; never executed.
+            op = self._operation('recovery_create','heart/'+case_id,correlation_id=case_id,reason=header['authorization_id'])
+            try:
+                for part in ('app','data','other'):
+                    (draft/part).mkdir(parents=True)
+                (draft/'app'/'recovery.json').write_bytes(self._recovery_document(case_id,core,h))
+                (draft/'other'/'manifest.json').write_bytes(canonical({
+                    'purpose':'recovery','case_id':case_id,'issued_by':'heart','created_by':'hand',
+                    'authorization_id':header['authorization_id'],'capabilities':core['capabilities'],
+                    'target':core['target']}).encode('utf-8'))
+                skill_hash = self.tree_hash(draft)
+                draft.rename(folder)
+                now = time.time()
+                with connection(self.db) as conn:
+                    conn.execute('INSERT INTO recovery_skills VALUES (?,?,?,?,?,?,?)',
+                                 (case_id,header['authorization_id'],h,skill_hash,'created',now,now))
+                self._finish(op)
+            except Exception as exc:
+                self._finish(op,type(exc).__name__)
+                raise
+        if self.events:
+            self.events.emit('hand','recovery_created',correlation_id=case_id,metadata={'skill_hash':skill_hash})
+        return {'case_id':case_id,'path':'hand/heart/'+case_id,'skill_hash':skill_hash,'status':'created'}
+
+    def _set_recovery(self, case_id, status):
+        with connection(self.db) as conn:
+            conn.execute('UPDATE recovery_skills SET status=?,updated_at=? WHERE case_id=?',(status,time.time(),case_id))
+
+    def _step(self, case_id, index):
+        with connection(self.db) as conn:
+            row = conn.execute('SELECT * FROM recovery_steps WHERE case_id=? AND step_index=?',(case_id,index)).fetchone()
+        if not row:
+            return None
+        step = dict(row)
+        step['receipt'] = json.loads(step['receipt']) if step['receipt'] else None
+        return step
+
+    def _save_step(self, case_id, index, status, receipt):
+        with connection(self.db) as conn:
+            conn.execute('UPDATE recovery_steps SET status=?,receipt=?,updated_at=? WHERE case_id=? AND step_index=?',
+                         (status,json.dumps(receipt,ensure_ascii=False),time.time(),case_id,index))
+        return self._step(case_id,index)
+
+    def recovery_summary(self, case_id):
+        row = self._recovery_row(case_id)
+        with connection(self.db) as conn:
+            steps = [dict(r) for r in conn.execute('SELECT * FROM recovery_steps WHERE case_id=? ORDER BY step_index',(case_id,))]
+        for step in steps:
+            step['receipt'] = json.loads(step['receipt']) if step['receipt'] else None
+        return {'case_id':case_id,'status':row['status'] if row else 'missing','skill_hash':row and row['skill_hash'],
+                'steps':[{'index':s['step_index'],'action':s['action'],'target':s['target'],'action_id':s['action_id'],
+                          'status':s['status'],'receipt':s['receipt']} for s in steps]}
+
+    def advance_recovery(self, order):
+        """Idempotent: spend the authorization once, then submit/poll each step exactly once."""
+        header,case_id,core,h = self._recovery_order(order)
+        with self.locked():
+            row = self._recovery_row(case_id)
+            if not row:
+                raise ValueError('Skill de recuperación no creada')
+            if row['authorization_id'] != header['authorization_id'] or row['plan_hash'] != h:
+                raise PermissionError('La orden no corresponde a la skill registrada')
+            if row['status'] in {'completed','failed','unknown'}:
+                return self.recovery_summary(case_id)
+            self._verify_recovery_skill(row,case_id,core,h)
+            if row['status'] in {'created','consuming'}:
+                self._set_recovery(case_id,'consuming')
+                self.pixy.authorizations.consume(*self._authorization_terms(header,case_id,core,h),consumer='hand:'+case_id)
+                self._set_recovery(case_id,'executing')
+        for index,spec in enumerate(core['steps']):
+            step = self._step(case_id,index)
+            if step is None:
+                action_id = 'rec_'+uuid.uuid4().hex
+                now = time.time()
+                # Receipt before side effect: a crash resubmits the SAME id, which the executor deduplicates.
+                with connection(self.db) as conn:
+                    conn.execute('INSERT INTO recovery_steps VALUES (?,?,?,?,?,?,?,?,?)',
+                                 (case_id,index,spec['action'],spec['target'],action_id,'submitting',None,now,now))
+                step = self._step(case_id,index)
+                if self.recovery_executor is None:
+                    step = self._save_step(case_id,index,'failed',{'error':'No hay canal de recuperación configurado'})
+            if step['status'] not in FINAL_STEP:
+                from app.voice.runtime.recovery_runtime import RecoveryRejected
+                try:
+                    if step['status'] == 'submitting':
+                        receipt = self.recovery_executor.submit(step['action_id'],spec['action'],spec['target'])
+                    else:
+                        receipt = self.recovery_executor.status(step['action_id'])
+                    status = receipt.get('status')
+                    if status not in FINAL_STEP:
+                        status = 'running'
+                    step = self._save_step(case_id,index,status,receipt)
+                except RecoveryRejected as exc:
+                    step = self._save_step(case_id,index,'failed',{'error':str(exc)[:300]})
+                except OSError:
+                    if time.time()-step['submitted_at'] > RECOVERY_STEP_TIMEOUT:
+                        step = self._save_step(case_id,index,'unknown',{'error':'Canal sin respuesta; no se repite'})
+            if step['status'] not in FINAL_STEP:
+                return self.recovery_summary(case_id) | {'status':'running'}
+            if step['status'] != 'completed':
+                break  # Later steps never run after a failed or uncertain one.
+        statuses = [s['status'] for s in self.recovery_summary(case_id)['steps']]
+        final = ('completed' if len(statuses)==len(core['steps']) and set(statuses)=={'completed'}
+                 else 'unknown' if 'unknown' in statuses else 'failed')
+        self._set_recovery(case_id,final)
+        op = self._operation('recovery_execute','heart/'+case_id,correlation_id=case_id,reason=final)
+        self._finish(op,None if final=='completed' else final)
+        if self.events:
+            self.events.emit('hand','recovery_finished',correlation_id=case_id,metadata={'status':final})
+        return self.recovery_summary(case_id)

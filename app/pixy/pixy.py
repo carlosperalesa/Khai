@@ -13,6 +13,10 @@ class PixyMind:
         self.manager = manager
         self.llm, self.telegram = manager.llm, manager.telegram
         self.audit_db = getattr(manager, 'audit_db', None)
+        self.authorizations = getattr(manager, 'authorizations', None)
+        if self.authorizations is None and self.audit_db:
+            from app.pixy.authorization import AuthorizationStore
+            self.authorizations = AuthorizationStore(self.audit_db)
         self.pending_approval = None
         if self.audit_db:
             migrate(self.audit_db, [[
@@ -112,7 +116,7 @@ class PixyMind:
     def process_request(self, message, is_automated=False):
         return self.direct_response(message)
 
-    def direct_response(self, message):
+    def direct_response(self, message, source='telegram'):
         request = message.strip()
         if not request:
             return 'Pixy directa. Usa `/p diagnóstico`, `/p explica el último error` o `/p ayuda`.'
@@ -120,6 +124,18 @@ class PixyMind:
             return ('Pixy directa: puedo explicar errores, consultar el estado y pedir evidencia a Heart y Senses. '
                     'Para operaciones sensibles responderé `apruebas: y/n`.')
         if request.lower() in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
+            if self.authorizations:
+                pending = self.authorizations.pending()
+                if pending:
+                    approve = request.lower() in {'y', 'yes', 'sí', 'si'}
+                    decided = self.authorizations.decide(pending['authorization_id'], approve, decided_by=source)
+                    if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
+                        self.manager.heart.recovery.receive_decision(pending['case_id'], decided)
+                    if approve:
+                        return (f"Autorización {decided['authorization_id']} emitida para {decided['case_id']}. "
+                                f"Objetivo: {decided['target']}, capacidades: {','.join(decided['capabilities'])}. "
+                                "Heart entregará la orden autorizada a Hand.")
+                    return f"Propuesta rechazada. El caso {decided['case_id']} quedó DENIED sin modificaciones en el sistema."
             if self.pending_approval:
                 answer = request.lower() in {'y', 'yes', 'sí', 'si'}
                 pending = self.pending_approval
@@ -127,8 +143,8 @@ class PixyMind:
                 return pending['resolve'](answer)
             return 'No hay una aprobación pendiente de Pixy.'
         lowered = request.lower()
-        if any(term in lowered for term in ('diagn', 'estado', 'error', 'log', 'salud', 'health')):
-            return self.diagnose(request)
+        if any(term in lowered for term in ('diagn', 'estado', 'error', 'log', 'salud', 'health', 'status', 'recuper')):
+            return self.diagnose(request, source=source)
         raw = self.llm.generate_content(
             'Responde como Pixy, supervisora técnica de Khai. Explica el problema con claridad, '
             'separa evidencia de hipótesis y propone una solución concreta. No inventes acceso ni resultados. '
@@ -137,7 +153,29 @@ class PixyMind:
             response_format=None)
         return str(raw).strip()
 
-    def diagnose(self, request):
+    def diagnose(self, request, source='telegram'):
+        if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
+            case = self.manager.heart.recovery.open_case(request, requested_by=source)
+            plan = case.get('plan')
+            auth = None
+            if plan and plan.get('requires_approval') and self.authorizations:
+                auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'], case['plan_hash'], requested_by=source)
+                self.manager.heart.recovery.await_approval(case['case_id'], auth)
+            prompt = (
+                f"Explica este diagnóstico de Heart como Pixy, supervisora técnica de Khai.\n"
+                f"Caso: {case['case_id']}\n"
+                f"Diagnóstico: {json.dumps(case.get('diagnosis'), ensure_ascii=False)}\n"
+                f"Plan: {json.dumps(plan, ensure_ascii=False) if plan else 'Sin plan de recuperación automatizado'}\n"
+                "Indica evidencia, causa probable y la propuesta estructurada de Heart (objetivo, alcance, riesgo e impacto). "
+                "No inventes datos ni afirmes haber modificado nada. "
+            )
+            if auth:
+                prompt += 'Termina exactamente con: apruebas: y/n'
+            raw = self.llm.generate_content(prompt, response_format=None)
+            explanation = str(raw).strip()
+            if auth and 'apruebas: y/n' not in explanation.lower():
+                explanation += '\n\napruebas: y/n'
+            return explanation
         report = self.manager.heart.run_diagnostic_fast()
         logs = self.manager.senses.observe('core_logs', 'Diagnóstico solicitado a Pixy')
         report['logs'] = logs

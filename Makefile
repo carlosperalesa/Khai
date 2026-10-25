@@ -2,7 +2,7 @@
 
 
 # Variables
-OPENCLAW_CMD=python -m app.voice.voice
+KHAI_CMD=python -m app.voice.voice
 PYTHON_CMD=python
 ENV_FILE=.env
 
@@ -10,13 +10,13 @@ help: ## Muestra este mensaje de ayuda
 	@echo "Opciones disponibles:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-start: ## Inicia el sistema OpenClaw
+start: ## Inicia el sistema Khai
 	@echo "Iniciando sistema..."
-	$(OPENCLAW_CMD)
+	$(KHAI_CMD)
 
-stop: ## Detiene el sistema OpenClaw
+stop: ## Detiene el sistema Khai
 	@echo "Deteniendo sistema..."
-	$(OPENCLAW_CMD) stop
+	$(KHAI_CMD) stop
 
 restart: stop start ## Reinicia el sistema
 
@@ -25,10 +25,10 @@ logs: ## Muestra los últimos 50 registros de logs en vivo
 	tail -n 50 -f data/logs/*.log
 
 stats: ## Muestra estado del sistema
-	@docker exec openclaw_core python -c "from modules import ModuleManager; m = ModuleManager(); print(m.core_heart.check_integrity())"
+	@docker exec khai_core python -c "from modules import ModuleManager; m = ModuleManager(); print(m.core_heart.check_integrity())"
 
 health: ## Alias para stats
-	@docker exec openclaw_core python -c "from modules import ModuleManager; m = ModuleManager(); print(m.core_heart.check_integrity())"
+	@docker exec khai_core python -c "from modules import ModuleManager; m = ModuleManager(); print(m.core_heart.check_integrity())"
 
 setup: ## Configura el entorno inicial (carpetas y BD)
 	@echo "Creando directorios y configurando BD..."

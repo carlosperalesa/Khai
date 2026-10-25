@@ -39,3 +39,47 @@ class Senses:
 
     def observe_multiple(self, resource_ids, reason='User request'):
         return {rid:self.observe(rid,reason) for rid in resource_ids}
+
+    def _record(self, observer, snapshot):
+        with connection(self.path) as conn:
+            conn.execute('INSERT INTO observations(observer,created_at,snapshot) VALUES (?,?,?)',
+                         (observer,time.time(),json.dumps(snapshot,ensure_ascii=False)))
+
+    def _resource(self, resource_id, reason):
+        """Read one whitelisted resource; failures are evidence, never exceptions."""
+        try:
+            raw = self.observe(resource_id,reason)
+        except Exception as exc:
+            return {'status':'unavailable','error':type(exc).__name__}
+        if isinstance(raw,str) and raw.startswith('❌'):
+            return {'status':'unavailable','error':raw[:500]}
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value,dict) else {'status':'ok','value':value}
+        except (TypeError,ValueError):
+            return {'status':'ok','text':str(raw)[-4000:]}
+
+    def sample(self, resource_ids, reason='Observation request'):
+        """Collect only the specific telemetry resources requested by the caller (e.g. Heart).
+        Senses never determines the diagnostic scope; it only serves as the sensor adapter."""
+        results = {}
+        for rid in resource_ids:
+            if rid in OBSERVERS and rid in self.adapters:
+                results[rid] = self.listen(rid)
+            else:
+                results[rid] = self._resource(rid, reason)
+        self._record('sample', {'reason': reason, 'resources': resource_ids, 'results': results})
+        return results
+
+    def evidence(self, reason, phase='before', resources=None):
+        """Compatibility wrapper: calls sample with caller-provided resources or basal profile."""
+        target_resources = resources or ['storage', 'core_logs', 'container_state_core', 'container_state_proxy']
+        readings = self.sample(target_resources, reason)
+        readings['phase'] = phase
+        readings['collected_at'] = time.time()
+        # Aliases for consumers expecting container_core / container_proxy keys
+        if 'container_state_core' in readings and 'container_core' not in readings:
+            readings['container_core'] = readings['container_state_core']
+        if 'container_state_proxy' in readings and 'container_proxy' not in readings:
+            readings['container_proxy'] = readings['container_state_proxy']
+        return readings

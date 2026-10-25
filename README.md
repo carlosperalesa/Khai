@@ -2,7 +2,7 @@
 
 Khai es un asistente personal para Telegram que interpreta objetivos, genera o reutiliza código Python y lo ejecuta mediante Voice con DockerRuntime o LocalRuntime aislado. Mantiene estado en SQLite para recuperar el trabajo sin repetir automáticamente operaciones de resultado incierto.
 
-El proyecto conserva nombres históricos de OpenClaw en contenedores y tablas. Su motor de ejecución es propio; no utiliza el Gateway de OpenClaw ni el runtime de Hermes Agent. Ambos proyectos sirvieron como referencias de diseño.
+El proyecto utilizaba originalmente nombres de OpenClaw. Los contenedores Docker ahora se denominan `khai_core` y `khai_docker_proxy`. Su motor de ejecución es propio; no utiliza el Gateway de OpenClaw ni el runtime de Hermes Agent. Ambos proyectos sirvieron como referencias de diseño.
 
 ## Estado de esta revisión
 

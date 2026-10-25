@@ -2,7 +2,7 @@
 
 ## Configuración necesaria
 
-El despliegue usa un host Linux con Docker Engine y Compose. Los contenedores conservan sus nombres históricos `openclaw_core` y `openclaw_docker_proxy`. Ejecute un Core y un proxy por directorio de datos.
+El despliegue usa un host Linux con Docker Engine y Compose. Los contenedores se identifican como `khai_core` y `khai_docker_proxy`. Ejecute un Core y un proxy por directorio de datos.
 
 ## Despliegue activo
 

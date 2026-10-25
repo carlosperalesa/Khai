@@ -35,11 +35,15 @@ class CoreEyes:
         # 2. Listado de todos los contenedores activos (para diagnóstico)
         if resource_id == "running_containers":
             return self._list_containers()
+
+        # 2b. Estado de solo lectura de los contenedores propios (core/proxy)
+        if resource_id in ("container_state_core", "container_state_proxy"):
+            return self._container_state(resource_id.rsplit("_", 1)[1])
         
         # 3. Recursos de la whitelist estática (rutas locales)
         if resource_id not in self.static_resources:
             logger.warning(f"[CoreEyes] Acceso denegado a recurso: {resource_id}")
-            return f"❌ [CoreEyes] Acceso denegado o recurso inexistente: '{resource_id}'. IDs válidos: {', '.join(list(self.static_resources.keys()) + ['agent_logs_<nombre>', 'running_containers'])}"
+            return f"❌ [CoreEyes] Acceso denegado o recurso inexistente: '{resource_id}'. IDs válidos: {', '.join(list(self.static_resources.keys()) + ['agent_logs_<nombre>', 'running_containers', 'container_state_core', 'container_state_proxy'])}"
             
         path = self.static_resources[resource_id]
         
@@ -82,6 +86,17 @@ class CoreEyes:
             return "❌ [CoreEyes] Timeout leyendo logs vía proxy."
         except Exception as e:
             return f"❌ [CoreEyes] Error leyendo docker logs: {e}"
+
+    def _container_state(self, target: str) -> str:
+        """docker inspect resumido vía proxy; nunca modifica el contenedor."""
+        import requests
+        try:
+            resp = requests.get(proxy_url("containers/" + target + "/state"), headers=proxy_headers(), timeout=15)
+            if resp.status_code == 200:
+                return json.dumps(resp.json(), ensure_ascii=False)
+            return f"❌ [CoreEyes] Estado de '{target}' no disponible: Status {resp.status_code}"
+        except Exception as e:
+            return f"❌ [CoreEyes] Error conectando con el proxy: {type(e).__name__}"
 
     def _list_containers(self) -> str:
         """Lista contenedores activos y muertos recientes vía proxy."""

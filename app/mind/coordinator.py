@@ -138,6 +138,15 @@ class Coordinator:
                 logger.exception('Error de coordinaciÃ³n')
             finally:
                 current_budget.reset(token)
+        if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
+            try:
+                for case in self.manager.heart.recovery.tick():
+                    cid, state = case['case_id'], case['state']
+                    self.manager.heart.recovery.mark_reported(cid)
+                    err = f": {case['error']}" if case.get('error') else ""
+                    self.notify(f"Pixy: Caso de recuperación {cid} finalizado con estado {state}{err}.")
+            except Exception:
+                logger.exception('Error en ciclo de recuperación de Heart')
         self.store.flush_events()
 
     def advance(self, task):

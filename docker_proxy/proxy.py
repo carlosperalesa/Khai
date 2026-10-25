@@ -10,6 +10,7 @@ try:
     from .engine import Engine
 except ImportError:
     from engine import Engine
+from app.voice.runtime.recovery_engine import RecoveryEngine
 
 
 def authorize(authorization: str = Header(default='')):
@@ -27,6 +28,7 @@ async def lifespan(app):
     lock = sqlite3.connect(engine.root / 'proxy-owner.sqlite3', timeout=0)
     lock.execute('BEGIN EXCLUSIVE')
     app.state.engine = engine
+    app.state.recovery = RecoveryEngine(engine)
     stop = asyncio.Event()
     async def loop():
         while not stop.is_set():
@@ -110,3 +112,33 @@ def logs(req: LogRequest):
         return {'logs': json.dumps(result, ensure_ascii=False)[-16000:]}
     except KeyError as exc:
         raise HTTPException(404, 'Ejecución desconocida') from exc
+
+
+class RecoveryActionRequest(BaseModel):
+    action_id: str
+    action: str
+    target: str
+
+
+@app.get('/containers/{target}/state')
+def container_state(target: str):
+    try:
+        return app.state.recovery.state(target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post('/recovery-actions')
+def submit_recovery(req: RecoveryActionRequest):
+    try:
+        return app.state.recovery.submit(req.action_id, req.action, req.target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get('/recovery-actions/{action_id}')
+def recovery_status(action_id: str):
+    try:
+        return app.state.recovery.get(action_id)
+    except KeyError as exc:
+        raise HTTPException(404, 'Acción desconocida') from exc

@@ -30,6 +30,7 @@ class Engine:
         self.run = runner or subprocess.run
         self.launcher = ThreadPoolExecutor(max_workers=1, thread_name_prefix="khai-launch")
         self.inflight = {}
+        self.last_tick = time.time()
         with self.connect() as conn:
             conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, fingerprint TEXT, payload TEXT, result TEXT, cancel INTEGER DEFAULT 0)')
@@ -256,6 +257,7 @@ class Engine:
         self.remove(eid)
 
     def tick(self):
+        self.last_tick = time.time()
         with self.connect() as conn:
             rows = list(conn.execute('SELECT * FROM executions'))
         for row in rows:

@@ -1,4 +1,4 @@
-# Python Dependencies for OpenClaw Framework
+# Python Dependencies for Khai Framework
 
 # ===== CORE APIs =====
 requests>=2.31.0

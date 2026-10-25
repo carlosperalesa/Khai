@@ -9,6 +9,7 @@ class Beat:
     def __init__(self, root, events):
         self.path = root/'heart'/'heart.sqlite3'
         self.vitals, self.diagnosis, self.events = VitalSigns(root),Diagnosis(root),events
+        self.recovery = None
         migrate(self.path, [['CREATE TABLE IF NOT EXISTS beats(created_at REAL,report TEXT)']])
 
     def check_integrity(self):

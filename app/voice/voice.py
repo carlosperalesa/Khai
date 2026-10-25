@@ -114,7 +114,9 @@ def _command(manager, source, text):
     if name in {'/help', '/?'}:
         return HELP_TEXT
     if name in {'/pixy', '/p'}:
-        return manager.pixy.direct_response(text.partition(' ')[2])
+        return manager.pixy.direct_response(text.partition(' ')[2], source=source)
+    if name in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(parts) == 1:
+        return manager.pixy.direct_response(text, source=source)
     if name == '/export' and len(parts) == 3:
         task = c.store.get(parts[1])
         if not task:
