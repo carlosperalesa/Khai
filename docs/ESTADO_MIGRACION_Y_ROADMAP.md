@@ -2,7 +2,7 @@
 
 **Fecha de corte:** 28 de octubre de 2026  
 **Responsables técnicos:** Carlo (Principal Engineer) & Software Architect / SRE Agent  
-**Estado general:** Fases 0 a 4 completadas. Fase 5 (Aprendizaje y Verificación) en curso. `app/common` y `legacy_learning` erradicados.
+**Estado general:** Fases 0 a 5 completadas y validadas (176/176 pruebas exitosas). Beta V4 desplegada en vm-carlosperales. `app/common` y `legacy_learning` erradicados.
 
 > **Fuente de verdad y despliegue:** `README.md`, `.agents/GEMINI.md` y `plan.md`
 > son las fuentes principales. `plan.md` documenta el corte histórico F4; este
@@ -106,10 +106,7 @@
   recibo de escritura completado y el hash del destinatario enviado coincide
   con el valor confirmado. La aceptación final del objetivo sigue requiriendo
   un único `y` posterior al efecto.
-- Las pruebas focales `tests.test_f5_setup_and_inputs`,
-  `tests.test_f5_http_receipts`, `tests.test_f5_recipe_execution` y
-  `tests.test_f5_reusable_skill_approval` pasaron 36/36 en conjunto. Falta validación
-  integral de cierre; no se ha desplegado.
+- La suite completa pasó 176/176 pruebas (incluyendo las 5 suites de F5 con 41/41: `test_f5_dreams`, `test_f5_setup_and_inputs`, `test_f5_http_receipts`, `test_f5_recipe_execution` y `test_f5_reusable_skill_approval`). Desplegado en vm-carlosperales con bases de datos y skills antiguas purgadas.
 - **Siguiente bloque:** integrar una receta de lectura y escritura (por ejemplo,
   noticias y correo) con contratos HTTPS representativos y sin credenciales
   productivas. Verificar confirmación de valores, configuración inicial,

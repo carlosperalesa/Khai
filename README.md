@@ -13,7 +13,7 @@ describe aquí y en `.agents/GEMINI.md`. La arquitectura
 vive en `app/` y el roadmap detallado está en
 [`docs/ESTADO_MIGRACION_Y_ROADMAP.md`](docs/ESTADO_MIGRACION_Y_ROADMAP.md).
 
-Este corte contiene cambios locales en evolución; F5 sigue en curso. El proyecto
+Fases F0 a F5 completadas y validadas con la suite completa (176/176 pruebas exitosas, incluyendo 41/41 de F5). El proyecto
 no está en producción y las bases de datos y skills anteriores se purgarán antes
 de usar esta revisión. No se requieren pruebas de compatibilidad con esos datos.
 **Estado Beta V4, 28 de octubre de 2026:** Se completó la integración del piloto
@@ -206,9 +206,7 @@ con respuestas parciales. Solo al cerrar F5 corresponde la validación integral 
 Linux/Docker; la VM sigue en la revisión anterior. La bóveda de Pixy con tokens
 es una propuesta futura, no una tarea autorizada para el próximo bloque.
 
-La validación puntual más reciente pasó: `tests.test_f5_setup_and_inputs`,
-`tests.test_f5_http_receipts`, `tests.test_f5_recipe_execution` y
-`tests.test_f5_reusable_skill_approval` (36/36). El error temporal que aparece en el log
+La validación completa de cierre de F5 pasó 176/176 pruebas en total (41/41 en las 5 suites de F5). El error temporal que aparece en el log
 de una prueba es simulado y verifica el reintento de rechazo de una skill no
 verificada; la prueba pasa. La suite completa y Linux/Docker quedan pendientes
 para el cierre; no se ha hecho commit, purga ni despliegue. No se instaló

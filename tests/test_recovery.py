@@ -449,15 +449,23 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 manager.coordinator = coordinator
                 manager.telegram = Mock()
 
+                manager.action_planner = None
+                manager.skill_selector = None
                 # Mock Mind deciding ACTION_REQUIRED
                 manager.mind.process_message = Mock(return_value={
                     'action': 'ACTION_REQUIRED',
                     'extracted_goal': 'Consultar pronóstico del clima mañana'
                 })
-                manager.llm.generate_content = Mock(return_value=json.dumps({
-                    'purpose': 'Consultar el clima de mañana',
-                    'capabilities': ['Network']
-                }))
+                manager.llm.generate_content = Mock(side_effect=[
+                    json.dumps({'purpose': 'Consultar el clima de mañana', 'capabilities': ['Network']}),
+                    json.dumps({
+                        'service_id': 'weather', 'operation': 'forecast', 'version': 'v1',
+                        'url': 'https://weather.example.org/forecast', 'method': 'GET',
+                        'parameters': ['city'], 'content_types': ['application/json'],
+                        'max_bytes': 10000, 'timeout': 5, 'per_minute': 10,
+                        'effect': 'read', 'credential_ref': None, 'effect_contract': None,
+                    }),
+                ])
 
                 # Intake a user message
                 task = coordinator.intake('tg:1', 'Khai que clima voy a tener?')
@@ -472,12 +480,12 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
 
                 # Verify notification asked for approval
                 notifications = [call.args[0] for call in manager.telegram.send_message.call_args_list]
-                self.assertTrue(any('No dispongo de una herramienta' in n and 'apruebas: y/n' in n for n in notifications))
+                self.assertTrue(any('necesito preparar una capacidad nueva' in n and 'Responde y/n' in n for n in notifications))
 
                 # User approves via Pixy with 'y'
                 manager.pixy.direct_response('y', source='tg:2')
                 current = coordinator.store.get(tid)
-                self.assertEqual(current['state'], 'GENERATING')
+                self.assertEqual(current['state'], 'SCOPE_PLANNING')
                 coordinator._llm_executor.shutdown(wait=True, cancel_futures=True)
                 coordinator._mailbox_executor.shutdown(wait=True, cancel_futures=True)
 

@@ -126,7 +126,7 @@ ROUTING
 
 ### Estado local y decisiones pendientes (28 de octubre de 2026)
 
-- El roadmap vigente declara F0-F4 completadas y F5 en curso. El estado se
+- El roadmap vigente declara F0-F5 completadas (176/176 pruebas en verde, incluyendo 41/41 de F5) y Beta V4 desplegada en vm-carlosperales. El estado se
   refiere al workspace local, no a la VM.
 - Este proyecto aún no está en producción. Antes de usar la nueva revisión se
   purgarán las bases de datos y las skills anteriores. Durante estas mejoras no

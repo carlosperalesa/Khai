@@ -6,7 +6,7 @@
 > ese corte histórico. El estado operativo vigente es Beta V4 desplegada en
 > `vm-carlosperales` (con piloto Dolphin en GCP por WireGuard y comandos
 > simplificados `/m`, `/p`, `/health`, `/cancel`|`/stop`, `/restart`,
-> `/us`|`/pas`|`/api`) y F5 en curso, documentado en [README.md](./README.md),
+> `/us`|`/pas`|`/api`) y F0-F5 completadas (176/176 pruebas), documentado en [README.md](./README.md),
 > [GEMINI.md](./.agents/GEMINI.md) y
 > [el roadmap](./docs/ESTADO_MIGRACION_Y_ROADMAP.md). En el flujo médico vigente,
 > Pixy le indica a Heart que hay un problema; Heart investiga con Senses y

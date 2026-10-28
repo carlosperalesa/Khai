@@ -106,8 +106,8 @@ class Coordinator:
         self._llm_jobs = {}
         self._mailbox_job = None
         self._notifications = queue.Queue()
-        self.requirements = RequirementsPlanner(manager.llm)
-        self.revision_planner = RevisionPlanner(manager.llm)
+        self.requirements = RequirementsPlanner(getattr(manager, 'llm', None))
+        self.revision_planner = RevisionPlanner(getattr(manager, 'llm', None))
 
     def notify(self, text):
         mailbox = getattr(self.manager, 'voice_mailbox', None)
@@ -178,8 +178,9 @@ class Coordinator:
 
     def intake(self, source, text, trace_id=None):
         tid = trace_id or get_trace_id() or new_trace_id()
+        direct = str(text).lstrip().startswith(('/make ', '/do '))
         return self.store.create(source, text, trace_id=tid,
-                                 input_confirmation_required=True)
+                                 input_confirmation_required=not direct)
 
     def intake_recipe(self, source, recipe, inputs, trace_id=None):
         """Start a pinned composition; every execution remains under one task ID."""
