@@ -20,8 +20,9 @@ $TunnelMarker = "azure-ollama-$LocalPort"
 $AzCommand = $null
 
 function Resolve-AzCommand {
+    $khaiRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     foreach ($localName in @('az.bat', 'az.cmd', 'az.exe')) {
-        $localAz = Join-Path $PSScriptRoot "..\.venv\Scripts\$localName"
+        $localAz = Join-Path $khaiRoot ".venv\Scripts\$localName"
         if (Test-Path -LiteralPath $localAz) { return (Resolve-Path -LiteralPath $localAz).Path }
     }
     $globalAz = Get-Command 'az' -CommandType Application -ErrorAction SilentlyContinue

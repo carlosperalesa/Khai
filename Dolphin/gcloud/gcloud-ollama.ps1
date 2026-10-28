@@ -11,10 +11,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$RootDir = Split-Path -Parent $PSScriptRoot
-$env:CLOUDSDK_PYTHON = Join-Path $RootDir '.venv\Scripts\python.exe'
-$env:CLOUDSDK_CONFIG = Join-Path $RootDir '.gcloud'
-$GcloudCmd = Join-Path $RootDir '.tools\google-cloud-sdk\bin\gcloud.cmd'
+$DolphinDir = Split-Path -Parent $PSScriptRoot
+$KhaiRoot = Split-Path -Parent $DolphinDir
+$env:CLOUDSDK_PYTHON = Join-Path $KhaiRoot '.venv\Scripts\python.exe'
+$env:CLOUDSDK_CONFIG = Join-Path $DolphinDir '.gcloud'
+$GcloudCmd = Join-Path $DolphinDir '.tools\google-cloud-sdk\bin\gcloud.cmd'
 if (-not (Test-Path -LiteralPath $GcloudCmd)) {
     $globalGcloud = Get-Command 'gcloud' -ErrorAction SilentlyContinue
     if (-not $globalGcloud) { throw 'gcloud CLI no encontrado en Dolphin/.tools ni en PATH.' }

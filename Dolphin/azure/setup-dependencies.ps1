@@ -15,12 +15,14 @@ if (-not $pythonPath) {
     throw 'Python 3 was not found. Install Python 3.10+ and enable the launcher, then rerun this script.'
 }
 
-if (-not (Test-Path -LiteralPath '.venv')) {
-    & $pythonPath -m venv .venv
+$khaiRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$venvDir = Join-Path $khaiRoot '.venv'
+if (-not (Test-Path -LiteralPath $venvDir)) {
+    & $pythonPath -m venv $venvDir
     if ($LASTEXITCODE -ne 0) { throw 'Could not create .venv.' }
 }
 
-$venvPython = Join-Path $PWD '.venv\Scripts\python.exe'
+$venvPython = Join-Path $venvDir 'Scripts\python.exe'
 if ($UpgradePip) {
     & $venvPython -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw 'Could not upgrade pip.' }
