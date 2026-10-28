@@ -6,9 +6,9 @@ Fecha de corte: 28 de octubre de 2026 (Beta V4).
 
 ```text
 Telegram --HTTPS webhook (8443)--> Khai + web (vm-carlosperales, Azure for Students, West US)
-                                      |  GENERAL_CHAT: Ollama (http://10.200.0.2:11434)
-                                      |  Control VM Spot (/on low, /on high, /off): HTTPS API GCE
-                                      |  Clasificación, tareas y fallback: Gemini
+                                      |  GENERAL_CHAT (mid/high): Ollama (http://10.200.0.2:11434)
+                                      |  Control VM Spot (/m low, /m mid, /m high, /m ?): HTTPS API GCE
+                                      |  Clasificación, tareas, /m low y fallback: Gemini
                                       v
                         Túnel privado WireGuard (UDP 51820)
                         10.200.0.1 (Azure) <-> 10.200.0.2 (GCP)
@@ -16,9 +16,10 @@ Telegram --HTTPS webhook (8443)--> Khai + web (vm-carlosperales, Azure for Stude
                                       v
              Nodo efímero Dolphin (Google Cloud, gen-lang-client-0149640270, us-west1-a)
              Disco único persistente: dolphin-boot-disk (pd-standard, 32 GB, auto-delete=no)
-             - /on o /on low  -> Spot e2-standard-8 (8 vCPU, 32 GB RAM, CPU)
-             - /on high       -> Spot g2-standard-4 (4 vCPU, 16 GB RAM + 1x NVIDIA L4 24 GB VRAM)
-             - /off o 5m idle -> Elimina/apaga instancia; cobro de cómputo = $0 CLP
+             - /m low (o 5m idle) -> Gemini; elimina instancia Spot; cobro de cómputo = $0 CLP
+             - /m mid             -> Dolphin CPU Spot e2-standard-8 (8 vCPU, 32 GB RAM)
+             - /m high            -> Dolphin GPU Spot g2-standard-4 (4 vCPU, 16 GB RAM + 1x NVIDIA L4 24 GB VRAM)
+             - /m ?               -> Consulta estado actual ([Mode = x]) y saldo de créditos CLP
 ```
 
 ## 2. Recursos aprovisionados y verificados
@@ -40,9 +41,9 @@ Tipo de cambio de referencia: `1 USD = $950 CLP`.
 
 | Modo | Máquina GCE (Spot) | Hardware | Costo por hora (CLP) | Sesión de 2 min (CLP) |
 | --- | --- | --- | ---: | ---: |
-| `/on low` | `e2-standard-8` | 8 vCPU, 32 GB RAM (CPU) | `~$152 CLP/h` | `~$5 CLP` |
-| `/on high` | `g2-standard-4` | 4 vCPU, 16 GB RAM + 1x NVIDIA L4 (24 GB VRAM) | `~$390 - $446 CLP/h` | `~$14 CLP` |
-| Apagado (`/off`) | Sin instancia VM | Solo disco `dolphin-boot-disk` (32 GB `pd-standard`) | `$0 CLP/h` en cómputo | Disco: `$0 - $1.216 CLP/mes` (30 GB en Free Tier) |
+| `/m low` (`Gemini`) | Sin instancia VM | Solo disco `dolphin-boot-disk` (32 GB `pd-standard`) | `$0 CLP/h` en cómputo | Disco: `$0 - $1.216 CLP/mes` (30 GB en Free Tier) |
+| `/m mid` (`Dolphin low`) | `e2-standard-8` | 8 vCPU, 32 GB RAM (CPU) | `~$152 CLP/h` | `~$5 CLP` |
+| `/m high` (`Dolphin high`) | `g2-standard-4` | 4 vCPU, 16 GB RAM + 1x NVIDIA L4 (24 GB VRAM) | `~$390 - $446 CLP/h` | `~$14 CLP` |
 
 ### Presupuestos y alarmas activas en `01074F-B289A3-A589D8`
 
@@ -51,5 +52,5 @@ Se crearon dos presupuestos mensuales de `$10.000 CLP` con **10 umbrales cada un
 1. **`[CREDITOS] Khai Dolphin Consumo Bruto (cada 1.000 CLP)`** (`EXCLUDE_ALL_CREDITS`): notifica cada `$1.000 CLP` de uso bruto cubierto por tus créditos.
 2. **`[COBRO REAL] Khai Dolphin Gasto Neto (cada 1.000 CLP)`** (`INCLUDE_ALL_CREDITS`): notifica cada `$1.000 CLP` únicamente si los créditos se agotan y existe facturación neta a pagar.
 
-Además, los comandos `/on`, `/off` y `/dolphin` en Telegram informan en cada respuesta si el consumo está cubierto por créditos, el acumulado en CLP y el saldo estimado de créditos disponible.
+Además, los comandos `/mode` (`/m`) con `low`, `mid`, `high` y `?` en Telegram informan en cada respuesta `[Mode = x]`, si el consumo está cubierto por créditos, el acumulado en CLP y el saldo estimado de créditos disponible. Cuando Dolphin se apaga por inactividad (5 min) y la conversación pasa automáticamente a Gemini, el siguiente mensaje incluye el aviso `[Mode = low]`.
 

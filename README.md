@@ -20,12 +20,12 @@ de usar esta revisión. No se requieren pruebas de compatibilidad con esos datos
 Dolphin en Google Cloud (`us-west1-a`) sobre un único disco persistente
 `dolphin-boot-disk` (`pd-standard`, 32 GB, `auto-delete=no`) conectado a Khai en
 `vm-carlosperales` (Azure for Students) mediante un túnel privado WireGuard
-(`10.200.0.1 <-> 10.200.0.2`, `22,5 ms` RTT). Desde Telegram, `/on` (`/on low`)
-crea/enciende la VM Spot CPU (`e2-standard-8`), `/on high` crea/enciende la VM
-Spot GPU NVIDIA L4 (`g2-standard-4`), `/off` elimina la VM conservando el disco
-(además de contar con auto-apagado tras 5 minutos de inactividad) y `/dolphin`
-informa el estado, si el uso está cubierto por créditos y el saldo estimado en
-CLP. El detalle por proveedor está en [`Dolphin/README.md`](Dolphin/README.md),
+(10.200.0.1 <-> 10.200.0.2, 22,5 ms RTT). Desde Telegram, /mode (o /m)
+controla el motor conversacional: /m low selecciona Gemini y elimina la VM Spot
+de Dolphin conservando el disco, /m mid crea/enciende la VM Spot CPU
+(e2-standard-8), /m high crea/enciende la VM Spot GPU NVIDIA L4
+(g2-standard-4), y /m ? consulta el estado actual, si el uso está cubierto
+por créditos y el saldo estimado en CLP. Cada cambio de modelo emite [Mode = x]. El detalle por proveedor está en [Dolphin/README.md](Dolphin/README.md),
 [`Dolphin/gcloud/PILOTO_GCLOUD.md`](Dolphin/gcloud/PILOTO_GCLOUD.md) y
 [`Dolphin/azure/PILOTO_AZURE.md`](Dolphin/azure/PILOTO_AZURE.md).
 

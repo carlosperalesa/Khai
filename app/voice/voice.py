@@ -81,9 +81,7 @@ HELP_TEXT = """Comandos disponibles:
 /publish <ASSET_ID> - publica un archivo aprobado.
 /asset <ASSET_ID> - entrega un archivo publicado.
 /unpublish <ASSET_ID> - retira un archivo.
-/on [low|high|status] - enciende la VM Spot de Dolphin (low=CPU, high=GPU L4).
-/off - apaga y elimina la VM Spot de Dolphin conservando el disco.
-/dolphin - consulta el estado y consumo de créditos de Dolphin.
+/mode <low|mid|high|?> o /m <low|mid|high|?> - cambia o consulta el modo LLM (low=Gemini, mid=Dolphin CPU Spot, high=Dolphin GPU L4 Spot, ?=status).
 Las aprobaciones de Pixy se responden con y/n cuando ella lo solicite."""
 
 
@@ -130,7 +128,7 @@ def secret_command(manager, text, user_id, chat_id):
 def urgent_command(text):
     name = text.split(maxsplit=1)[0].lower()
     return name in {'/cancel', '/tasks', '/approve', '/deny', '/verify', '/expect', '/service',
-                    '/on', '/off', '/dolphin', 'y', 'yes', 'sí', 'si', 'n', 'no'}
+                    '/mode', '/m', '/on', '/off', '/dolphin', 'y', 'yes', 'sí', 'si', 'n', 'no'}
 
 
 def process_ordinary(manager, source, trace_id, text):
@@ -225,21 +223,26 @@ def _command(manager, source, text):
     name = parts[0].lower()
     if name in {'/help', '/?'}:
         return HELP_TEXT
+    if name in {'/mode', '/m'}:
+        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
+            raise ValueError('Controlador Dolphin no configurado')
+        arg = parts[1].lower() if len(parts) >= 2 else '?'
+        return manager.dolphin.set_mode(arg)
     if name == '/on':
         if not hasattr(manager, 'dolphin') or manager.dolphin is None:
             raise ValueError('Controlador Dolphin no configurado')
-        arg = parts[1].lower() if len(parts) >= 2 else 'low'
-        if arg == 'status':
-            return manager.dolphin.status()
-        return manager.dolphin.start(arg)
+        arg = parts[1].lower() if len(parts) >= 2 else 'mid'
+        if arg == 'low':
+            arg = 'mid'
+        return manager.dolphin.set_mode(arg)
     if name == '/off':
         if not hasattr(manager, 'dolphin') or manager.dolphin is None:
             raise ValueError('Controlador Dolphin no configurado')
-        return manager.dolphin.stop()
+        return manager.dolphin.set_mode('low')
     if name == '/dolphin':
         if not hasattr(manager, 'dolphin') or manager.dolphin is None:
             raise ValueError('Controlador Dolphin no configurado')
-        return manager.dolphin.status()
+        return manager.dolphin.set_mode('?')
     if name in {'/pixy', '/p'}:
         return manager.pixy.direct_response(text.partition(' ')[2], source=source)
     if name == '/service':

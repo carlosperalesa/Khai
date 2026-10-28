@@ -58,7 +58,7 @@ class ModuleManager:
         self.secret_capture = SecretCaptureService(self.secrets, self.secret_port)
         self.telegram = TelegramHandler(self.secrets.get('TELEGRAM_BOT_TOKEN'),self.secrets.get('TELEGRAM_USER_ID'))
         self.dolphin = DolphinController(str(self.data_dir),self.secrets)
-        provider = LLMManager(config_dir,str(self.data_dir/'voice'),self.memory,self.secrets,self.data_dir/'voice'/'voice.sqlite3')
+        provider = LLMManager(config_dir,str(self.data_dir/'voice'),self.memory,self.secrets,self.data_dir/'voice'/'voice.sqlite3',dolphin=self.dolphin)
         self.llm = Brain(provider)
         self.mind = Mind(self.llm,self.memory)
         self.pixy = PixyMind(self)

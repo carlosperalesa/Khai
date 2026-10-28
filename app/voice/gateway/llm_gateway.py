@@ -10,9 +10,10 @@ logger = logging.getLogger("LLMManager")
 class LLMManager:
     """Fachada global del sistema LLM con Unified Fallback."""
     
-    def __init__(self, config_dir: str, data_dir: str, memory=None, secrets=None, provider_db=None):
+    def __init__(self, config_dir: str, data_dir: str, memory=None, secrets=None, provider_db=None, dolphin=None):
         self.secrets = secrets
         self.provider_db = provider_db
+        self.dolphin = dolphin
         if provider_db:
             from app.kernel.database import connection
             with connection(provider_db) as conn:
@@ -71,14 +72,26 @@ class LLMManager:
         """Genera contenido iterando sobre el pool global de llaves (Unified Fallback)."""
         if len(prompt) > 100000:
             raise ValueError('Contexto excede el límite de 100000 caracteres por llamada')
-        if kwargs.get('purpose') == 'conversation':
+        is_conv = kwargs.get('purpose') == 'conversation'
+        conv_banner = ''
+        if is_conv:
+            dolphin_ctrl = getattr(self, 'dolphin', None)
+            active_mode = dolphin_ctrl.get_active_mode() if dolphin_ctrl is not None else None
             endpoint = os.getenv('KHAI_DOLPHIN_URL', '').strip().rstrip('/')
-            if endpoint:
+            if endpoint and (active_mode in {None, 'mid', 'high'}):
                 try:
-                    return self._generate_dolphin(prompt, endpoint)
+                    answer = self._generate_dolphin(prompt, endpoint)
+                    if dolphin_ctrl is not None and active_mode in {'mid', 'high'}:
+                        conv_banner = dolphin_ctrl.consume_transition_banner(active_mode)
+                    return conv_banner + answer
                 except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                     logger.warning('Dolphin no disponible (%s); se usará el proveedor de respaldo',
                                    type(exc).__name__)
+                    if dolphin_ctrl is not None:
+                        dolphin_ctrl.mark_fallback_to_low()
+                        conv_banner = dolphin_ctrl.consume_transition_banner('low')
+            elif dolphin_ctrl is not None:
+                conv_banner = dolphin_ctrl.consume_transition_banner('low')
         status = self._load_status()
         now = time.time()
         
@@ -102,7 +115,8 @@ class LLMManager:
                 kwargs['_timeout'] = min(60, kwargs.get('_timeout', 60))
             try:
                 generate = getattr(self, '_generate_' + current_cred['type'])
-                return generate(prompt, current_cred['key'], kwargs)
+                result = generate(prompt, current_cred['key'], kwargs)
+                return (conv_banner + result) if is_conv and conv_banner else result
             except Exception as exc:
                 # Never print credentials, URLs with keys, or full SDK exception payloads.
                 logger.warning('Proveedor %s falló (%s)', current_cred['id'], type(exc).__name__)

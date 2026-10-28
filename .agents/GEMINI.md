@@ -13,10 +13,12 @@ y desplegado bajo arquitectura híbrida (Khai + web en `vm-carlosperales` en Azu
 for Students; nodo efímero Dolphin en Google Cloud `gen-lang-client-0149640270`,
 zona `us-west1-a`, disco único `dolphin-boot-disk` `pd-standard` de 32 GB con
 `auto-delete=no`, enlazado por túnel privado WireGuard `10.200.0.1 <-> 10.200.0.2`).
-Desde Telegram, `/on` (`/on low`) levanta una VM Spot `e2-standard-8` (CPU),
-`/on high` levanta una VM Spot `g2-standard-4` (GPU NVIDIA L4 24 GB VRAM),
-`/off` elimina la instancia conservando el disco y el timer interno apaga la VM
-tras 5 minutos sin uso. Se configuraron dos presupuestos con alarmas cada
+Desde Telegram, `/mode` (o `/m`) selecciona el motor conversacional: `/m low`
+usa Gemini y elimina la instancia Spot conservando el disco, `/m mid` levanta una
+VM Spot `e2-standard-8` (Dolphin low / CPU), `/m high` levanta una VM Spot
+`g2-standard-4` (Dolphin high / GPU NVIDIA L4 24 GB VRAM), y `/m ?` consulta el
+estado actual. El timer interno apaga la VM tras 5 minutos sin uso y cada cambio
+de modelo emite la notificación `[Mode = x]`. Se configuraron dos presupuestos con alarmas cada
 `1.000 CLP` (`~1 USD`) en `01074F-B289A3-A589D8` (consumo bruto de créditos vs.
 cobro real neto). Documentación y scripts diferenciados en `Dolphin/gcloud/` y
 `Dolphin/azure/`. Mantener la web operativa en `vm-carlosperales`.

@@ -1,4 +1,4 @@
-"""Controlador HTTPS de Google Compute Engine para el nodo efímero Dolphin (Spot CPU/GPU)."""
+"""Controlador HTTPS de Google Compute Engine para modos de Khai (/mode low, mid, high, ?)."""
 import base64
 import json
 import logging
@@ -15,16 +15,21 @@ from app.kernel.database import adopt_schema, connection
 logger = logging.getLogger(__name__)
 
 PROFILES = {
-    'low': {
+    'mid': {
         'machine_type': 'e2-standard-8',
-        'label': 'low (CPU Spot e2-standard-8, 8 vCPU / 32 GB RAM)',
+        'label': 'mid (Dolphin CPU Spot e2-standard-8, 8 vCPU / 32 GB RAM)',
         'rate_clp_per_hour': 152.0,
     },
     'high': {
         'machine_type': 'g2-standard-4',
-        'label': 'high (GPU Spot g2-standard-4, NVIDIA L4 24 GB VRAM)',
+        'label': 'high (Dolphin GPU Spot g2-standard-4, NVIDIA L4 24 GB VRAM)',
         'rate_clp_per_hour': 418.0,
     },
+}
+
+MACHINE_TO_MODE = {
+    'e2-standard-8': 'mid',
+    'g2-standard-4': 'high',
 }
 
 
@@ -63,7 +68,7 @@ def _sign_rs256(private_key_pem: str, signing_input: bytes) -> bytes:
 
 
 class DolphinController:
-    """Administra la VM Spot efímera de Dolphin en GCE sobre un único disco persistente."""
+    """Administra el modo conversacional (low=Gemini, mid=Dolphin CPU Spot, high=Dolphin GPU Spot)."""
 
     def __init__(self, data_dir: str, secrets=None):
         self.data_dir = str(data_dir)
@@ -86,7 +91,17 @@ class DolphinController:
                 'ended_at REAL,'
                 'rate_clp_per_hour REAL NOT NULL)'
             )
-        adopt_schema(self.db_path, 'dolphin-sessions', ['dolphin_sessions'])
+            conn.execute(
+                'CREATE TABLE IF NOT EXISTS dolphin_mode_state('
+                'id INTEGER PRIMARY KEY CHECK (id = 1),'
+                'active_mode TEXT NOT NULL,'
+                'notified_mode TEXT NOT NULL)'
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO dolphin_mode_state(id, active_mode, notified_mode) "
+                "VALUES (1, 'low', 'low')"
+            )
+        adopt_schema(self.db_path, 'dolphin-sessions', ['dolphin_sessions', 'dolphin_mode_state'])
         self._token = None
         self._token_exp = 0.0
 
@@ -96,6 +111,44 @@ class DolphinController:
             if val is not None and str(val).strip():
                 return str(val).strip()
         return os.getenv(key, default).strip()
+
+    def get_active_mode(self) -> str:
+        with connection(self.db_path) as conn:
+            row = conn.execute('SELECT active_mode FROM dolphin_mode_state WHERE id = 1').fetchone()
+            return row['active_mode'] if row else 'low'
+
+    def _set_mode_state(self, active_mode: str, *, mark_notified: bool = False) -> None:
+        with connection(self.db_path) as conn:
+            if mark_notified:
+                conn.execute(
+                    'UPDATE dolphin_mode_state SET active_mode = ?, notified_mode = ? WHERE id = 1',
+                    (active_mode, active_mode),
+                )
+            else:
+                conn.execute(
+                    'UPDATE dolphin_mode_state SET active_mode = ? WHERE id = 1',
+                    (active_mode,),
+                )
+
+    def mark_fallback_to_low(self) -> None:
+        """Registra que Dolphin se apagó/no está disponible y vuelve a modo low (Gemini)."""
+        self._record_stop()
+        self._set_mode_state('low', mark_notified=False)
+
+    def consume_transition_banner(self, effective_mode: str) -> str:
+        """Devuelve '[Mode = x]\\n' solo cuando el modo efectivo cambió respecto al último notificado."""
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                'SELECT active_mode, notified_mode FROM dolphin_mode_state WHERE id = 1'
+            ).fetchone()
+            last_notified = row['notified_mode'] if row else 'low'
+            if last_notified != effective_mode:
+                conn.execute(
+                    'UPDATE dolphin_mode_state SET active_mode = ?, notified_mode = ? WHERE id = 1',
+                    (effective_mode, effective_mode),
+                )
+                return f'[Mode = {effective_mode}]\n'
+        return ''
 
     def _load_service_account(self) -> dict:
         raw_json = self._cfg('KHAI_DOLPHIN_GCP_SA_JSON', '')
@@ -244,10 +297,22 @@ class DolphinController:
             time.sleep(2)
         return False
 
-    def start(self, profile: str = 'low') -> str:
-        profile = (profile or 'low').strip().lower()
+    def set_mode(self, mode: str) -> str:
+        mode = (mode or '?').strip().lower()
+        if mode in {'?', 'status', 'info'}:
+            return self.status()
+        if mode == 'low':
+            return self.stop()
+        if mode not in PROFILES:
+            raise ValueError("Modo inválido. Usa '/m low' (Gemini), '/m mid' (Dolphin CPU), '/m high' (Dolphin GPU) o '/m ?'.")
+        return self.start(mode)
+
+    def start(self, profile: str = 'mid') -> str:
+        profile = (profile or 'mid').strip().lower()
+        if profile == 'low':
+            return self.stop()
         if profile not in PROFILES:
-            raise ValueError("Perfil inválido. Usa '/on low' o '/on high'.")
+            raise ValueError("Modo inválido. Usa '/m low', '/m mid', '/m high' o '/m ?'.")
         spec = PROFILES[profile]
         target_mt = spec['machine_type']
         current = self.get_instance()
@@ -255,9 +320,10 @@ class DolphinController:
             curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
             curr_status = current.get('status', '')
             if curr_mt == target_mt and curr_status == 'RUNNING':
+                self._set_mode_state(profile, mark_notified=True)
                 ready = self._wait_ollama_ready(timeout_sec=10)
                 estado_red = 'conectado por túnel WireGuard' if ready else 'arrancando servicio Ollama'
-                return f"Dolphin ya está activo en modo {spec['label']} ({estado_red}). {self.billing_summary()}"
+                return f"[Mode = {profile}]\nDolphin ya está activo en modo {spec['label']} ({estado_red}). {self.billing_summary()}"
             if curr_mt == target_mt and curr_status == 'TERMINATED':
                 resp = requests.post(
                     self._gce_url(f'instances/{quote(self.instance)}/start'),
@@ -267,10 +333,11 @@ class DolphinController:
                 resp.raise_for_status()
                 self._wait_operation(resp.json()['name'])
                 self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
+                self._set_mode_state(profile, mark_notified=True)
                 ready = self._wait_ollama_ready(timeout_sec=45)
                 suf = 'Túnel WireGuard y Ollama listos.' if ready else 'VM iniciada; Ollama terminará de responder en unos segundos.'
                 return (
-                    f"Dolphin encendido en modo {spec['label']}. {suf} "
+                    f"[Mode = {profile}]\nDolphin encendido en modo {spec['label']}. {suf} "
                     f"Auto-apagado tras 5 min sin actividad. {self.billing_summary()}"
                 )
             del_resp = requests.delete(
@@ -315,18 +382,23 @@ class DolphinController:
             raise RuntimeError(f'No se pudo crear instancia Spot ({target_mt}): {ins_resp.text[:300]}')
         self._wait_operation(ins_resp.json()['name'])
         self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
+        self._set_mode_state(profile, mark_notified=True)
         ready = self._wait_ollama_ready(timeout_sec=45)
         suf = 'Túnel WireGuard y Ollama listos.' if ready else 'VM creada; Ollama terminará de responder en unos segundos.'
         return (
-            f"Dolphin encendido en modo {spec['label']} sobre disco {self.disk} (32 GB). "
+            f"[Mode = {profile}]\nDolphin encendido en modo {spec['label']} sobre disco {self.disk} (32 GB). "
             f"{suf} Auto-apagado tras 5 min sin actividad. {self.billing_summary()}"
         )
 
     def stop(self) -> str:
         current = self.get_instance()
         self._record_stop()
+        self._set_mode_state('low', mark_notified=True)
         if current is None:
-            return f"Dolphin ya estaba apagado (instancia eliminada; disco {self.disk} en reposo). {self.billing_summary()}"
+            return (
+                f"[Mode = low]\nActivo en Gemini (instancia Dolphin ya estaba apagada; disco {self.disk} en reposo). "
+                f"{self.billing_summary()}"
+            )
         resp = requests.delete(
             self._gce_url(f'instances/{quote(self.instance)}'),
             headers=self._headers(),
@@ -336,19 +408,31 @@ class DolphinController:
             resp.raise_for_status()
             self._wait_operation(resp.json()['name'])
         return (
-            f"Dolphin apagado: instancia Spot eliminada y cobro de cómputo detenido. "
+            f"[Mode = low]\nActivo en Gemini. Instancia Spot de Dolphin eliminada y cobro de cómputo detenido. "
             f"El disco {self.disk} (32 GB) permanece en reposo. {self.billing_summary()}"
         )
 
     def status(self) -> str:
         current = self.get_instance()
         if current is None:
-            return f"Estado Dolphin: APAGADO (sin VM activa; disco {self.disk} de 32 GB en reposo). {self.billing_summary()}"
+            self._record_stop()
+            self._set_mode_state('low', mark_notified=True)
+            return (
+                f"[Mode = low]\nEstado: Gemini activo (Dolphin APAGADO; sin VM activa, disco {self.disk} de 32 GB en reposo). "
+                f"{self.billing_summary()}"
+            )
         curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
         curr_status = current.get('status', 'UNKNOWN')
-        if curr_status == 'TERMINATED':
+        if curr_status != 'RUNNING':
             self._record_stop()
+            self._set_mode_state('low', mark_notified=True)
+            return (
+                f"[Mode = low]\nEstado: Gemini activo (instancia Dolphin en estado {curr_status}, máquina {curr_mt}, disco {self.disk}). "
+                f"{self.billing_summary()}"
+            )
+        inferred_mode = MACHINE_TO_MODE.get(curr_mt, 'mid')
+        self._set_mode_state(inferred_mode, mark_notified=True)
         return (
-            f"Estado Dolphin: {curr_status} (máquina {curr_mt}, disco {self.disk}). "
+            f"[Mode = {inferred_mode}]\nEstado Dolphin: {curr_status} (máquina {curr_mt}, disco {self.disk}). "
             f"{self.billing_summary()}"
         )

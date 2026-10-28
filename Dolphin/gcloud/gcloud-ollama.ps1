@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('help', 'on', 'on-low', 'on-high', 'off', 'status')]
+    [ValidateSet('help', 'low', 'mid', 'high', 'on', 'on-low', 'on-high', 'off', 'status')]
     [string]$Command = 'help',
 
     [string]$Project = 'gen-lang-client-0149640270',
@@ -51,20 +51,22 @@ function Start-DolphinNode([string]$MachineType) {
 switch ($Command) {
     'help' {
         Write-Host 'Controlador Google Cloud Spot para Dolphin (disco único pd-standard 32 GB)'
-        Write-Host '  make on       -> Inicia VM Spot CPU (e2-standard-8)'
-        Write-Host '  make on-high  -> Inicia VM Spot GPU NVIDIA L4 (g2-standard-4)'
-        Write-Host '  make off      -> Elimina VM Spot conservando el disco de 32 GB'
+        Write-Host '  make low      -> Modo Gemini: elimina VM Spot conservando el disco de 32 GB'
+        Write-Host '  make mid      -> Modo Dolphin Low (CPU Spot e2-standard-8)'
+        Write-Host '  make high     -> Modo Dolphin High (GPU NVIDIA L4 Spot g2-standard-4)'
         Write-Host '  make status   -> Muestra estado de la instancia y del disco en us-west1-a'
     }
+    'mid'     { Start-DolphinNode 'e2-standard-8' }
+    'high'    { Start-DolphinNode 'g2-standard-4' }
     'on'      { Start-DolphinNode 'e2-standard-8' }
     'on-low'  { Start-DolphinNode 'e2-standard-8' }
     'on-high' { Start-DolphinNode 'g2-standard-4' }
-    'off' {
+    { $_ -in @('low', 'off') } {
         $existing = & $GcloudCmd compute instances list --project=$Project --filter="name=$Instance AND zone:$Zone" --format="value(name)"
         if ($existing) {
             & $GcloudCmd compute instances delete $Instance --project=$Project --zone=$Zone --keep-disks=boot --quiet
         } else {
-            Write-Host "Instancia $Instance ya está apagada/eliminada (disco $Disk en reposo)."
+            Write-Host "[Mode = low] Instancia $Instance ya está apagada/eliminada (disco $Disk en reposo)."
         }
     }
     'status' {

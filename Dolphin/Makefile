@@ -6,22 +6,31 @@ SHELL := powershell.exe
 GCLOUD_SCRIPT := ./gcloud/gcloud-ollama.ps1
 AZURE_SCRIPT  := ./azure/azure-ollama.ps1
 
-.PHONY: help on on-low on-high off status azure-help azure-on azure-off azure-status
+.PHONY: help low mid high on on-low on-high off status azure-help azure-on azure-off azure-status
 
 help:
 	@& '$(GCLOUD_SCRIPT)' help
 
+low:
+	@& '$(GCLOUD_SCRIPT)' low
+
+mid:
+	@& '$(GCLOUD_SCRIPT)' mid
+
+high:
+	@& '$(GCLOUD_SCRIPT)' high
+
 on:
-	@& '$(GCLOUD_SCRIPT)' on-low
+	@& '$(GCLOUD_SCRIPT)' mid
 
 on-low:
-	@& '$(GCLOUD_SCRIPT)' on-low
+	@& '$(GCLOUD_SCRIPT)' mid
 
 on-high:
-	@& '$(GCLOUD_SCRIPT)' on-high
+	@& '$(GCLOUD_SCRIPT)' high
 
 off:
-	@& '$(GCLOUD_SCRIPT)' off
+	@& '$(GCLOUD_SCRIPT)' low
 
 status:
 	@& '$(GCLOUD_SCRIPT)' status
