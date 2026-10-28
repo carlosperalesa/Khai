@@ -52,3 +52,4 @@ Se crearon dos presupuestos mensuales de `$10.000 CLP` con **10 umbrales cada un
 2. **`[COBRO REAL] Khai Dolphin Gasto Neto (cada 1.000 CLP)`** (`INCLUDE_ALL_CREDITS`): notifica cada `$1.000 CLP` únicamente si los créditos se agotan y existe facturación neta a pagar.
 
 Además, los comandos `/on`, `/off` y `/dolphin` en Telegram informan en cada respuesta si el consumo está cubierto por créditos, el acumulado en CLP y el saldo estimado de créditos disponible.
+

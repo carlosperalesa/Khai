@@ -73,3 +73,4 @@ switch ($Command) {
         & $GcloudCmd compute disks list --project=$Project --filter="name=$Disk"
     }
 }
+
