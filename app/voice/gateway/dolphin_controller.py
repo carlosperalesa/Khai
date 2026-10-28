@@ -91,8 +91,10 @@ class DolphinController:
         self._token_exp = 0.0
 
     def _cfg(self, key: str, default: str = '') -> str:
-        if self.secrets and key in self.secrets and str(self.secrets[key]).strip():
-            return str(self.secrets[key]).strip()
+        if self.secrets is not None and hasattr(self.secrets, 'get'):
+            val = self.secrets.get(key)
+            if val is not None and str(val).strip():
+                return str(val).strip()
         return os.getenv(key, default).strip()
 
     def _load_service_account(self) -> dict:
