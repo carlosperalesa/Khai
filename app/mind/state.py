@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from app.common.database import connect
+from app.kernel.database import connect
 from contextlib import contextmanager
 import json
 import logging
@@ -20,11 +20,11 @@ class StateManager:
     def __init__(self, data_dir: str = "data", db_path=None):
         self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
-        self.db_path = os.path.abspath(os.getenv("KHAI_DB_PATH") or os.path.join(self.data_dir if os.path.basename(os.path.normpath(self.data_dir)) != "memory" else os.path.dirname(self.data_dir), "openclaw.db"))
+        self.db_path = os.path.abspath(os.getenv("KHAI_DB_PATH") or os.path.join(self.data_dir if os.path.basename(os.path.normpath(self.data_dir)) != "memory" else os.path.dirname(self.data_dir), "control.sqlite3"))
         if db_path:
             self.db_path = str(db_path)
         self._init_db()
-        from app.common.database import adopt_schema
+        from app.kernel.database import adopt_schema
         adopt_schema(self.db_path,'legacy-state',['tasks','steps','audits'])
         
     @contextmanager

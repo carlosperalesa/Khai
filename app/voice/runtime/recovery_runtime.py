@@ -1,6 +1,6 @@
 """Technical channel for Hand's recovery steps. Only the closed catalog crosses the wire."""
 import requests
-from app.common.recovery import ACTION_ID, ACTIONS, TARGETS
+from app.heart.catalog import ACTION_ID, ACTIONS, TARGETS
 from app.voice.runtime.contract import proxy_url, proxy_headers
 
 

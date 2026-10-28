@@ -20,3 +20,9 @@ class Runtime(ABC):
 
     def get(self, execution_id):
         return self.status(execution_id)
+
+    @property
+    def capabilities(self):
+        from app.voice.runtime.contract import default_runtime_capabilities
+        return default_runtime_capabilities('docker')
+

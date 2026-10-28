@@ -1,15 +1,17 @@
 """Composition root. Domain ownership is explicit; transports stay in Voice."""
 import os
+import logging
 from pathlib import Path
-from app.common.database import connection
-from app.common.events import Events
-from app.common.migration import migrate_data
+from app.kernel.database import connection
+from app.kernel.events import Events
+from app.kernel.control_plane import ControlPlane
 from app.mind.identity import Identity
 from app.mind.memory import MemoryEngine
 from app.mind.state import StateManager
 from app.mind.mind import Mind
 from app.mind.brain import Brain
-from app.hand.forge import SkillForge
+from app.mind.skill_selector import LocalEncoder, SkillSelector
+from app.mind.action_planner import ActionPlanner
 from app.hand.hand import Hand
 from app.pixy.pixy import PixyMind
 from app.pixy.rules import Rules
@@ -19,10 +21,13 @@ from app.senses.senses import Senses, OBSERVERS
 from app.pixy.authorization import AuthorizationStore
 from app.heart.recovery import Recovery
 from app.voice.runtime.recovery_runtime import ProxyRecoveryExecutor
-from app.voice.secrets import Secrets
+from app.voice.secrets import Secrets, SecretCaptureService, CredentialStatusPort
+from app.voice.mailbox import VoiceMailbox
 from app.voice.gateway.llm_gateway import LLMManager
+from app.voice.gateway.dolphin_controller import DolphinController
 from app.voice.gateway.telegram_gateway import TelegramHandler
 from app.voice.gateway.external_gateway import ExternalGateway
+from app.voice.gateway.service_registry import ServiceRegistry, HandServicePort, PixyServicePort, VoiceServicePort
 from app.voice.gateway.asset_gateway import AssetGateway
 from app.voice.gateway.observation_gateway import CoreEyes
 from app.voice.runtime.docker_runtime import DockerRuntime
@@ -32,35 +37,66 @@ from app.voice.runtime.local_runtime import LocalRuntime
 class ModuleManager:
     def __init__(self, config_dir='config', data_dir='data'):
         self.data_dir = Path(data_dir).resolve()
-        migrate_data(self.data_dir)
-        self.events = Events(self.data_dir/'logs.sqlite3')
+        self.control_db = self.data_dir/'control.sqlite3'
+        self.events = Events(self.control_db)
+        self.control = ControlPlane(self.control_db, self.events)
+        self.voice_mailbox = VoiceMailbox(self.control_db)
+        self.coordinator_control = self.control.ports.coordinator
+        self.pixy_control = self.control.ports.pixy
+        self.heart_control = self.control.ports.heart
+        self.hand_control = self.control.ports.hand
         self.identity = Identity(self.data_dir/'mind'/'identity.yaml',self.data_dir/'memory'/'agent.md')
-        self.memory = MemoryEngine(str(self.data_dir/'mind'),self.data_dir/'mind'/'memory.sqlite3',self.identity)
-        self.state = StateManager(str(self.data_dir/'pixy'),self.data_dir/'pixy'/'logs.sqlite3')
-        self.audit_db = self.data_dir/'pixy'/'logs.sqlite3'
-        self.authorizations = AuthorizationStore(self.audit_db)
+        self.memory = MemoryEngine(str(self.data_dir/'mind'),self.control_db,self.identity)
+        self.state = StateManager(str(self.data_dir),self.control_db)
+        self.audit_db = self.control_db
+        # Compatibility handle for code outside the composition root. Organs receive scoped ports.
+        self.authorizations = self.control.authorizations
         self.recovery_executor = ProxyRecoveryExecutor()
         self.secrets = Secrets(self.data_dir)
+        self.voice_credentials = CredentialStatusPort(self.secrets)
+        self.secret_port = self.control.voice_secrets
+        self.secret_capture = SecretCaptureService(self.secrets, self.secret_port)
         self.telegram = TelegramHandler(self.secrets.get('TELEGRAM_BOT_TOKEN'),self.secrets.get('TELEGRAM_USER_ID'))
+        self.dolphin = DolphinController(str(self.data_dir),self.secrets)
         provider = LLMManager(config_dir,str(self.data_dir/'voice'),self.memory,self.secrets,self.data_dir/'voice'/'voice.sqlite3')
         self.llm = Brain(provider)
         self.mind = Mind(self.llm,self.memory)
         self.pixy = PixyMind(self)
-        self.rules = Rules(self.data_dir/'pixy'/'rules.sqlite3')
-        self.hand = Hand(self.data_dir/'hand',self.pixy,self.events,recovery_executor=self.recovery_executor,llm=self.llm)
+        self.rules = Rules(self.control_db)
+        service_registry = ServiceRegistry(self.control_db)
+        self.hand_services = HandServicePort(service_registry)
+        self.pixy_services = PixyServicePort(service_registry)
+        self.voice_services = VoiceServicePort(service_registry)
+        self.hand = Hand(self.data_dir/'hand',self.pixy,self.events,recovery_executor=self.recovery_executor,
+                         llm=self.llm,db_path=self.control_db,authorization_port=self.hand_control,
+                         service_proposals=self.hand_services)
         self.hand.manager = self
-        self.forge = self.hand
-        self.gateway = ExternalGateway(Path(config_dir)/'gateways.yaml',self.secrets,self.events,self.data_dir/'voice'/'voice.sqlite3')
+        self.gateway = ExternalGateway(Path(config_dir)/'gateways.yaml',self.secrets,self.events,
+                                       self.data_dir/'voice'/'voice.sqlite3',registry=self.voice_services)
+        encoder = None
+        backend, model = os.getenv('KHAI_EMBED_BACKEND'), os.getenv('KHAI_EMBED_MODEL')
+        if backend and model:
+            try:
+                encoder = LocalEncoder(backend, model)
+            except (ImportError, OSError, ValueError) as exc:
+                logging.getLogger(__name__).warning('Embedding local no disponible: %s', type(exc).__name__)
+        threshold = os.getenv('KHAI_EMBED_THRESHOLD')
+        margin = os.getenv('KHAI_EMBED_MARGIN')
+        self.skill_selector = SkillSelector(self.hand.catalog, encoder, self.llm,
+            threshold=float(threshold) if threshold and encoder else None,
+            min_margin=float(margin) if margin and encoder else None)
+        self.action_planner = ActionPlanner(self.llm, self.hand.catalog)
         choice = os.getenv('KHAI_RUNTIME','docker')
         if choice not in {'docker','local'}:
             raise ValueError('KHAI_RUNTIME must be docker or local')
         self.runtime = LocalRuntime(self.data_dir) if choice=='local' else DockerRuntime()
+        self.hand.capabilities = self.runtime.capabilities
         self.assets = AssetGateway(self.data_dir.parent/'other',self.data_dir/'voice'/'voice.sqlite3',self.pixy,self.events,self.hand)
-        self.dreams = Dreams(self.data_dir/'dreams'/'dreams.sqlite3',self.rules,self.events)
+        self.dreams = Dreams(self.control_db, self.rules, self.events, memory=self.memory)
         self.heart = Beat(self.data_dir,self.events)
         adapters = {name:lambda name=name:self._domain_snapshot(name) for name in OBSERVERS}
         self.senses = Senses(self.data_dir/'senses'/'senses.sqlite3',adapters,CoreEyes(str(self.data_dir)))
-        self.heart.recovery = Recovery(self.data_dir/'heart'/'heart.sqlite3',self.senses,self.hand,self.authorizations,self.events)
+        self.heart.recovery = Recovery(self.control_db,self.senses,self.hand,self.heart_control,self.events)
 
     def _domain_snapshot(self, name):
         if name in {'database','storage','heart'}:

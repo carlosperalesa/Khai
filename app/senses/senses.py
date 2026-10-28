@@ -1,7 +1,7 @@
 """Read-only observations through registered adapters; never shell or Docker socket."""
 import json
 import time
-from app.common.database import connection, migrate
+from app.kernel.database import connection, migrate
 
 
 OBSERVERS = ('voice','mind','brain','memory','dreams','heart','hand','pixy','runtime',

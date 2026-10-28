@@ -10,8 +10,8 @@ from fastapi import FastAPI, HTTPException, Request
 from app.bootstrap import ModuleManager
 from app.mind.coordinator import Coordinator
 from app.pixy.control import InstanceLock
-from app.common.database import connection
-from app.common.tracing import TracingFilter, trace_scope, new_trace_id
+from app.kernel.database import connection
+from app.kernel.tracing import TracingFilter, trace_scope, new_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +48,14 @@ async def lifespan(app):
             state='UNKNOWN', legacy_task_id=tid, error='Tarea anterior a la migración; requiere inspección manual')
     app.state.manager = manager
     worker = asyncio.create_task(manager.coordinator.run())
+    inbox_workers = [asyncio.create_task(run_inbox(manager, urgent=urgent))
+                     for urgent in (False, True)]
     try:
         yield
     finally:
+        for inbox_worker in inbox_workers:
+            inbox_worker.cancel()
+        await asyncio.gather(*inbox_workers, return_exceptions=True)
         manager.coordinator.stopping = True
         await worker
 
@@ -76,6 +81,9 @@ HELP_TEXT = """Comandos disponibles:
 /publish <ASSET_ID> - publica un archivo aprobado.
 /asset <ASSET_ID> - entrega un archivo publicado.
 /unpublish <ASSET_ID> - retira un archivo.
+/on [low|high|status] - enciende la VM Spot de Dolphin (low=CPU, high=GPU L4).
+/off - apaga y elimina la VM Spot de Dolphin conservando el disco.
+/dolphin - consulta el estado y consumo de créditos de Dolphin.
 Las aprobaciones de Pixy se responden con y/n cuando ella lo solicite."""
 
 
@@ -94,6 +102,106 @@ def authenticated_message(data, user_id):
     if not isinstance(text, str) or not text.strip() or len(text) > 32000:
         raise ValueError('Mensaje de texto inválido')
     return 'telegram:' + str(update_id), text.strip()
+
+
+def authenticated_private_context(data, user_id):
+    source, text = authenticated_message(data, user_id)
+    message = data.get('message') or {}
+    chat = message.get('chat') or {}
+    if chat.get('type') != 'private' or chat.get('id') is None:
+        return source, text, str(user_id), None
+    return source, text, str(user_id), str(chat['id'])
+
+
+def secret_command(manager, text, user_id, chat_id):
+    command_name = text.split(maxsplit=1)[0].lower() if text else ''
+    if command_name not in {'/us', '/pas', '/api'}:
+        return None
+    if chat_id is None:
+        raise PermissionError('La captura de credenciales requiere un chat privado')
+    if ' ' not in text:
+        raise ValueError('Captura de credencial inválida')
+    command_name, value = text.split(' ', 1)
+    value = value.strip()
+    receipt = manager.secret_capture.capture(command_name, value, user_id, chat_id)
+    return 'Credencial guardada. Recibo: ' + receipt
+
+
+def urgent_command(text):
+    name = text.split(maxsplit=1)[0].lower()
+    return name in {'/cancel', '/tasks', '/approve', '/deny', '/verify', '/expect', '/service',
+                    '/on', '/off', '/dolphin', 'y', 'yes', 'sí', 'si', 'n', 'no'}
+
+
+def process_ordinary(manager, source, trace_id, text):
+    with trace_scope(trace_id):
+        words = text.strip().split()
+        if not text.startswith('/'):
+            pending_questions = [task for task in manager.coordinator.store.all()
+                                 if task['state'] in {'WAITING_SCOPE', 'WAITING_INPUT_CONFIRMATION', 'UNVERIFIED',
+                                                       'WAITING_FEEDBACK', 'WAITING_CREATION_APPROVAL',
+                                                       'WAITING_EFFECT_DECISION', 'WAITING_EFFECT_DETAIL'}]
+            named = any(task['id'] in {words[0], words[-1]} for task in pending_questions) if words else False
+            if len(pending_questions) > 1 and not named:
+                manager.coordinator.notify(
+                    'Hay varias preguntas pendientes. Incluye el ID del objetivo: ' +
+                    ', '.join(task['id'] for task in pending_questions))
+                return
+        decision = bool(words and words[0].casefold() in {'y', 'yes', 'sí', 'si', 'n', 'no'}
+                        and len(words) <= 2)
+        reply = None
+        if not text.startswith('/'):
+            reply = manager.coordinator.accept_input_confirmation(source, text)
+            if reply is None:
+                reply = manager.coordinator.accept_effect_detail(source, text)
+            if reply is None:
+                reply = manager.coordinator.accept_effect_decision(source, text)
+        if decision and reply is None:
+            reviews = [task for task in manager.coordinator.store.all()
+                       if task['state'] in {'UNVERIFIED', 'WAITING_FEEDBACK'}]
+            approvals = [task for task in manager.coordinator.store.all()
+                         if task['state'] == 'WAITING_CREATION_APPROVAL']
+            authorizations = (manager.pixy.authorizations.pending_all()
+                              if getattr(manager.pixy, 'authorizations', None) else [])
+            target = words[1] if len(words) == 2 else None
+            if any(task['id'] == target for task in reviews) or (reviews and not approvals
+                    and not authorizations and target is None):
+                reply = manager.coordinator.accept_review_reply(source, text)
+            elif reviews and (approvals or authorizations) and target is None:
+                reply = 'Hay decisiones y resultados pendientes. Responde y/n con el ID correspondiente.'
+        if reply is None:
+            reply = command(manager, source, text)
+        if reply is None:
+            reviews = [task for task in manager.coordinator.store.all()
+                       if task['state'] in {'UNVERIFIED', 'WAITING_FEEDBACK'}]
+            targets_review = bool(words and any(task['id'] in {words[0], words[-1]}
+                                                for task in reviews))
+            scope_reply = (None if targets_review else
+                           manager.coordinator.accept_scope_reply(source, text))
+            review_reply = (manager.coordinator.accept_review_reply(source, text)
+                            if scope_reply is None else None)
+            if scope_reply is None and review_reply is None:
+                manager.coordinator.intake(source, text, trace_id=trace_id)
+            else:
+                manager.coordinator.notify(scope_reply or review_reply)
+        else:
+            manager.coordinator.notify(reply)
+
+
+async def run_inbox(manager, *, urgent):
+    while True:
+        try:
+            handled = await asyncio.to_thread(
+                manager.voice_mailbox.process_one,
+                lambda source, trace_id, text: process_ordinary(manager, source, trace_id, text),
+                urgent=urgent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning('Mensaje ordinario requiere reconciliación: %s', type(exc).__name__)
+            handled = False
+        if not handled:
+            await asyncio.sleep(0.5)
 
 
 def command(manager, source, text):
@@ -117,9 +225,26 @@ def _command(manager, source, text):
     name = parts[0].lower()
     if name in {'/help', '/?'}:
         return HELP_TEXT
+    if name == '/on':
+        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
+            raise ValueError('Controlador Dolphin no configurado')
+        arg = parts[1].lower() if len(parts) >= 2 else 'low'
+        if arg == 'status':
+            return manager.dolphin.status()
+        return manager.dolphin.start(arg)
+    if name == '/off':
+        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
+            raise ValueError('Controlador Dolphin no configurado')
+        return manager.dolphin.stop()
+    if name == '/dolphin':
+        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
+            raise ValueError('Controlador Dolphin no configurado')
+        return manager.dolphin.status()
     if name in {'/pixy', '/p'}:
         return manager.pixy.direct_response(text.partition(' ')[2], source=source)
-    if name in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(parts) == 1:
+    if name == '/service':
+        return manager.pixy.direct_response(text[1:], source=source)
+    if name in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(parts) <= 2:
         return manager.pixy.direct_response(text, source=source)
     if name == '/export' and len(parts) == 3:
         task = c.store.get(parts[1])
@@ -202,20 +327,15 @@ async def webhook(request: Request):
         update_id = data.get('update_id', 'msg')
         trace_id = new_trace_id(prefix=f"req_{update_id}")
         with trace_scope(trace_id):
-            source, text = authenticated_message(data, manager.telegram.user_id)
-            try:
-                reply = await asyncio.to_thread(command, manager, source, text)
-            except Exception as exc:
-                logger.exception("Error procesando comando: %s", exc)
-                err_str = str(exc)
-                if "Unified Fallback" in err_str or "API keys" in err_str:
-                    reply = "Servicio de IA no disponible temporalmente. Intenta en unos momentos."
-                else:
-                    reply = "No se pudo procesar la solicitud en este momento."
-            if reply is not None:
+            source, text, user_id, chat_id = authenticated_private_context(
+                data, manager.telegram.user_id)
+            if text.split(maxsplit=1)[0].lower() in {'/us', '/pas', '/api'}:
+                reply = await asyncio.to_thread(secret_command, manager, text, user_id, chat_id)
                 await asyncio.to_thread(manager.coordinator.notify, reply)
-            else:
-                manager.coordinator.intake(source, text, trace_id=trace_id)
+            elif hasattr(manager, 'voice_mailbox') and manager.voice_mailbox:
+                manager.voice_mailbox.accept(source, trace_id, text, urgent=urgent_command(text))
+            elif hasattr(manager, 'coordinator') and manager.coordinator:
+                manager.coordinator.intake(source, text)
         return {'ok': True}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc

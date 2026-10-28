@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from app.common.database import migrate, connection
+from app.kernel.database import migrate, connection
 from app.voice.runtime.runtime import Runtime
 from app.voice.runtime.contract import bundle_hash
 
@@ -31,6 +31,8 @@ class LocalRuntime(Runtime):
     def prepare(self, payload):
         if payload.get('network') or payload.get('dependencies'):
             raise PermissionError('LocalRuntime requires offline skills and preinstalled dependencies')
+        if not isinstance(payload.get('params', {}), dict) or len(json.dumps(payload.get('params', {}))) > 16000:
+            raise ValueError('Invalid skill parameters')
         if payload.get('mode') not in {'SAFE','AGENT','GOD'}:
             raise ValueError('Invalid runtime mode')
         for key,prefix in [('task_id','task'),('execution_id','run')]:
@@ -162,3 +164,9 @@ class LocalRuntime(Runtime):
 
     def cleanup(self, execution_id):
         return self.cancel(execution_id) if execution_id in self.processes else self.status(execution_id)
+
+    @property
+    def capabilities(self):
+        from app.voice.runtime.contract import default_runtime_capabilities
+        return default_runtime_capabilities('local')
+

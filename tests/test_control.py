@@ -9,18 +9,21 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from modules.control_store import ControlStore, BudgetExceeded, InstanceLock
-from modules.memory_engine import MemoryEngine
-from modules.state_manager import StateManager
-from modules.coordinator import Coordinator
-from modules.execution_contract import digest, verify_result, proxy_url, skill_metadata
-from modules.skill_forge import SkillForge
-from modules.pixy import PixyMind
-from modules.learning import LearningLedger
-from modules.llm_manager import LLMManager
-from modules.budget import current_budget
+from app.pixy.control import ControlStore, BudgetExceeded, InstanceLock
+from app.pixy.budget import current_budget
+from app.mind.memory import MemoryEngine
+from app.mind.state import StateManager
+from app.mind.coordinator import Coordinator
+from app.voice.runtime.contract import digest, proxy_url, skill_metadata
+from app.mind.verifier import verify_result
+from app.hand.hand import Hand
+from app.hand.base_skill import BaseSkill
+from app.pixy.pixy import PixyMind
+from app.pixy.rules import Rules
+from app.dreams.dreams import Dreams
+from app.voice.gateway.llm_gateway import LLMManager
 from docker_proxy.engine import Engine
-from orchestrator import app, authenticated_message
+from app.voice.voice import app, authenticated_message, process_ordinary
 import asyncio
 import httpx
 
@@ -35,9 +38,13 @@ class Fixture(unittest.TestCase):
         self.state = StateManager(str(self.root/'memory'))
         self.store = ControlStore(self.state.db_path)
         self.llm = Mock()
+        self.rules = Rules(self.state.db_path)
+        self.events = Mock()
+        self.dreams = Dreams(self.state.db_path, self.rules, self.events, memory=self.memory)
         self.manager = SimpleNamespace(state=self.state, memory=self.memory, telegram=Mock(), llm=self.llm,
-            core_mind=Mock(), core_heart=Mock())
-        self.manager.forge = SkillForge(self.llm, str(self.root/'skills'))
+            core_mind=Mock(), core_heart=Mock(), rules=self.rules, dreams=self.dreams, events=self.events)
+        pixy_audit = Mock(audit_artifact=Mock(return_value={'safe': True, 'requires_approval': False}))
+        self.manager.hand = Hand(self.root/'skills', pixy_audit, llm=self.llm, db_path=self.state.db_path)
         self.manager.pixy = PixyMind(self.manager)
         self.proxy = Mock()
         self.c = Coordinator(self.manager, self.proxy)
@@ -52,7 +59,7 @@ class Fixture(unittest.TestCase):
 
     def artifact(self, **kwargs):
         code = '# MODE: SAFE\nprint("result")'
-        path, sha = self.manager.forge.snapshot(code)
+        path, sha = self.manager.hand.snapshot(code)
         defaults = dict(state='READY', code=code, mode='SAFE', dependencies=[], artifact=path,
                         artifact_hash=sha, authorized_hash=sha, manifest={'purpose':'compute','capabilities':[]})
         defaults.update(kwargs)
@@ -96,6 +103,102 @@ class StoreTests(Fixture):
 
 
 class CoordinatorTests(Fixture):
+    def test_creation_consent_clarifies_scope_before_hand_generates(self):
+        task = self.store.create('telegram:goal', 'quiero saber el clima',
+            state='WAITING_CREATION_APPROVAL', original_request='quiero saber el clima',
+            manifest={'purpose': 'quiero saber el clima', 'capabilities': ['Network']})
+        self.manager.llm.generate_content.side_effect = [
+            json.dumps({'questions': ['¿Para qué ubicación y qué datos del clima necesitas la respuesta?']}),
+            json.dumps({'purpose': 'Clima en Santiago, Chile: temperatura en Celsius y lluvia',
+                        'required_output': ['temperatura en Celsius', 'posibilidad de lluvia'],
+                        'params': {'city': 'Santiago', 'country': 'Chile'},
+                        'missing_questions': []})]
+        self.manager.pixy.direct_response('y', source='telegram:consent')
+        self.assertEqual(self.store.get(task['id'])['state'], 'SCOPE_PLANNING')
+        self.c.advance(self.store.get(task['id']))
+        self.assertEqual(self.store.get(task['id'])['state'], 'WAITING_SCOPE')
+        self.assertEqual(self.store.get(task['id'])['generations'], 0)
+        self.c.accept_scope_reply('telegram:answer', 'Santiago, Chile, Celsius y si va a llover')
+        self.c.advance(self.store.get(task['id']))
+        current = self.store.get(task['id'])
+        self.assertEqual(current['state'], 'GENERATING')
+        self.assertEqual(current['goal_revision'], 1)
+        self.assertEqual(current['params']['city'], 'Santiago')
+        self.assertIn('lluvia', current['scope_revisions'][0]['required_output'][1])
+
+    def test_incomplete_owner_result_revises_same_goal_without_heart(self):
+        task = self.store.create('telegram:weather', 'clima en Santiago',
+            state='UNVERIFIED', original_request='quiero saber el clima',
+            manifest={'purpose': 'clima en Santiago', 'capabilities': ['Network']},
+            execution_id='run_' + 'a' * 32, goal_revision=1,
+            scope_revisions=[{'number': 1, 'purpose': 'temperatura en Santiago',
+                              'required_output': ['temperatura'], 'params': {'city': 'Santiago'}}])
+        self.manager.llm.generate_content.return_value = json.dumps({
+            'purpose': 'temperatura y lluvia en Santiago',
+            'required_output': ['temperatura', 'posibilidad de lluvia'],
+            'params': {'city': 'Santiago'}, 'missing_questions': []})
+        self.c.accept_review_reply('telegram:feedback', 'no, falta saber si va a llover')
+        self.assertEqual(self.store.get(task['id'])['state'], 'RESOLVING_SCOPE')
+        self.c.advance(self.store.get(task['id']))
+        current = self.store.get(task['id'])
+        self.assertEqual(current['id'], task['id'])
+        self.assertEqual(current['goal_revision'], 2)
+        self.assertEqual(current['state'], 'GENERATING')
+        self.assertEqual(current['owner_reviews'][0]['satisfied'], False)
+        with self.store.connection() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM control_feedback').fetchone()[0], 0)
+
+    def test_new_candidate_waits_for_owner_after_machine_check(self):
+        task = self.artifact(state='RUNNING', execution_id='run_' + 'b' * 32,
+                             version_id='v_candidate', criterion={
+                                 'kind': 'file_sha256', 'path': 'answer.txt',
+                                 'sha256': digest(b'expected')})
+        workspace = self.c.root/'workspaces'/task['id']/task['artifact_hash']
+        workspace.mkdir(parents=True)
+        (workspace/'answer.txt').write_bytes(b'expected')
+        self.proxy.get.return_value = {'status': 'finished', 'returncode': 0, 'stdout': 'expected'}
+        with patch.object(self.manager.hand, 'version', return_value={'status': 'draft'}):
+            self.c.advance(task)
+        current = self.store.get(task['id'])
+        self.assertEqual(current['state'], 'UNVERIFIED')
+        self.assertTrue(current['machine_verification']['success'])
+
+    def test_owner_no_requests_detail_before_revising_scope(self):
+        task = self.store.create('telegram:result', 'respuesta parcial',
+            state='UNVERIFIED', execution_id='run_' + 'c' * 32,
+            manifest={'purpose': 'respuesta parcial', 'capabilities': []})
+        reply = self.c.accept_review_reply('telegram:no', 'n')
+        self.assertIn('¿Qué falta', reply)
+        self.assertEqual(self.store.get(task['id'])['state'], 'WAITING_FEEDBACK')
+        self.c.accept_review_reply('telegram:detail', 'Quiero también la probabilidad')
+        self.assertEqual(self.store.get(task['id'])['state'], 'RESOLVING_SCOPE')
+
+    def test_direct_correction_has_same_negative_outcome_as_no(self):
+        task = self.store.create('telegram:direct-feedback', 'respuesta parcial',
+            state='UNVERIFIED', execution_id='run_' + 'd' * 32,
+            manifest={'purpose': 'respuesta parcial', 'capabilities': []})
+        process_ordinary(self.manager, 'telegram:correction', 'trace-correction',
+                         'El resumen está incorrecto, corrige la fuente')
+        current = self.store.get(task['id'])
+        self.assertEqual(current['state'], 'RESOLVING_SCOPE')
+        self.assertFalse(current['owner_reviews'][0]['satisfied'])
+        self.assertIn('corrige la fuente', current['owner_reviews'][0]['feedback'])
+
+    def test_multiple_pending_questions_require_id_for_natural_reply(self):
+        scope = self.store.create('telegram:scope', 'consulta', state='WAITING_SCOPE')
+        review = self.store.create('telegram:review', 'resultado', state='UNVERIFIED',
+                                   execution_id='run_' + 'e' * 32)
+        with patch.object(self.c, 'notify') as notify:
+            process_ordinary(self.manager, 'telegram:ambiguous', 'trace-ambiguous',
+                             'El resumen está incorrecto')
+        self.assertEqual(self.store.get(scope['id'])['state'], 'WAITING_SCOPE')
+        self.assertEqual(self.store.get(review['id'])['state'], 'UNVERIFIED')
+        self.assertIn('Incluye el ID', notify.call_args.args[0])
+        process_ordinary(self.manager, 'telegram:review-specific', 'trace-specific',
+                         review['id'] + ' El resumen está incorrecto')
+        self.assertEqual(self.store.get(review['id'])['state'], 'RESOLVING_SCOPE')
+        self.assertEqual(self.store.get(scope['id'])['state'], 'WAITING_SCOPE')
+
     def test_zero_exit_error_text_is_not_success(self):
         task = self.artifact(state='RUNNING', execution_id='run_'+'a'*32)
         self.proxy.get.return_value = {'status':'finished', 'returncode':0, 'stdout':'ERROR: missing output'}
@@ -186,11 +289,12 @@ class CoordinatorTests(Fixture):
     def test_full_offline_lifecycle_preserves_objective(self):
         request = '/make compute [MANIFEST] ' + json.dumps({'purpose':'compute','capabilities':[]})
         task = self.c.intake('telegram:lifecycle', request)
-        self.manager.forge.generate = Mock(return_value=('# MODE: SAFE\nprint(42)', 'SAFE', []))
+        self.llm.generate_content.return_value = json.dumps({'questions': []})
+        self.manager.hand.generate = Mock(return_value=('# MODE: SAFE\nprint(42)', 'SAFE', []))
         self.manager.pixy.review = Mock(return_value={'safe':True,'requires_approval':False,'reason':'offline'})
         self.proxy.submit.return_value = {'status':'queued'}
         self.proxy.get.return_value = {'status':'finished','returncode':0,'stdout':'42'}
-        for _ in range(6):
+        for _ in range(7):
             self.c.tick()
         current = self.store.get(task['id'])
         self.assertEqual(current['state'], 'UNVERIFIED')
@@ -310,7 +414,7 @@ class ContractTests(Fixture):
         self.llm.generate_content.assert_not_called()
 
     def test_missing_constitution_fails_closed(self):
-        with patch('modules.pixy.Path.read_text', side_effect=FileNotFoundError()):
+        with patch('app.pixy.pixy.Path.read_text', side_effect=FileNotFoundError()):
             self.assertFalse(self.manager.pixy._analyze_code_ast('print(1)', {'purpose':'x'})['safe'])
 
     def test_provider_fallback_charges_same_budget(self):
@@ -427,7 +531,7 @@ class WorkerTests(unittest.TestCase):
             root = Path(directory)
             artifact = root/'sample.py'
             artifact.write_text("""# MODE: GOD
-from modules.skill_forge import BaseSkill
+from app.hand.base_skill import BaseSkill
 class DynamicSkill(BaseSkill):
     def execute(self, request):
         value = self.run_step('prepare', lambda: {'message':'prepared'})

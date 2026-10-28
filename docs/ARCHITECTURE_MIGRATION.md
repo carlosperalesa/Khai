@@ -5,6 +5,10 @@ La implementación actual vive en `app/`. Los imports de `modules/` y
 Se conservan porque todavía forman parte del contrato de compatibilidad del
 despliegue.
 
+El trabajo local del 26 de octubre de 2026 no está confirmado en la VM. Antes
+de migrar, revisar los cambios sin commit, ejecutar la validación final y
+comprobar explícitamente la revisión que corre en el host.
+
 ## Propiedad y ejecución
 
 - Mind interpreta y coordina; Brain recibe una interfaz de Voice para el LLM.
@@ -13,7 +17,7 @@ despliegue.
 - Pixy realiza preflight, revisión y auditoría de artefactos. Las reglas nuevas
   son orientación aprobada por el usuario; no modifican `default_rules.yaml`.
 - Hand conserva borradores `.nombre`, versiones activas, ZIP numerados,
-  hashes y operaciones en `data/hand/hand.sqlite3`. Una restauración se audita
+  hashes y operaciones registradas en `data/control.sqlite3`. Una restauración se audita
   otra vez y crea una identidad nueva; rollback de v2 a v1 produce v2.1.
 - Voice posee credenciales, transportes, Runtime y AssetGateway. El motor Docker
   ahora está en `app/voice/runtime/docker_engine.py`; el proxy solo lo expone.
@@ -22,33 +26,29 @@ despliegue.
 - Heart separa Beat, VitalSigns y Diagnosis; Senses usa adaptadores de lectura
   para sus quince observadores. No recibe shell ni socket Docker.
 
-Los eventos centrales son resúmenes con IDs; las decisiones y presupuestos se
-conservan en Pixy. Un outbox durable conecta las transiciones con el log central
-sin fingir una transacción entre bases distintas.
+Los eventos centrales son resúmenes con IDs. Decisiones, presupuestos y órdenes
+comparten `data/control.sqlite3`, pero conservan propietarios lógicos y puertos
+acotados. Un outbox durable conecta el Core con stores externos sin fingir una
+transacción distribuida.
 
 ## Migrar y arrancar
 
 1. Detener bot y proxy. No ejecutar dos versiones contra los mismos datos.
 2. Instalar las dependencias de `requirements-dev.txt` para ejecutar las pruebas.
-3. Ejecutar `python -m scripts.migrate_architecture` desde la raíz.
-4. Comprobar `data/architecture-v1.json` y las bases de dominio. La copia previa
-   está en `data/backups/before-domain-split.sqlite3`; la base antigua se conserva.
+3. Preservar `data/voice/secrets.env` y `data/mind/identity.yaml`; retirar las bases legacy según el corte limpio autorizado.
+4. Ejecutar `python -m scripts.migrate_architecture` desde la raíz y comprobar `data/control.sqlite3`.
 5. Confirmar `data/voice/secrets.env`; se copia una vez desde `secrets.env`, sin
    sobrescribir un archivo existente. No imprimir su contenido.
 6. Mantener `.env` para `PROXY_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` y `KHAI_HOST_ROOT`.
    Los secretos de proveedores se leen desde Voice, no se inyectan a workers.
 7. Ejecutar las pruebas y reconstruir ambos contenedores con el Compose actualizado.
 
-El importador copia tablas por dominio y registra cada importación. Los objetivos
-antiguos pendientes pasan a `UNKNOWN`: requieren inspección antes de una nueva
-ejecución. Los datos históricos permanecen en sus tablas de dominio y en el backup;
-las reglas históricas no se convierten en nuevas aprobaciones por inferencia.
+No existe importación automática de bases heredadas ni doble escritura. El
+inicializador rechaza bases legacy para impedir fuentes de verdad mezcladas.
 
-Para volver a la revisión anterior, detener ambos servicios, recuperar el código
-anterior y restaurar **una copia** del backup SQLite mediante la API `backup` de
-SQLite. Restaurar juntos código, configuración y datos del respaldo previo. No
-sobrescribir datos nuevos sin conservarlos: los resultados posteriores a la
-migración no están en el backup anterior.
+Para volver a la revisión anterior, detener ambos servicios y recuperar código y
+configuración compatibles. Este corte no conserva datos legacy: el rollback de
+código crea estado vacío salvo que el operador mantenga una copia externa propia.
 
 ## Docker y LocalRuntime
 
@@ -74,10 +74,24 @@ método GET/POST, parámetros permitidos, tipos de contenido, límite de bytes, 
 y frecuencia. Las credenciales se nombran por clave de Voice, nunca por valor.
 Voice valida DNS público y fija la IP del socket, verifica TLS y rechaza redirects.
 
+Además del YAML heredado, Hand propone descriptores en el registro versionado.
+Pixy los presenta con `/service show HASH` y decide con `/service approve HASH`
+o `/service deny HASH`; Voice solo expone versiones aprobadas. La tarea fija
+servicio, operación y versión, y el gateway verifica esa referencia al atender
+el buzón privado del worker. La política futura de lectura automática y
+escritura con autorización humana aún no reemplaza este flujo manual.
+
 Una skill usa `from khai_gateway import request` y
 `request(service, operation, params)`. El worker intercambia JSON acotado por su
 workspace; no recibe claves ni conectividad. Las descargas binarias se realizan
 mediante AssetGateway y se guardan en cuarentena.
+
+Pixy revisa el uso de las librerías con el objetivo y las referencias de
+servicios; no veta un import de red solo por su nombre. El aislamiento del
+worker mantiene `network none`: cualquier comunicación efectiva pasa por Voice.
+Los parámetros de una skill reutilizada llegan mediante `khai_input.params`.
+El catálogo SkillSpec exige evidencia verificada para promocionar versiones.
+La composición tipada solo valida recetas; su ejecución sigue pendiente.
 
 Comandos del propietario:
 
@@ -97,9 +111,11 @@ Telegram es la implementación incluida.
 
 ## Validación y límites operativos
 
-`python -B -m unittest discover -s tests -v` cubre regresiones, composición real,
-migración y recuperación SQLite, Hand, ZIP corruptos, rollback, permisos, galería,
-métricas separadas, contratos de Runtime y rechazo de acceso directo a red.
+`python -B -m unittest discover -s tests -v` es la suite de regresión prevista;
+en este corte no se completó después de los últimos cambios. Las pruebas
+acotadas de arquitectura (30) y contratos F3 (12) pasaron. La composición real
+y la medición de embeddings locales siguen pendientes; no se deben inferir de
+pruebas con contratos o vectores simulados.
 Docker, Telegram y LLM se simulan en las pruebas normales; el worker sí ejecuta
 un fixture controlado en un proceso separado.
 

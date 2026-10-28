@@ -4,7 +4,7 @@ import json
 import os
 import re
 import sqlite3
-from app.common.database import connect
+from app.kernel.database import connect
 from app.voice.runtime.contract import bundle_hash
 import subprocess
 import time
@@ -34,7 +34,7 @@ class Engine:
         with self.connect() as conn:
             conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, fingerprint TEXT, payload TEXT, result TEXT, cancel INTEGER DEFAULT 0)')
-        from app.common.database import adopt_schema
+        from app.kernel.database import adopt_schema
         adopt_schema(self.db,'docker-runtime',['executions'])
 
     @contextmanager
@@ -60,6 +60,8 @@ class Engine:
             raise ValueError('Artefacto/modo inválido')
         if len(payload['request']) > 64000 or len(payload.get('dependencies', [])) > 30:
             raise ValueError('Payload demasiado grande')
+        if not isinstance(payload.get('params', {}), dict) or len(json.dumps(payload.get('params', {}))) > 16000:
+            raise ValueError('Parámetros de skill inválidos o demasiado grandes')
         for dep in payload.get('dependencies', []):
             if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+-]*)?', dep):
                 raise ValueError('Dependencia inválida')

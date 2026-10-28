@@ -5,8 +5,8 @@ import re
 import time
 import uuid
 from pathlib import Path
-from app.common.database import migrate, connection
-from app.common.files import read_regular
+from app.kernel.database import migrate, connection
+from app.voice.files import read_regular
 
 
 class AssetGateway:

@@ -1,4 +1,4 @@
-.PHONY: help start stop restart logs stats setup update test clean docker-up docker-down docker-logs backupdb restoredb backuplogs restorelogs
+.PHONY: help start stop restart logs stats setup update test clean clean-all docker-up docker-down docker-logs backupdb restoredb backuplogs restorelogs
 
 
 # Variables
@@ -25,10 +25,10 @@ logs: ## Muestra los últimos 50 registros de logs en vivo
 	tail -n 50 -f data/logs/*.log
 
 stats: ## Muestra estado del sistema
-	@docker exec khai_core python -c "from modules import ModuleManager; m = ModuleManager(); print(m.core_heart.check_integrity())"
+	@docker exec khai_core python -c "from app.bootstrap import ModuleManager; m = ModuleManager(); print(m.heart.check_integrity())"
 
 health: ## Alias para stats
-	@docker exec khai_core python -c "from modules import ModuleManager; m = ModuleManager(); print(m.core_heart.check_integrity())"
+	@docker exec khai_core python -c "from app.bootstrap import ModuleManager; m = ModuleManager(); print(m.heart.check_integrity())"
 
 setup: ## Configura el entorno inicial (carpetas y BD)
 	@echo "Creando directorios y configurando BD..."
@@ -47,11 +47,12 @@ test: ## Pruebas locales; Docker, Telegram y LLM simulados
 migrate: ## Migración offline con copia SQLite consistente; detener servicios primero
 	$(PYTHON_CMD) -m scripts.migrate_architecture
 
-clean: ## Limpia archivos temporales, logs > 7 días y caché
-	@echo "Limpiando caché y logs antiguos..."
-	find data/logs -type f -mtime +7 -exec rm {} +
-	find . -type d -name "__pycache__" -exec rm -rf {} +
-	@echo "Limpieza completada."
+clean: ## Limpia archivos temporales, logs > 7 días y caché (multiplataforma)
+	$(PYTHON_CMD) -m scripts.clean
+
+clean-all: ## Limpia temporales, caché y elimina el entorno virtual .venv
+	$(PYTHON_CMD) -m scripts.clean --include-venv
+
 
 docker-up: ## Levanta el sistema completo usando Docker Compose (en segundo plano)
 	@echo "Levantando contenedor Docker..."

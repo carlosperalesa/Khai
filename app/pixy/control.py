@@ -3,12 +3,14 @@ import contextlib
 import json
 import os
 import sqlite3
-from app.common.database import connect
+from app.kernel.database import connect
 import time
 import uuid
 from pathlib import Path
 
-TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "EXHAUSTED", "UNKNOWN", "UNVERIFIED"}
+TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "EXHAUSTED", "UNKNOWN", "UNVERIFIED",
+            "UNFULFILLABLE"}
+INITIAL_TASK_BUDGET = {'generations': 4, 'executions': 4, 'llm_calls': 16}
 
 
 class BudgetExceeded(RuntimeError):
@@ -34,7 +36,7 @@ class ControlStore:
                 CREATE TABLE IF NOT EXISTS control_commands (source TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS event_outbox(id TEXT PRIMARY KEY,document TEXT NOT NULL);
             ''')
-        from app.common.database import adopt_schema
+        from app.kernel.database import adopt_schema
         adopt_schema(self.db_path,'control',['control_tasks','control_events','control_commands','event_outbox'])
 
     @contextlib.contextmanager
@@ -50,12 +52,14 @@ class ControlStore:
     def create(self, source, request, **extra):
         task = dict(id="task_" + uuid.uuid4().hex, source=source, request=request,
                     state="ROUTING", created_at=time.time(), deadline=time.time() + 1800,
-                    generations=0, executions=0, llm_calls=0, max_generations=4,
-                    max_executions=4, max_llm_calls=16, revision=0, guidelines=[],
+                    generations=0, executions=0, llm_calls=0,
+                    max_generations=INITIAL_TASK_BUDGET['generations'],
+                    max_executions=INITIAL_TASK_BUDGET['executions'],
+                    max_llm_calls=INITIAL_TASK_BUDGET['llm_calls'], revision=0, guidelines=[],
                     hypothesis_id=None, alternatives=[], result=None)
         task.update(extra)
         if not task.get('trace_id'):
-            from app.common.tracing import get_trace_id, new_trace_id
+            from app.kernel.tracing import get_trace_id, new_trace_id
             task['trace_id'] = get_trace_id() or new_trace_id()
         with self.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO control_tasks VALUES (?, ?, ?)",
@@ -124,6 +128,13 @@ class ControlStore:
             conn.execute("INSERT INTO control_events(task_id,kind,data,created_at) VALUES (?,?,?,?)",
                          (task_id, kind, json.dumps(data), time.time()))
 
+    def eligible_rule_ids(self):
+        with self.connection() as conn:
+            try:
+                return {row[0] for row in conn.execute('SELECT rule_id FROM rule_proposals')}
+            except sqlite3.OperationalError:
+                return set()
+
     def command(self, source, task_id, fn):
         """Deduplicate command and state transition in the same transaction."""
         with self.connection() as conn:
@@ -140,6 +151,10 @@ class ControlStore:
             conn.execute("INSERT INTO control_commands VALUES (?)", (source,))
             self._queue_event(conn,task,'owner_command')
             return task
+
+    def has_command(self, source):
+        with self.connection() as conn:
+            return conn.execute('SELECT 1 FROM control_commands WHERE source=?', (source,)).fetchone() is not None
 
 
 class InstanceLock:

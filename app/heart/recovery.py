@@ -8,9 +8,12 @@ import logging
 import re
 import time
 import uuid
-from app.common.database import connection, migrate
-from app.common.recovery import plan_hash, requires_approval, validate_plan, validate_case_id
-from app.common.tracing import parse_log_errors, BOOT_TIME
+from app.kernel.database import connection, migrate
+from app.heart.catalog import (
+    plan_hash, requires_approval, validate_plan, validate_case_id,
+    CAUSE_TAXONOMY, cause_fingerprint
+)
+from app.kernel.tracing import parse_log_errors, BOOT_TIME
 
 ACTIVE = ('AUTHORIZED', 'HAND_CREATING', 'HAND_EXECUTING', 'VERIFYING')
 TERMINAL = {'RECOVERED', 'FAILED', 'DENIED', 'UNKNOWN', 'DIAGNOSED'}
@@ -22,7 +25,7 @@ TRANSITIONS = {
     'DIAGNOSED': {'SOLUTION_PROPOSED'},
     'SOLUTION_PROPOSED': {'WAITING_USER_APPROVAL', 'AUTHORIZED', 'DENIED'},
     'WAITING_USER_APPROVAL': {'AUTHORIZED', 'DENIED'},
-    'AUTHORIZED': {'HAND_CREATING', 'FAILED', 'DENIED', 'RECOVERED'},
+    'AUTHORIZED': {'HAND_CREATING', 'HAND_EXECUTING', 'FAILED', 'DENIED'},
     'HAND_CREATING': {'HAND_EXECUTING', 'FAILED'},
     'HAND_EXECUTING': {'VERIFYING', 'FAILED', 'UNKNOWN'},
     'VERIFYING': {'RECOVERED', 'FAILED', 'UNKNOWN'},
@@ -48,6 +51,15 @@ class Recovery:
                BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
             '''CREATE TRIGGER IF NOT EXISTS recovery_transitions_no_update BEFORE UPDATE ON recovery_transitions
                BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
+        ], [
+            'ALTER TABLE recovery_cases ADD COLUMN execution_order_id TEXT',
+        ], [
+            'ALTER TABLE recovery_cases ADD COLUMN incident_key TEXT',
+            'ALTER TABLE recovery_cases ADD COLUMN cause_code TEXT',
+            'ALTER TABLE recovery_cases ADD COLUMN task_id TEXT',
+            'ALTER TABLE recovery_cases ADD COLUMN run_id TEXT',
+            'CREATE INDEX IF NOT EXISTS idx_recovery_cases_incident ON recovery_cases(incident_key, state)',
+            'CREATE INDEX IF NOT EXISTS idx_recovery_cases_task ON recovery_cases(task_id, state)',
         ]], component='heart-recovery')
 
     # ------------------------------------------------------------------ storage
@@ -113,6 +125,102 @@ class Recovery:
         return ['storage', 'container_state_core', 'container_state_proxy', 'core_logs', 'pixy']
 
     # ------------------------------------------------------------- case intake
+    # ------------------------------------------------------------- case intake
+    @staticmethod
+    def classify_cause(failure_info, evidence=None):
+        """Clasifica un fallo de tarea o infraestructura según la taxonomía determinista de Khai."""
+        if isinstance(failure_info, dict):
+            err_str = failure_info.get('error') or failure_info.get('stderr') or failure_info.get('feedback') or ''
+            status = failure_info.get('status') or ''
+            returncode = failure_info.get('returncode')
+            details = f"{status} {err_str} {failure_info.get('stdout', '')}"
+        else:
+            err_str = str(failure_info or '')
+            status = ''
+            returncode = None
+            details = err_str
+
+        low = details.lower()
+
+        # 1. Presupuesto agotado
+        if any(term in low for term in ('presupuesto agotado', 'budget exceeded', 'budgetexceeded')):
+            return 'budget_exhausted', err_str or 'Presupuesto de tarea agotado'
+
+        # 2. Credencial ausente / rechazada
+        if any(term in low for term in ('401 unauthorized', '403 forbidden', 'api key missing', 'missing secret', 'credencial faltante', 'api_key')):
+            return 'missing_credential', err_str or 'Credencial o clave de acceso ausente o rechazada'
+
+        # 3. Efecto incierto
+        if status == 'unknown' or 'resultado incierto' in low or 'uncertain' in low:
+            return 'uncertain_effect', err_str or 'Efecto o estado de ejecución incierto; no se repite a ciegas'
+
+        # 4. Capacidad o servicio faltante
+        if any(term in low for term in ('capabilityrejected', 'missing capability', 'capacidad ausente', 'servicio no registrado', 'unregistered service')):
+            return 'missing_capability', err_str or 'Capacidad o servicio no registrado en la política de Voice/Runtime'
+
+        # 5. Dependencia ausente
+        if any(term in low for term in ('modulenotfounderror', 'importerror', 'no module named')):
+            return 'dependency_error', err_str or 'Dependencia o módulo no disponible en el runtime'
+
+        # 6. Sintaxis o excepción en código de skill
+        if any(term in low for term in ('syntaxerror', 'indentationerror', 'nameerror', 'typeerror', 'attributeerror', 'zerodivisionerror', 'indexerror', 'keyerror')) or 'traceback (most recent call last)' in low or (returncode is not None and returncode != 0):
+            return 'syntax_or_code', err_str or f'Error de sintaxis o excepción durante la ejecución (código {returncode})'
+
+        # 7. Proveedor temporal
+        if any(term in low for term in ('429 too many requests', '502 bad gateway', '503 service unavailable', '504 gateway timeout', 'retry-after', 'timeout', 'timed out', 'connection reset')):
+            return 'temporary_provider', err_str or 'Error temporal de red o proveedor (timeout/rate-limit)'
+
+        # 8. Verificador inválido
+        if isinstance(failure_info, dict) and failure_info.get('verification', {}).get('success') is False:
+            return 'invalid_result', err_str or 'El resultado de la tarea no satisfizo el verificador objetivo'
+
+        return 'syntax_or_code', err_str or 'Fallo no especificado durante la ejecución'
+
+    def open_incident_case(self, task, failure_info, requested_by='system'):
+        """Heart abre o deduplica un caso de incidente ante un fallo tipado, evitando bucles."""
+        task_id = task.get('id') if isinstance(task, dict) else str(task)
+        run_id = task.get('execution_id') if isinstance(task, dict) else None
+        cause_code, detail = self.classify_cause(failure_info)
+        fprint = cause_fingerprint(cause_code, detail)
+        incident_key = f"{task_id}:{run_id or 'none'}:{fprint}"
+
+        # Deduplicación: no abrir caso redundante si ya existe uno activo para este incidente exacto
+        with connection(self.path) as conn:
+            row = conn.execute(
+                'SELECT case_id FROM recovery_cases WHERE incident_key=? AND state NOT IN ("RECOVERED", "FAILED", "DENIED", "UNKNOWN") ORDER BY created_at DESC LIMIT 1',
+                (incident_key,)
+            ).fetchone()
+            if row:
+                return self.get(row['case_id'])
+
+        case_id = 'case-' + time.strftime('%Y%m%d') + uuid.uuid4().hex[:8]
+        now = time.time()
+        question = f"Incidente en tarea {task_id}: {cause_code} ({detail[:150]})"
+
+        with connection(self.path) as conn:
+            conn.execute('''INSERT INTO recovery_cases(case_id,question,requested_by,state,created_at,updated_at,
+                                                      incident_key,cause_code,task_id,run_id)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                         (case_id, question[:2000], str(requested_by), 'RECEIVED', now, now,
+                          incident_key, cause_code, task_id, run_id))
+            conn.execute('INSERT INTO recovery_transitions(case_id,from_state,to_state,detail,created_at) VALUES (?,?,?,?,?)',
+                         (case_id, None, 'RECEIVED', json.dumps({'requested_by': str(requested_by), 'incident_key': incident_key, 'cause': cause_code}), now))
+
+        self._move(case_id, 'COLLECTING_EVIDENCE', expected={'RECEIVED'})
+        try:
+            needed = self.select_evidence_resources(question)
+            evidence = self.senses.evidence('Heart ' + case_id + ': ' + str(question)[:200], 'before', resources=needed)
+        except Exception as exc:
+            return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__)
+
+        diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail, 'task_id': task_id})
+        case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, evidence=evidence, diagnosis=diagnosis)
+        plan = self.design(case_id, diagnosis)
+        if not plan:
+            return case
+        return self._move(case_id, 'SOLUTION_PROPOSED', expected={'DIAGNOSED'}, plan=plan,
+                          plan_hash=plan_hash(case_id, plan))
+
     def open_case(self, question, requested_by):
         case_id = 'case-' + time.strftime('%Y%m%d') + uuid.uuid4().hex[:8]
         now = time.time()
@@ -137,10 +245,19 @@ class Recovery:
 
     # --------------------------------------------------------------- diagnosis
     @staticmethod
-    def diagnose(evidence):
+    def diagnose(evidence, failure_override=None):
         findings = []
         def add(code, severity, detail, remedy=None):
             findings.append({'code': code, 'severity': severity, 'detail': detail, 'remedy': remedy})
+
+        if failure_override:
+            cause_code = failure_override.get('cause_code', 'syntax_or_code')
+            detail = failure_override.get('detail', '')
+            tid = failure_override.get('task_id')
+            action = 'retry_task' if cause_code == 'budget_exhausted' else 'remediate_task'
+            remedy = f"{action}:{tid}" if tid else None
+            add(cause_code, 'high', detail, remedy=remedy)
+
         storage = evidence.get('storage') or {}
         vitals, integrity = storage.get('vitals'), storage.get('integrity')
         if not isinstance(vitals, dict) or not isinstance(integrity, dict):
@@ -178,16 +295,18 @@ class Recovery:
             last_msg = active_errors[-1]['summary'] if active_errors else (raw_errors[-1][-300:] if raw_errors else '')
             add('core_error_burst', 'warning', f'{count} errores recientes en core_logs. Último: {last_msg}')
 
-        # Observar fallos en tareas recientes (ControlStore vía Pixy)
-        pixy_data = evidence.get('pixy') or {}
-        tasks = pixy_data.get('recent_tasks') or evidence.get('tasks') or []
-        failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED'}]
-        if failed_tasks:
-            latest = failed_tasks[0]
-            err = latest.get('error') or latest.get('feedback') or 'Fallo no especificado'
-            add('task_failure', 'high',
-                f"La tarea {latest['id']} ('{latest.get('request', '')[:80]}') terminó con estado {latest['state']}: {str(err)[:300]}.",
-                remedy=f"retry_task:{latest['id']}")
+        # Observar fallos en tareas recientes (ControlStore vía Pixy) si no hay override
+        if not failure_override:
+            pixy_data = evidence.get('pixy') or {}
+            tasks = pixy_data.get('recent_tasks') or evidence.get('tasks') or []
+            failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED'}]
+            if failed_tasks:
+                # Tomar la tarea fallida más reciente (A07: nunca tomar la más vieja)
+                latest = sorted(failed_tasks, key=lambda t: t.get('updated_at', 0), reverse=True)[0]
+                err = latest.get('error') or latest.get('feedback') or 'Fallo no especificado'
+                add('task_failure', 'high',
+                    f"La tarea {latest['id']} ('{latest.get('request', '')[:80]}') terminó con estado {latest['state']}: {str(err)[:300]}.",
+                    remedy=f"retry_task:{latest['id']}")
 
         status = 'critical' if any(f['severity'] == 'critical' for f in findings) else \
                  'degraded' if findings else 'ok'
@@ -203,16 +322,16 @@ class Recovery:
         if not remedies:
             return None
 
-        # Si el fallo corresponde a una tarea detenida/agotada, formular plan de reactivación y remediación
-        task_remedy = next((f for f in remedies if f['remedy'].startswith('retry_task:')), None)
+        # Si el fallo corresponde a una tarea detenida/fallida, formular plan de reactivación y remediación
+        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:'))), None)
         if task_remedy:
-            tid = task_remedy['remedy'].split(':', 1)[1]
-            steps = [{'action': 'retry_task', 'target': 'task'}]
-            plan = {'target': 'task', 'steps': steps, 'capabilities': ['TaskRemediate']}
+            action, tid = task_remedy['remedy'].split(':', 1)
+            steps = [{'action': action, 'target': 'task'}]
+            plan = {'target': 'task', 'steps': steps, 'capabilities': ['TaskRemediate'], 'task_id': tid}
             validate_plan(plan)
-            plan.update(task_id=tid, reason=task_remedy['code'],
-                        summary=f'Restablecer y reintentar la tarea {tid} tras solventar el diagnóstico de fallo.',
-                        risk='low', impact=f'La tarea {tid} se reactivará y regenerará su código con las reglas y presupuesto actualizados.',
+            plan.update(reason=task_remedy['code'],
+                        summary=f'Corregir o reintentar la tarea {tid} tras solventar el diagnóstico ({task_remedy["code"]}).',
+                        risk='low', impact=f'La tarea {tid} se reactivará y generará una corrección con feedback causal.',
                         reversible=True, requires_approval=requires_approval(plan))
             return plan
 
@@ -257,7 +376,8 @@ class Recovery:
         return self._move(case_id, 'AUTHORIZED', expected={'WAITING_USER_APPROVAL', 'SOLUTION_PROPOSED'},
                           detail={'decided_by': authorization.get('decided_by')},
                           authorization_id=authorization['authorization_id'],
-                          authorization_nonce=authorization['nonce'])
+                          authorization_nonce=authorization['nonce'],
+                          execution_order_id=authorization.get('order_id'))
 
     def expire_waiting(self):
         """Close cases whose question expired or was superseded in Pixy's ledger."""
@@ -272,9 +392,11 @@ class Recovery:
 
     # ------------------------------------------------------------- hand-off
     def _order(self, case):
+        plan_keys = ('target', 'steps', 'capabilities', 'task_id') if case['plan']['target'] == 'task' else ('target', 'steps', 'capabilities')
         return {'header': {'case_id': case['case_id'], 'issued_by': 'heart', 'authorization_id': case['authorization_id'],
+                           'order_id': case.get('execution_order_id'),
                            'nonce': case['authorization_nonce'], 'plan_hash': case['plan_hash']},
-                'plan': {k: case['plan'][k] for k in ('target', 'steps', 'capabilities')}}
+                'plan': {k: case['plan'][k] for k in plan_keys}}
 
     def advance(self, case_id):
         case = self.get(case_id)
@@ -295,16 +417,15 @@ class Recovery:
                 tid = case['plan'].get('task_id')
                 if not tid and case.get('diagnosis'):
                     for f in case['diagnosis'].get('findings', []):
-                        if f.get('remedy', '').startswith('retry_task:'):
+                        if f.get('remedy', '').startswith(('retry_task:', 'remediate_task:')):
                             tid = f['remedy'].split(':', 1)[1]
                             break
                 coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
                 if tid and coord:
                     try:
-                        coord.retry_task(tid)
-                        execution = {'status': 'completed', 'steps': [{'action': 'retry_task', 'target': 'task', 'status': 'completed'}]}
-                        return self._move(case_id, 'RECOVERED', expected={'AUTHORIZED'}, execution=execution,
-                                          verification={'task_restarted': True, 'task_id': tid})
+                        coord.retry_task(tid, authorization_id=case['authorization_id'])
+                        execution = {'status': 'running', 'steps': [{'action': 'retry_task', 'target': 'task', 'status': 'running', 'task_id': tid}]}
+                        return self._move(case_id, 'HAND_EXECUTING', expected={'AUTHORIZED'}, execution=execution)
                     except Exception as exc:
                         return self._move(case_id, 'FAILED', expected={'AUTHORIZED'}, error=f'Fallo al reintentar la tarea: {exc}')
                 else:
@@ -320,21 +441,48 @@ class Recovery:
             self._move(case_id, 'HAND_EXECUTING', expected={'HAND_CREATING'}, skill=skill)
             state = 'HAND_EXECUTING'
         if state == 'HAND_EXECUTING':
-            try:
-                execution = self.hand.advance_recovery(self._order(case))
-            except (PermissionError, ValueError) as exc:
-                return self._move(case_id, 'FAILED', expected={'HAND_EXECUTING'}, error='Hand no ejecutó: ' + str(exc)[:500])
-            if execution['status'] == 'running':
-                if time.time() - case['updated_at'] > HAND_TIMEOUT:
-                    return self._move(case_id, 'UNKNOWN', expected={'HAND_EXECUTING'}, execution=execution,
-                                      error='Hand no confirmó el resultado dentro del plazo.')
-                with connection(self.path) as conn:
-                    conn.execute('UPDATE recovery_cases SET execution=? WHERE case_id=?',
-                                 (json.dumps(execution, ensure_ascii=False), case_id))
-                return self.get(case_id)
-            self._move(case_id, 'VERIFYING', expected={'HAND_EXECUTING'}, execution=execution,
-                       detail={'hand_status': execution['status']})
-            state = 'VERIFYING'
+            if case['plan']['target'] == 'task':
+                tid = case['plan'].get('task_id')
+                if not tid and case.get('diagnosis'):
+                    for f in case['diagnosis'].get('findings', []):
+                        if f.get('remedy', '').startswith(('retry_task:', 'remediate_task:')):
+                            tid = f['remedy'].split(':', 1)[1]
+                            break
+                coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
+                if not coord:
+                    return self._move(case_id, 'FAILED', expected={'HAND_EXECUTING'}, error='Coordinador no disponible.')
+                current_task = coord.store.get(tid)
+                if not current_task:
+                    return self._move(case_id, 'UNKNOWN', expected={'HAND_EXECUTING'}, error=f'Tarea {tid} no encontrada.')
+                t_state = current_task.get('state')
+                if t_state in {'COMPLETED', 'FAILED', 'EXHAUSTED', 'CANCELLED'}:
+                    execution = case.get('execution') or {}
+                    execution['status'] = 'completed' if t_state == 'COMPLETED' else 'failed'
+                    execution['final_task_state'] = t_state
+                    self._move(case_id, 'VERIFYING', expected={'HAND_EXECUTING'}, execution=execution,
+                               detail={'task_state': t_state})
+                    state = 'VERIFYING'
+                else:
+                    if time.time() - case['updated_at'] > HAND_TIMEOUT:
+                        return self._move(case_id, 'UNKNOWN', expected={'HAND_EXECUTING'},
+                                          error='La tarea no confirmó el resultado dentro del plazo.')
+                    return case
+            else:
+                try:
+                    execution = self.hand.advance_recovery(self._order(case))
+                except (PermissionError, ValueError) as exc:
+                    return self._move(case_id, 'FAILED', expected={'HAND_EXECUTING'}, error='Hand no ejecutó: ' + str(exc)[:500])
+                if execution['status'] == 'running':
+                    if time.time() - case['updated_at'] > HAND_TIMEOUT:
+                        return self._move(case_id, 'UNKNOWN', expected={'HAND_EXECUTING'}, execution=execution,
+                                          error='Hand no confirmó el resultado dentro del plazo.')
+                    with connection(self.path) as conn:
+                        conn.execute('UPDATE recovery_cases SET execution=? WHERE case_id=?',
+                                     (json.dumps(execution, ensure_ascii=False), case_id))
+                    return self.get(case_id)
+                self._move(case_id, 'VERIFYING', expected={'HAND_EXECUTING'}, execution=execution,
+                           detail={'hand_status': execution['status']})
+                state = 'VERIFYING'
         if state == 'VERIFYING':
             return self.verify(case_id)
         return case
@@ -344,6 +492,34 @@ class Recovery:
         case = self.get(case_id)
         plan, execution = case['plan'], case['execution'] or {}
         target = plan['target']
+        if target == 'task':
+            tid = plan.get('task_id')
+            if not tid and case.get('diagnosis'):
+                for f in case['diagnosis'].get('findings', []):
+                    if f.get('remedy', '').startswith(('retry_task:', 'remediate_task:')):
+                        tid = f['remedy'].split(':', 1)[1]
+                        break
+            coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
+            if not coord:
+                return self._move(case_id, 'FAILED', expected={'VERIFYING'}, error='Coordinador no disponible para verificación.')
+            current_task = coord.store.get(tid)
+            if not current_task:
+                return self._move(case_id, 'UNKNOWN', expected={'VERIFYING'}, error=f'Tarea {tid} no encontrada.')
+            t_state = current_task.get('state')
+            v = current_task.get('verification') or current_task.get('feedback') or {}
+            v_success = v.get('success', True) if isinstance(v, dict) else True
+            checks = {'task_state': t_state, 'verified_success': v_success, 'task_id': tid}
+            if t_state == 'COMPLETED' and v_success:
+                outcome, error = 'RECOVERED', None
+            elif t_state == 'COMPLETED' and not v_success:
+                outcome, error = 'FAILED', f'Tarea {tid} completada pero la verificación de éxito falló o fue omitida.'
+            elif t_state in {'FAILED', 'EXHAUSTED', 'CANCELLED'}:
+                outcome, error = 'FAILED', f'Tarea {tid} terminó en estado {t_state}.'
+            else:
+                outcome, error = 'UNKNOWN', f'Estado de tarea {t_state} indeterminado.'
+            return self._move(case_id, outcome, expected={'VERIFYING'}, verification=checks,
+                              error=error, detail={'checks': checks})
+
         # Heart determina exactamente los parámetros necesarios para verificar la reparación
         check_resources = ['container_state_' + target]
         if plan.get('reason') == 'memory_pressure':

@@ -1,0 +1,49 @@
+{
+  "skills": [
+    {
+      "id": "weather-current",
+      "description": "Consultar las condiciones meteorológicas actuales de una ciudad: temperatura, humedad y viento. No entrega pronósticos ni historia.",
+      "inputs": ["city"],
+      "effect": "read"
+    },
+    {
+      "id": "exchange-rate",
+      "description": "Consultar la tasa de cambio actual entre dos monedas. No transfiere dinero ni ejecuta pagos.",
+      "inputs": ["base_currency", "quote_currency"],
+      "effect": "read"
+    },
+    {
+      "id": "pdf-text",
+      "description": "Extraer texto de un documento PDF proporcionado por el usuario. No edita el archivo.",
+      "inputs": ["document"],
+      "effect": "read"
+    },
+    {
+      "id": "file-checksum",
+      "description": "Calcular la huella SHA-256 de un archivo proporcionado por el usuario para comprobar su integridad.",
+      "inputs": ["file"],
+      "effect": "read"
+    }
+  ],
+  "development": [
+    {"query": "¿Qué temperatura hace ahora en Santiago?", "expected": "weather-current"},
+    {"query": "Necesito conocer el clima actual de Valparaíso", "expected": "weather-current"},
+    {"query": "¿Cuántos pesos chilenos equivale un dólar hoy?", "expected": "exchange-rate"},
+    {"query": "Consulta la cotización EUR a CLP", "expected": "exchange-rate"},
+    {"query": "Saca el contenido escrito de este PDF", "expected": "pdf-text"},
+    {"query": "Lee el texto del documento adjunto en formato PDF", "expected": "pdf-text"},
+    {"query": "Calcula el SHA-256 de este archivo", "expected": "file-checksum"},
+    {"query": "Quiero verificar la integridad del fichero con una huella", "expected": "file-checksum"},
+    {"query": "Reserva un vuelo para mañana", "expected": null},
+    {"query": "Transfiere dinero de mi cuenta bancaria", "expected": null},
+    {"query": "Dame el pronóstico del tiempo para la próxima semana", "expected": null}
+  ],
+  "held_out": [
+    {"query": "¿Hace frío ahora mismo en Concepción?", "expected": "weather-current"},
+    {"query": "A cuánto está el cambio de USD a CLP", "expected": "exchange-rate"},
+    {"query": "Pásame a texto las páginas de este archivo PDF", "expected": "pdf-text"},
+    {"query": "Comprueba que el archivo no cambió calculando su digest SHA256", "expected": "file-checksum"},
+    {"query": "Modifica este PDF y firma la última página", "expected": null},
+    {"query": "Muéstrame temperaturas históricas de Santiago", "expected": null}
+  ]
+}

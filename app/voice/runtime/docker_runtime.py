@@ -32,3 +32,9 @@ class DockerRuntime(Runtime):
         if result['status'] in {'queued','starting','running','started'}:
             return self.cancel(execution_id)
         return result  # Engine persists receipts before removing containers.
+
+    @property
+    def capabilities(self):
+        from app.voice.runtime.contract import default_runtime_capabilities
+        return default_runtime_capabilities('docker')
+

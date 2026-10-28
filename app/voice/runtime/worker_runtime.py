@@ -56,6 +56,9 @@ def execute(config, artifact='/skill/main.py', workspace='/app/data/public'):
         raise TimeoutError('Voice gateway timed out')
     gateway.request = request
     sys.modules['khai_gateway'] = gateway
+    skill_input = types.ModuleType('khai_input')
+    skill_input.params = config.get('params', {})
+    sys.modules['khai_input'] = skill_input
     checkpoints = Path(workspace) / '.checkpoints.json'
     class State:
         def read(self):
@@ -103,6 +106,7 @@ def execute(config, artifact='/skill/main.py', workspace='/app/data/public'):
             sys.modules['app'] = app_package
             sys.modules['app.hand'] = hand_package
             sys.modules['app.hand.forge'] = api
+            sys.modules['app.hand.base_skill'] = api
             spec = importlib.util.spec_from_file_location('dynamic_skill', artifact)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)

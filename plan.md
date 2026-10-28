@@ -1,5 +1,14 @@
 # Plan de recuperación coordinada: Pixy, Heart, Senses y Hand
 
+> **Vigencia (28 de octubre de 2026):** Este documento conserva el diagnóstico
+> y las decisiones del plan de recuperación F4 tal como se redactaron. La sección
+> «Situación actual del proyecto» y las referencias al commit desplegado describen
+> ese corte histórico. El estado operativo local vigente es F5 en curso y está
+> documentado en [README.md](./README.md),
+> [GEMINI.md](./.agents/GEMINI.md) y
+> [el roadmap](./docs/ESTADO_MIGRACION_Y_ROADMAP.md). La VM sigue en la revisión
+> anterior; este plan no autoriza desplegar ni purgar datos.
+
 ## 1. Problema
 
 La interfaz actual permite consultar a Pixy con `/pixy` o `/p`, pero la

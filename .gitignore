@@ -15,6 +15,7 @@ data/agent_logs/
 __pycache__/
 *.pyc
 .venv/
+.tools/
 .gemini/
 .idea/
 .vscode/

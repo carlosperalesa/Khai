@@ -65,22 +65,90 @@ def skill_metadata(code):
     return modes[first], deps
 
 
-def verify_result(result, criterion, workspace):
-    """A clean exit is necessary, never sufficient. Criteria must come from the owner."""
-    if result.get("status") != "finished" or result.get("returncode") != 0:
-        return None, "La ejecución no terminó correctamente"
-    if not criterion:
-        return None, "Falta un criterio del usuario; requiere /verify"
-    if criterion.get("kind") != "file_sha256":
-        return None, "Criterio no soportado"
-    root = Path(workspace).resolve()
-    relative = Path(criterion.get("path", ""))
-    if relative.is_absolute() or ".." in relative.parts:
-        return False, "Ruta de evidencia inválida"
-    path = (root / relative).resolve()
-    if not path.is_relative_to(root) or not path.is_file() or path.is_symlink():
-        return False, "Artefacto ausente o fuera del workspace"
-    if path.stat().st_size > 64 * 1024 * 1024:
-        return None, "Artefacto demasiado grande para este verificador"
-    actual = digest(path.read_bytes())
-    return actual == criterion.get("sha256"), {"path": str(relative), "sha256": actual}
+class RuntimeCapabilities:
+    """Declared, provider-independent execution and isolation guarantees."""
+
+    def __init__(
+        self,
+        runtime="docker",
+        version="1.0",
+        modes=("SAFE", "AGENT", "GOD"),
+        allowed_dependencies=True,
+        filesystem=None,
+        gateway_api=None,
+        limits=None,
+    ):
+        if runtime not in {"docker", "local"}:
+            raise ValueError("Runtime debe ser 'docker' o 'local'")
+        self.runtime = runtime
+        self.version = str(version)
+        self.modes = tuple(modes)
+        self.allowed_dependencies = bool(allowed_dependencies)
+        self.filesystem = filesystem or {
+            "readonly_root": True,
+            "workspace_rw": True,
+            "public_output": "/app/data/public",
+        }
+        self.gateway_api = gateway_api or {
+            "supported": True,
+            "module": "khai_gateway",
+            "function": "request",
+            "network_mode": "none",
+        }
+        self.limits = limits or {
+            "cpu": 1.0,
+            "memory_mb": 512,
+            "pids": 128,
+            "timeout_seconds": 120,
+        }
+
+    def validate_code(self, mode, dependencies):
+        if mode not in self.modes:
+            raise ValueError(f"Modo {mode} no soportado por este runtime (soportados: {self.modes})")
+        if dependencies and not self.allowed_dependencies:
+            raise ValueError("Instalación de dependencias dinámicas no permitida por este runtime")
+
+    def to_dict(self):
+        return {
+            "runtime": self.runtime,
+            "version": self.version,
+            "modes": list(self.modes),
+            "allowed_dependencies": self.allowed_dependencies,
+            "filesystem": dict(self.filesystem),
+            "gateway_api": dict(self.gateway_api),
+            "limits": dict(self.limits),
+        }
+
+
+def default_runtime_capabilities(runtime="docker"):
+    if runtime == "local":
+        return RuntimeCapabilities(
+            runtime="local",
+            version="1.0",
+            modes=("SAFE", "AGENT", "GOD"),
+            allowed_dependencies=False,
+            filesystem={
+                "readonly_root": True,
+                "workspace_rw": True,
+                "public_output": "/app/data/public",
+            },
+            gateway_api={
+                "supported": True,
+                "module": "khai_gateway",
+                "function": "request",
+                "network_mode": "none",
+            },
+            limits={
+                "cpu": 1.0,
+                "memory_mb": 512,
+                "pids": 128,
+                "timeout_seconds": 120,
+            },
+        )
+    return RuntimeCapabilities(
+        runtime="docker",
+        version="1.0",
+        modes=("SAFE", "AGENT", "GOD"),
+        allowed_dependencies=True,
+    )
+

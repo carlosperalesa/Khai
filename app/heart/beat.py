@@ -1,6 +1,6 @@
 import json
 import time
-from app.common.database import connection, migrate
+from app.kernel.database import connection, migrate
 from app.heart.vital_signs import VitalSigns
 from app.heart.diagnosis import Diagnosis
 

@@ -10,9 +10,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.common.database import connection, migrate
-from app.common.events import Events
-from app.common.recovery import validate_plan, plan_hash, requires_approval, ACTIONS, TARGETS
+from app.kernel.database import connection, migrate
+from app.kernel.events import Events
+from app.heart.catalog import validate_plan, plan_hash, requires_approval, ACTIONS, TARGETS
 from app.pixy.authorization import AuthorizationStore
 from app.pixy.pixy import PixyMind
 from app.senses.senses import Senses, OBSERVERS
@@ -40,6 +40,19 @@ class RecoveryCatalogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_plan({'target': 'core', 'steps': [{'action': 'shell_exec', 'target': 'core'}],
                           'capabilities': ['DockerRestart']})
+        with self.assertRaises(ValueError):
+            validate_plan({'target': 'core', 'steps': [{'action': 'retry_task', 'target': 'core'}],
+                          'capabilities': ['TaskRemediate']})
+
+    def test_task_subject_is_required_and_bound_into_hash(self):
+        base = {'target': 'task', 'steps': [{'action': 'retry_task', 'target': 'task'}],
+                'capabilities': ['TaskRemediate']}
+        with self.assertRaises(ValueError):
+            validate_plan(base)
+        one = dict(base, task_id='task_' + '1' * 32)
+        two = dict(base, task_id='task_' + '2' * 32)
+        self.assertNotEqual(plan_hash('case-20261026aaaabbbb', one),
+                            plan_hash('case-20261026aaaabbbb', two))
 
     def test_capabilities_mismatch_rejected(self):
         with self.assertRaises(ValueError):
@@ -112,7 +125,7 @@ class AuthorizationStoreTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.store.verify(auth['authorization_id'], auth['nonce'], case_id, ['HealthCheck'], 'core', '0' * 64)
 
-    def test_expiration_and_supersede(self):
+    def test_expiration_and_multiple_pending_decisions(self):
         case_id1 = 'case-20261025abcd0001'
         h1 = '1' * 64
         short_store = AuthorizationStore(self.db, ttl=0.01)
@@ -121,10 +134,12 @@ class AuthorizationStoreTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             short_store.decide(auth1['authorization_id'], True, 'user')
 
-        # Superseded pending
+        # Independent questions remain pending and require an explicit ID upstream.
         auth2 = self.store.issue('case-20261025abcd0002', ['DockerRestart'], 'core', '2' * 64, 'user')
         auth3 = self.store.issue('case-20261025abcd0003', ['DockerRestart'], 'core', '3' * 64, 'user')
-        self.assertEqual(self.store.get(auth2['authorization_id'])['status'], 'superseded')
+        self.assertEqual(self.store.get(auth2['authorization_id'])['status'], 'pending')
+        self.assertEqual([a['authorization_id'] for a in self.store.pending_all()],
+                         [auth2['authorization_id'], auth3['authorization_id']])
         self.assertEqual(self.store.pending()['authorization_id'], auth3['authorization_id'])
 
 
@@ -396,16 +411,29 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 approval_reply = manager.pixy.direct_response('y', source='telegram:202')
                 self.assertIn('Autorización', approval_reply)
 
-                # Heart advances the case
+                # Heart advances the case: AUTHORIZED -> HAND_EXECUTING (eliminating premature RECOVERED)
+                manager.heart.recovery.tick()
+                case = manager.heart.recovery.get(case_id)
+                self.assertEqual(case['state'], 'HAND_EXECUTING')
+
+                # Verify task was retried without erasing historical consumption.
+                retried_task = coordinator.store.get(tid)
+                self.assertEqual(retried_task['state'], 'GENERATING')
+                self.assertEqual(retried_task['generations'], 4)
+                self.assertEqual(retried_task['max_generations'], 8)
+                self.assertEqual(retried_task['attempt_number'], 2)
+                self.assertEqual(retried_task['budget_extensions'][0]['authorization_id'], pending_auth['authorization_id'])
+                self.assertEqual(retried_task['error'], 'Presupuesto agotado: generations')
+
+                # Simulate completed verified task
+                coordinator.store.update(tid, expected={'GENERATING'}, state='COMPLETED',
+                                         verification={'success': True, 'evidence': {'test': True}})
+
+                # Second tick advances HAND_EXECUTING -> VERIFYING -> RECOVERED
                 manager.heart.recovery.tick()
                 case = manager.heart.recovery.get(case_id)
                 self.assertEqual(case['state'], 'RECOVERED')
-
-                # Verify task was retried and reset to GENERATING with generations=0
-                retried_task = coordinator.store.get(tid)
-                self.assertEqual(retried_task['state'], 'GENERATING')
-                self.assertEqual(retried_task['generations'], 0)
-                self.assertIsNone(retried_task['error'])
+                self.assertTrue(case['verification']['verified_success'])
 
     def test_skill_creation_approval_flow(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -437,6 +465,8 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
 
                 # First tick processes ROUTING -> WAITING_CREATION_APPROVAL
                 coordinator.tick()
+                if coordinator._mailbox_job is not None:
+                    coordinator._mailbox_job.result(timeout=5)
                 current = coordinator.store.get(tid)
                 self.assertEqual(current['state'], 'WAITING_CREATION_APPROVAL')
 
@@ -448,6 +478,8 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 manager.pixy.direct_response('y', source='tg:2')
                 current = coordinator.store.get(tid)
                 self.assertEqual(current['state'], 'GENERATING')
+                coordinator._llm_executor.shutdown(wait=True, cancel_futures=True)
+                coordinator._mailbox_executor.shutdown(wait=True, cancel_futures=True)
 
 
 if __name__ == '__main__':

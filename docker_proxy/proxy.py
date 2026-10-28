@@ -57,6 +57,7 @@ class RunRequest(BaseModel):
     mode: Literal['SAFE', 'AGENT', 'GOD']
     dependencies: list[str] = Field(default_factory=list, max_length=30)
     request: str = Field(max_length=64000)
+    params: dict = Field(default_factory=dict, max_length=32)
     network: bool = False
     grants: list[dict] = Field(default_factory=list, max_length=20)
     deadline: float

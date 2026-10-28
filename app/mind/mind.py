@@ -69,7 +69,7 @@ class Mind:
         if msg_lower in ["limpiar", "/limpiar", "cleanup", "/cleanup"]:
             return {"action": "CLEANUP", "reply": ""}
         if msg_lower in ["hola", "buenas", "buen dia", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "hey", "que tal", "qué tal"]:
-            return {"action": "GENERAL_CHAT", "reply": "Hola Carlo. ¿En qué trabajamos hoy?"}
+            return {"action": "GENERAL_CHAT", "reply": "Hola ¿En qué trabajamos hoy?"}
             
         return None
         
@@ -135,6 +135,19 @@ REGLAS PARA EL JSON:
             response = self._validate_response(result_text.strip())
             
             intent = response.failure_analysis_intent if response.is_failure_analysis else response.normal_intent
+            if intent and intent.action == 'GENERAL_CHAT' and not response.is_failure_analysis:
+                conversation_prompt = (
+                    f"{personality_prompt}\n\n"
+                    "Responde en español al mensaje del propietario como Khai. "
+                    "Sé conciso. No afirmes haber ejecutado herramientas, enviado mensajes "
+                    "ni consultado datos externos. Si se requiere una acción, dilo claramente.\n\n"
+                    f"Historial reciente:\n{self.memory.get_chat_history(limit=10)}\n\n"
+                    f"Mensaje: {message}\nRespuesta:")
+                try:
+                    intent.reply = self.llm.generate_content(
+                        conversation_prompt, purpose='conversation')
+                except Exception as exc:
+                    logger.warning('Respuesta conversacional de respaldo (%s)', type(exc).__name__)
             
             # Guardar pensamiento interno
             if intent and intent.reasoning_summary:

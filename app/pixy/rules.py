@@ -3,7 +3,7 @@ import hashlib
 import json
 import time
 import uuid
-from app.common.database import migrate, connection
+from app.kernel.database import migrate, connection
 
 
 class Rules:
@@ -14,7 +14,7 @@ class Rules:
                source TEXT, version INTEGER, status TEXT, created_at REAL, approved_by TEXT,
                approved_at REAL, replaced_rule_id TEXT, rollback_of TEXT, content_hash TEXT)''',
             'CREATE TABLE IF NOT EXISTS rule_commands(source TEXT PRIMARY KEY, rule_id TEXT)',
-        ]])
+        ]], component='pixy-rules')
 
     def propose(self, content, source, rule_type='guidance'):
         if rule_type != 'guidance' or not isinstance(content,str) or not 1 <= len(content) <= 8000:
@@ -69,6 +69,15 @@ class Rules:
         with connection(self.path) as conn:
             conn.execute('UPDATE rules SET status="rolled_back" WHERE rule_id=?',(rid,))
             conn.execute('INSERT INTO rule_commands VALUES (?,?)',(owner,rid))
+
+    def get(self, rid):
+        with connection(self.path) as conn:
+            row = conn.execute('SELECT * FROM rules WHERE rule_id=?', (rid,)).fetchone()
+            return dict(row) if row else None
+
+    def deprecate(self, rid, reason='deprecated'):
+        with connection(self.path) as conn:
+            conn.execute('UPDATE rules SET status="deprecated" WHERE rule_id=?', (rid,))
 
     def active(self):
         with connection(self.path) as conn:

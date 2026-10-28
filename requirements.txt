@@ -1,4 +1,8 @@
 # Python Dependencies for Khai Framework
+# Use Python 3.12 for the local development environment. PyYAML may not
+# publish Windows wheels for newer Python versions immediately; avoid an
+# accidental source build that requires Microsoft C++ Build Tools.
+--only-binary=PyYAML
 
 # ===== CORE APIs =====
 requests>=2.31.0

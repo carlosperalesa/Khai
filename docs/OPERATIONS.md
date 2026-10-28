@@ -4,9 +4,20 @@
 
 El despliegue usa un host Linux con Docker Engine y Compose. Los contenedores se identifican como `khai_core` y `khai_docker_proxy`. Ejecute un Core y un proxy por directorio de datos.
 
-## Despliegue activo
+## Despliegue remoto y política de activación
 
-La instancia actualmente activa utiliza:
+El despliegue de la revisión actual está congelado mientras continúan las
+mejoras. No ejecutar los comandos de activación de esta guía hasta completar la
+validación de cierre y comprobar que el servicio de la revisión anterior no se
+rompe. `README.md` y `.agents/GEMINI.md` son las fuentes de verdad principales;
+esta guía describe el procedimiento técnico futuro.
+
+Los datos siguientes describen la última revisión remota documentada, **no una
+verificación de la revisión local del 26 de octubre de 2026**. Los cambios
+locales de las fases F0-F5 no se han activado en Azure. Confirmar estado de Git,
+configuración y salud de la VM solo como parte de una futura activación aprobada.
+
+La última instancia documentada utiliza:
 
 | Elemento | Valor |
 | --- | --- |
@@ -35,7 +46,7 @@ compruebe la regla de red antes de reiniciar el Core.
 | `TELEGRAM_WEBHOOK_SECRET` | Secreto del webhook, mínimo 32 caracteres; también debe registrarse en Telegram. |
 | `TELEGRAM_BOT_TOKEN` | Token del bot, en `secrets.env`. |
 | `TELEGRAM_USER_ID` | Único usuario autorizado, en `secrets.env`. |
-| `KHAI_DB_PATH` | SQLite del Core; Compose fija `/app/data/openclaw.db`. |
+| `KHAI_DB_PATH` | Override para herramientas aisladas; el Core usa `DATA_DIR/control.sqlite3`. |
 | `PROXY_URL` | Base del proxy; Compose usa `http://docker_proxy:8001`. |
 
 Las claves Gemini, Azure y OpenAI permanecen en `secrets.env`. El proxy solo recibe su token; el worker no recibe ninguno de esos secretos.
@@ -46,7 +57,7 @@ El Core utiliza HTTPS en 8443 si encuentra `data/certs/cert.pem` y `data/certs/k
 
 ## Actualización de la instancia activa
 
-La revisión actual se activó en la VM de Azure. Core y proxy se reconstruyen y
+La revisión anterior se activó en la VM de Azure. Core y proxy se reconstruyen y
 reinician juntos; no se debe reemplazar solo uno de ellos porque comparten el
 protocolo de ejecución.
 
@@ -67,9 +78,9 @@ la migración.
 
 Esta sección es un procedimiento para un despliegue futuro; la edición local de código no ejecuta estos pasos.
 
-1. Detenga la entrada de nuevas tareas y examine los agentes históricos y sus efectos. Los contenedores antiguos no pasan a estar administrados por el nuevo proxy automáticamente.
-2. Detenga Core y proxy anteriores antes de copiar datos. Con todos los escritores parados, respalde `data`, `.env`, `secrets.env`, certificados y la revisión de código. Si usa SQLite en caliente, utilice su API de backup; no copie solo el archivo principal ignorando WAL.
-3. Actualice código del Core y del proxy juntos. Complete `.env` con `KHAI_HOST_ROOT`, `PROXY_TOKEN` y `TELEGRAM_WEBHOOK_SECRET`; conserve las credenciales existentes de `secrets.env`.
+1. Detenga la entrada y ambos servicios. Este corte no importa tareas ni autorizaciones históricas.
+2. Preserve únicamente `data/voice/secrets.env` y `data/mind/identity.yaml` si aplica el reset aprobado. No traslade autorizaciones antiguas al store nuevo.
+3. Retire bases legacy y ejecute `python -m scripts.migrate_architecture`; debe crear `data/control.sqlite3` o rechazar el corte si detecta una base antigua.
 4. Compruebe `docker compose config --quiet`. Este comando valida configuración, no construye ni inicia servicios. Evite imprimir la configuración expandida si contiene secretos.
 5. Tras aprobar la activación, construya e inicie con `docker compose up -d --build`. Compruebe logs, montajes y conectividad privada antes de habilitar el bot.
 6. Registre en Telegram el mismo `TELEGRAM_WEBHOOK_SECRET`. `scripts/set_webhook.py` envía `secret_token` y usa el certificado de `data/certs/cert.pem`; ese script hace una llamada real a Telegram y se ejecuta deliberadamente al activar.
@@ -88,7 +99,7 @@ responda y consulte `getWebhookInfo` en Telegram. Un `pending_update_count` en
 cero confirma que Telegram pudo entregar las actualizaciones pendientes; no
 sustituye una prueba funcional desde el bot.
 
-La inicialización agrega tablas sin borrar las tareas y los eventos anteriores. Si encuentra el antiguo esquema de reglas sin `topic`, conserva esa tabla como legado antes de crear la actual. Las reglas antiguas no se convierten automáticamente en evidencia validada.
+La inicialización es limpia y no adopta tablas antiguas. Las reglas o permisos históricos no se convierten en evidencia ni autoridad nueva.
 
 Para volver a la versión anterior: detenga ambos servicios nuevos, restaure la revisión y el respaldo coherente de sus datos, restablezca el webhook correspondiente y después reinicie. No ejecute simultáneamente dos versiones sobre el mismo directorio.
 
@@ -115,6 +126,20 @@ simplemente `y` o `n`.
 4. Cuando se solicite permiso, lea `/artifact TASK_ID`. Apruebe o deniegue usando el token exacto de esa propuesta. El token vence en hasta 15 minutos y nunca supera el plazo del objetivo.
 5. Si falta un criterio automático, examine el output y los archivos del workspace. Envíe `/verify TASK_ID EXECUTION_ID success` o `failure`. La verificación se atribuye al usuario y a esa ejecución.
 6. Use `/cancel TASK_ID` para detener el trabajo. `CANCELLING` significa que falta confirmar la cancelación; `CANCELLED` confirma el resultado. Un servicio AGENT puede cancelarse incluso si su resultado ya se verificó. Cancelar detiene el proceso; no revierte efectos ya realizados.
+
+En el código local, una tarea Network sin servicio declarado puede quedar en
+`WAITING_SERVICE_APPROVAL`. Revise el destino, método, efecto y referencia de
+credencial con `/service show HASH`; `/service approve HASH` y
+`/service deny HASH` resuelven la propuesta. Por ahora también las lecturas
+requieren esta aprobación de descriptor. Si falta la clave, `WAITING_SECRET`
+solicita `/api VALOR` en un chat privado del propietario (o `/us` y `/pas`
+según el tipo). La captura se intercepta antes del inbox ordinario y no debe
+enviarse como mensaje libre a Mind. El recibo reanuda la misma tarea; el valor
+no aparece en el estado del objetivo. Evite copiar valores reales en reportes.
+
+El inbox y outbox ordinarios son durables. Una entrega Telegram que quedó
+`unknown` tras una caída no se reenvía automáticamente: el resultado de la
+tarea y el recibo de entrega se inspeccionan por separado.
 
 El criterio automático actual compara SHA256 de archivos de hasta 64 MiB. No hay un verificador HTTP o semántico automático. Un servicio iniciado necesita verificación del usuario y puede detenerse posteriormente; ambas observaciones se conservan.
 
@@ -147,11 +172,12 @@ Consulte `/tasks`, `/rules`, los logs de ambos servicios y `control_events`. El 
 Cada solicitud entrante por Telegram u otro transporte recibe inmediatamente un `trace_id` único (ej: `req_<update_id>-<timestamp>-<rand>`). Mediante `contextvars`, este identificador se propaga automáticamente por toda la tubería (`Voice` -> `Mind` -> `Coordinator` -> `Hand` -> `Senses` -> `Pixy` -> `Heart`).
 Los logs de `openclaw.log` se escriben con el formato `%(asctime)s %(levelname)s [%(trace_id)s] %(name)s %(message)s`, permitiendo aislar el camino completo de cada ejecución e incidente.
 
-### Autorizaciones Unificadas (Security Context Broker)
-Pixy actúa como la única fuente de verdad para autorizaciones sensibles, utilizando el `trace_id` como clave unificada:
-- Las autorizaciones se emiten y consultan directamente con `trace_id`.
-- Hand y Heart consultan a Pixy (`pixy.check_authorization(trace_id, capability)`).
-- Al ejecutarse la acción mutante, el permiso se marca atómicamente como `consumed` para prevenir ataques de repetición (anti-replay).
+### Autorizaciones del control común
+`trace_id` solo correlaciona eventos: no es una credencial ni concede autoridad.
+Las decisiones de Pixy se ligan a un sujeto, operación, versión o hash concreto
+mediante `authorization_id` y recibos durables en `data/control.sqlite3`.
+Heart propone planes, Pixy autoriza y Hand consume órdenes acotadas; un estado
+`UNKNOWN` requiere reconciliación antes de reintentar.
 
 ### Diagnóstico por Sesión y Boot Epoch (Heart)
 Heart clasifica los errores de `openclaw.log` discriminando por el hito de arranque (`boot_time`):
@@ -171,5 +197,11 @@ No elimine archivos de ejecuciones activas. La retención automática de imágen
 
 ## Validación antes de producción
 
-La suite local simula Docker, Telegram y modelos. En un entorno Linux de pruebas, antes de usar credenciales reales, compruebe: montajes y usuario efectivos; red deshabilitada; límites CPU/RAM/procesos; rechazo de secretos; timeout con eliminación; reinicio Core/proxy; recibos duplicados; aprobación GOD y cierre de AGENT. Confirme la cuota de disco y las reglas de salida de red del host.
-
+Tras los últimos cambios solo pasaron pruebas acotadas: 30 de arquitectura y
+12 de contratos F3. La suite completa se reservó para el cierre, por petición
+del propietario. No se midieron embeddings ni se probó composición ejecutada.
+En un entorno Linux de pruebas, antes de usar credenciales reales, compruebe:
+montajes y usuario efectivos; red deshabilitada; límites CPU/RAM/procesos;
+rechazo de secretos; timeout con eliminación; reinicio Core/proxy; recibos
+duplicados; aprobación GOD y cierre de AGENT. Confirme la cuota de disco y las
+reglas de salida de red del host.

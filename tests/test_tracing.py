@@ -6,13 +6,13 @@ import time
 import unittest
 from pathlib import Path
 
-from app.common.tracing import (
+from app.kernel.tracing import (
     trace_scope, get_trace_id, set_trace_id, new_trace_id,
     TracingFilter, parse_log_errors
 )
 from app.mind.coordinator import normalize_manifest
 from app.pixy.authorization import AuthorizationStore
-from app.common.recovery import plan_hash
+from app.heart.catalog import plan_hash
 
 
 class TracingAndManifestTests(unittest.TestCase):
@@ -83,7 +83,7 @@ class UnifiedPixyAuthorizationTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_issue_verify_consume_by_trace(self):
+    def test_trace_never_grants_or_consumes_authority(self):
         trace_id = "req-20261025-a1b2c3"
         plan = {'target': 'core', 'steps': [{'action': 'health_check', 'target': 'core'}],
                 'capabilities': ['HealthCheck']}
@@ -94,22 +94,15 @@ class UnifiedPixyAuthorizationTests(unittest.TestCase):
         self.assertEqual(auth['status'], 'pending')
         self.assertEqual(auth['trace_id'], trace_id)
 
-        # Antes de aprobación, verify_by_trace debe retornar None
-        self.assertIsNone(self.store.verify_by_trace(trace_id, 'HealthCheck'))
+        with self.assertRaises(PermissionError):
+            self.store.verify_by_trace(trace_id, 'HealthCheck')
 
         # Usuario aprueba
         decided = self.store.decide(auth['authorization_id'], True, 'user')
         self.assertEqual(decided['status'], 'approved')
 
-        # Ahora verify_by_trace confirma el permiso
-        verified = self.store.verify_by_trace(trace_id, 'HealthCheck')
-        self.assertIsNotNone(verified)
-        self.assertEqual(verified['authorization_id'], auth['authorization_id'])
-
-        # Consumir permiso
-        consumed = self.store.consume_by_trace(trace_id, 'HealthCheck', consumer='hand:test')
-        self.assertIsNotNone(consumed)
-        self.assertEqual(consumed['status'], 'consumed')
-
-        # Intento de segundo consumo debe retornar None (anti-replay)
-        self.assertIsNone(self.store.consume_by_trace(trace_id, 'HealthCheck', consumer='hand:another'))
+        with self.assertRaises(PermissionError):
+            self.store.verify_by_trace(trace_id, 'HealthCheck')
+        with self.assertRaises(PermissionError):
+            self.store.consume_by_trace(trace_id, 'HealthCheck', consumer='hand:test')
+        self.assertEqual(self.store.get(auth['authorization_id'])['status'], 'approved')

@@ -9,9 +9,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app.common.database import connection, migrate, backup
-from app.common.events import Events
-from app.common.migration import migrate_data
+from app.kernel.database import connection, migrate, backup
+from app.kernel.events import Events
+from app.kernel.migration import migrate_data
 from app.hand.hand import Hand
 from app.pixy.pixy import PixyMind
 from app.pixy.rules import Rules
@@ -147,14 +147,28 @@ class HandTests(ArchitectureFixture):
 
 
 class PolicyTests(ArchitectureFixture):
-    def test_network_import_allowed_only_when_declared(self):
-        for module in ('requests', 'socket', 'httpx', 'urllib.request'):
-            result = self.pixy._analyze_code_ast('# MODE: SAFE\nimport ' + module,
-                {'purpose': 'fetch data', 'capabilities': ['Network']})
-            self.assertTrue(result['safe'], f"Expected {module} to be safe when Network declared, got {result}")
-            result_no_cap = self.pixy._analyze_code_ast('# MODE: SAFE\nimport ' + module,
-                {'purpose': 'fetch data', 'capabilities': []})
-            self.assertFalse(result_no_cap['safe'])
+    def test_network_library_use_is_reviewed_in_task_context(self):
+        manifest = {'purpose': 'fetch data', 'capabilities': ['Network']}
+        context = {'request': 'consultar tasa', 'services': [
+            {'service_id': 'fx', 'operation': 'rate', 'version': 'v1'}]}
+        self.pixy.llm.generate_content.return_value = json.dumps({
+            'safe': False, 'requires_approval': False,
+            'reason': 'Intenta comunicar directamente fuera de Voice'})
+        direct = self.pixy.review('# MODE: SAFE\nimport requests\nrequests.get("https://example.org")',
+                                  manifest, context)
+        self.assertFalse(direct['safe'])
+        prompt = self.pixy.llm.generate_content.call_args.args[0]
+        self.assertIn('consultar tasa', prompt)
+        self.assertIn('fx', prompt)
+        self.pixy.llm.generate_content.return_value = json.dumps({
+            'safe': True, 'requires_approval': False, 'reason': 'Solo analiza una URL'})
+        parsed = self.pixy.review('# MODE: SAFE\nfrom urllib.parse import urlsplit\nprint(urlsplit("https://example.org").hostname)',
+                                  {'purpose': 'analizar URL', 'capabilities': []},
+                                  {'request': 'analizar URL', 'services': []})
+        self.assertTrue(parsed['safe'])
+        self.assertTrue(self.pixy._analyze_code_ast(
+            '# MODE: SAFE\nfrom khai_gateway import request\nrequest("fx", "rate", {})',
+            manifest)['safe'])
 
     def test_process_escapes_always_denied(self):
         for module in ('ctypes', 'subprocess', 'multiprocessing', 'pty'):
@@ -299,7 +313,7 @@ class RuntimeAndGatewayTests(ArchitectureFixture):
         import requests
         token = 'private-telegram-token'
         with patch('app.voice.gateway.telegram_gateway.requests.post',side_effect=requests.ConnectionError(token)), \
-             patch('app.common.utils.time.sleep'), self.assertLogs('Utils') as logs:
+             patch('app.voice.gateway.telegram_gateway.time.sleep'), self.assertLogs('Utils') as logs:
             with self.assertRaises(RuntimeError) as failure:
                 TelegramHandler(token,'owner').send_message('hello')
         self.assertNotIn(token,str(failure.exception))
@@ -348,24 +362,27 @@ class IntegrationTests(unittest.TestCase):
                     'TELEGRAM_BOT_TOKEN':'test-token','TELEGRAM_USER_ID':'owner'}):
                 manager = ModuleManager(data_dir=str(root))
                 self.assertEqual(manager.identity.read(),identity)
-                self.assertNotEqual(manager.memory.db_path,manager.state.db_path)
+                self.assertEqual(manager.memory.db_path,manager.state.db_path)
+                self.assertEqual(Path(manager.memory.db_path),root/'control.sqlite3')
                 manager.telegram = Mock()
-                manager.forge.generate = Mock(return_value=(CODE,'SAFE',[]))
+                manager.hand.generate = Mock(return_value=(CODE,'SAFE',[]))
                 manager.pixy.review = Mock(return_value={'safe':True,'requires_approval':False})
                 proxy = Mock()
                 proxy.submit.return_value = {'status':'queued'}
                 proxy.get.return_value = {'status':'finished','returncode':0,'stdout':'42'}
                 c = Coordinator(manager,proxy)
+                c.requirements.questions = Mock(return_value=[])
                 manager.coordinator = c
                 task = c.intake('telegram:1','/make compute [MANIFEST] '+json.dumps(MANIFEST))
-                for _ in range(6): c.tick()
+                for _ in range(8): c.tick()
                 task = c.store.get(task['id'])
                 self.assertEqual(task['state'],'UNVERIFIED')
-                self.assertEqual(manager.hand.version(task['version_id'])['status'],'active')
+                self.assertEqual(manager.hand.version(task['version_id'])['status'],'draft')
                 self.assertFalse(task['payload']['network'])
                 c.verify(task['id'],task['execution_id'],True,'telegram:2')
                 c.tick()
                 self.assertEqual(c.store.get(task['id'])['state'],'COMPLETED')
+                self.assertEqual(manager.hand.version(task['version_id'])['status'],'one_off')
                 self.assertEqual(manager.dreams.metrics(task['skill_name'],task['version_id'])['success_rate'],1)
                 with connection(manager.events.path) as conn:
                     self.assertGreater(conn.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)

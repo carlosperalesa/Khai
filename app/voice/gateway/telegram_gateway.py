@@ -4,7 +4,29 @@ import time
 from typing import Dict, List, Optional
 import logging
 import functools
-from app.common.utils import retry
+utils_logger = logging.getLogger("Utils")
+
+
+def retry(max_attempts: int = 3, delay: int = 2, backoff: int = 2, exceptions: tuple = (Exception,)):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 1
+            current_delay = delay
+            while attempt <= max_attempts:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    if attempt == max_attempts:
+                        utils_logger.error(f"Error final en {func.__name__} después de {max_attempts} intentos: {type(e).__name__}")
+                        raise
+                    utils_logger.warning(f"Error en {func.__name__} (intento {attempt}/{max_attempts}): {type(e).__name__}. Reintentando en {current_delay}s...")
+                    time.sleep(current_delay)
+                    current_delay *= backoff
+                    attempt += 1
+            return None
+        return wrapper
+    return decorator
 
 logger = logging.getLogger("TelegramHandler")
 

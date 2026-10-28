@@ -9,10 +9,14 @@ import uuid
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from app.common.database import connection, migrate
-from app.common.recovery import FINAL_STEP, canonical, plan_hash, validate_case_id, validate_plan
+from app.kernel.database import connection, migrate
+from app.heart.catalog import FINAL_STEP, canonical, plan_hash, validate_case_id, validate_plan
 from app.pixy.control import InstanceLock
-from app.voice.runtime.contract import digest, skill_metadata
+from app.pixy.control import BudgetExceeded
+from app.voice.runtime.contract import digest, skill_metadata, default_runtime_capabilities
+from app.hand.catalog import SkillCatalog
+from app.hand.skill_spec import validate_skill_spec
+from app.voice.gateway.service_registry import validate_descriptor
 
 RECOVERY_STEP_TIMEOUT = 300
 
@@ -22,12 +26,16 @@ def sha(raw):
 
 
 class Hand:
-    def __init__(self, root, pixy, events=None, recovery_executor=None, llm=None):
+    def __init__(self, root, pixy, events=None, recovery_executor=None, llm=None,
+                 db_path=None, authorization_port=None, service_proposals=None, capabilities=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.db = self.root/'hand.sqlite3'
+        self.db = Path(db_path).resolve() if db_path else self.root/'hand.sqlite3'
         self.pixy, self.events, self.llm = pixy, events, llm
+        self.authorization_port = authorization_port
+        self.service_proposals = service_proposals
         self.recovery_executor = recovery_executor
+        self.capabilities = capabilities
         self.recovery_root = self.root/'heart'
         self._mutex = threading.RLock()
         migrate(self.db, [[
@@ -44,7 +52,7 @@ class Hand:
                BEGIN SELECT RAISE(ABORT,'immutable operation history'); END''',
             '''CREATE TRIGGER IF NOT EXISTS operations_completed BEFORE UPDATE ON operations
                WHEN OLD.completed_at IS NOT NULL BEGIN SELECT RAISE(ABORT,'completed operation is immutable'); END''',
-        ]])
+        ]], component='hand-library')
         migrate(self.db, [[
             '''CREATE TABLE IF NOT EXISTS recovery_skills(case_id TEXT PRIMARY KEY, authorization_id TEXT NOT NULL,
                plan_hash TEXT NOT NULL, skill_hash TEXT NOT NULL, status TEXT NOT NULL,
@@ -57,6 +65,7 @@ class Hand:
             '''CREATE TRIGGER IF NOT EXISTS recovery_steps_no_delete BEFORE DELETE ON recovery_steps
                BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
         ]], component='hand-recovery')
+        self.catalog = SkillCatalog(self.db)
         self.recover()
 
     def recover(self):
@@ -64,6 +73,21 @@ class Hand:
         with self.locked():
             with connection(self.db) as conn:
                 rows = [dict(r) for r in conn.execute('SELECT * FROM versions WHERE status IN ("approved","active")')]
+                candidates = [dict(r) for r in conn.execute(
+                    'SELECT * FROM versions WHERE status IN ("draft","one_off")')]
+            for v in candidates:
+                draft = self.root/('.'+v['skill_name'])
+                retained = self.root/('.one-off-'+v['version_id'])
+                if v['status'] == 'draft' and retained.exists() and not draft.exists():
+                    if self.tree_hash(retained) != v['artifact_hash']:
+                        raise RuntimeError('One-off artifact changed during recovery')
+                    with connection(self.db) as conn:
+                        conn.execute('UPDATE versions SET status="one_off" WHERE version_id=?',
+                                     (v['version_id'],))
+                elif v['status'] == 'one_off' and draft.exists() and not retained.exists():
+                    if self.tree_hash(draft) != v['artifact_hash']:
+                        raise RuntimeError('One-off draft changed during recovery')
+                    draft.rename(retained)
             for v in rows:
                 folder = self.root/v['skill_name']
                 draft = self.root/('.'+v['skill_name'])
@@ -99,24 +123,46 @@ class Hand:
             finally:
                 lock.release()
 
-    def generate(self, task, guidelines, hypothesis=None):
+    def generate(self, task, guidelines, hypothesis=None, capabilities=None):
         if not self.llm:
             raise RuntimeError('Hand requiere un proveedor LLM para generar código')
+        caps = capabilities or self.capabilities or default_runtime_capabilities()
+        modes_str = ", ".join(f"# MODE: {m}" for m in caps.modes)
+        gateway_mod = caps.gateway_api.get("module", "khai_gateway")
+        gateway_fn = caps.gateway_api.get("function", "request")
+        deps_instruction = (
+            "Segunda línea opcional: # PIP: paquete==version."
+            if caps.allowed_dependencies
+            else "No declares dependencias externas # PIP (no permitidas en este runtime)."
+        )
+        public_dir = caps.filesystem.get("public_output", "/app/data/public")
         prompt = f'''Escribe Python autónomo para el objetivo: {task['request']}
-Devuelve SOLO un bloque de código Python. Primera línea: # MODE: SAFE (script corto),
-# MODE: AGENT (servicio) o # MODE: GOD (DynamicSkill derivada de BaseSkill).
-Segunda línea opcional: # PIP: paquete==version. No uses shell ni instrucciones Docker.
+Devuelve SOLO un bloque de código Python. Primera línea: una de {modes_str}.
+{deps_instruction} No uses shell ni instrucciones Docker.
 El entorno está aislado en contenedor; no uses subprocess, ctypes, multiprocessing ni librerías de escape del sistema.
-Si el manifiesto declara la capacidad 'Network', puedes usar urllib.request, requests o httpx para consultar APIs públicas externas directamente.
-El script debe manejar posibles errores e imprimir el resultado claro y formateado en stdout, o escribir en /app/data/public.
+El worker no tiene red directa (network_mode: {caps.gateway_api.get('network_mode', 'none')}). Si el manifiesto declara 'Network', usa exclusivamente
+`from {gateway_mod} import {gateway_fn}` y `{gateway_fn}(service, operation, params)` con los
+servicios y operaciones aprobados que se indican abajo. Nunca uses urllib.request,
+requests, httpx ni sockets para salir directamente.
+Cuando se reutilice la skill, los parámetros tipados estarán en
+`from khai_input import params`. Diseña el código para usar esos parámetros y
+validarlos; el texto original seguirá disponible en sys.argv[1].
+El script debe manejar posibles errores e imprimir el resultado claro y formateado en stdout, o escribir en {public_dir}.
+Si hay un contrato de acción planificada, implementa solamente esa acción. Lee sus entradas de
+`khai_input.params` y emite exactamente un objeto JSON en stdout que cumpla su output_schema.
+No incorpores otras acciones del objetivo compuesto dentro de esta skill.
 NO uses emoticones ni emojis en las salidas impresas ni en el código.
 Los servicios AGENT escuchan en 8080 dentro del contenedor; no se publican puertos.
-GOD permite la API BaseSkill desde modules.skill_forge; tampoco da permisos al host.
+GOD permite la API BaseSkill desde app.hand.base_skill; tampoco da permisos al host.
 No uses BaseSkill en SAFE. No inventes aprobaciones o resultados verificados.
+Facultades del runtime: {json.dumps(caps.to_dict(), ensure_ascii=False)}
 Manifiesto: {json.dumps(task.get('manifest', {}), ensure_ascii=False)}
+Servicios aprobados para este objetivo: {json.dumps(task.get('services', []), ensure_ascii=False)}
 Reglas aplicables: {json.dumps(guidelines, ensure_ascii=False)}
 Hipótesis a probar: {hypothesis or ''}
 Resultado/rechazo anterior: {str(task.get('feedback', ''))[:8000]}
+Alcance confirmado por el propietario: {json.dumps((task.get('scope_revisions') or [{}])[-1], ensure_ascii=False)}
+Contrato de acción planificada: {json.dumps(task.get('planned_skill_spec') or {}, ensure_ascii=False)}
 Código anterior: {str(task.get('code', ''))[:24000]}
 '''
         code = self.llm.generate_content(prompt)
@@ -127,7 +173,9 @@ Código anterior: {str(task.get('code', ''))[:24000]}
         code = code.strip()
         ast.parse(code)
         mode, deps = skill_metadata(code)
+        caps.validate_code(mode, deps)
         return code, mode, deps
+
 
     def snapshot(self, code):
         root = self.root.parent / 'artifacts'
@@ -142,6 +190,84 @@ Código anterior: {str(task.get('code', ''))[:24000]}
             if digest(path.read_bytes()) != sha_val:
                 raise ValueError('Artefacto existente alterado')
         return str(path.resolve()), sha_val
+
+    def describe(self, task, name, mode, dependencies):
+        """Ask for reusable metadata; failure leaves the code as a one-off artifact."""
+        planned = task.get('planned_skill_spec')
+        if planned:
+            if mode == 'AGENT':
+                raise ValueError('Una acción de receta debe terminar y entregar un resultado')
+            if planned['skill_id'] != name:
+                raise ValueError('Planned skill identity changed')
+            spec = {key: planned[key] for key in ('skill_id', 'description', 'use_cases',
+                                                  'input_schema', 'output_schema')}
+            spec.update(runtime=mode, dependencies=dependencies, services=task.get('services', []),
+                        verifier={'kind': 'owner_criterion'})
+            return validate_skill_spec(spec)
+        if not self.llm:
+            return None
+        services = task.get('services', [])
+        prompt = ("Describe esta capacidad reutilizable como JSON con description, use_cases, "
+                  "input_schema y output_schema. Ambos schemas deben ser objetos con properties, "
+                  "required y additionalProperties=false; cada propiedad tiene solo type. "
+                  "Puedes incluir extraction_templates como patrones literales con slots "
+                  "{campo:number}, {campo:integer}, {campo:currency}, {campo:city} o {campo:text}; "
+                  "cada patrón debe cubrir todos los campos requeridos. "
+                  "Separa parámetros de la solicitud concreta. No incluyas claves ni valores secretos. "
+                  "Objetivo: " + str(task['request'])[:3000] + "\n"
+                  "Servicio disponible: " + json.dumps(services, ensure_ascii=False))
+        try:
+            raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
+            proposed = json.loads(raw)
+            spec = {'skill_id': name, 'description': proposed['description'],
+                    'use_cases': proposed['use_cases'], 'input_schema': proposed['input_schema'],
+                    'output_schema': proposed['output_schema'], 'runtime': mode,
+                    'dependencies': dependencies, 'services': services,
+                    'verifier': {'kind': (task.get('criterion') or {}).get('kind', 'owner_criterion')}}
+            if 'extraction_templates' in proposed:
+                spec['extraction_templates'] = proposed['extraction_templates']
+            return validate_skill_spec(spec)
+        except BudgetExceeded:
+            raise
+        except Exception:
+            return None
+
+    def propose_service(self, descriptor):
+        if self.service_proposals is None:
+            raise RuntimeError('Hand has no service proposal port')
+        return self.service_proposals.propose(descriptor)
+
+    def describe_service(self, task):
+        """Propose a fixed Voice operation; only Pixy can activate it."""
+        if self.llm is None:
+            raise RuntimeError('No hay LLM para proponer el servicio externo')
+        prompt = ("Propón un descriptor JSON de UNA operación HTTPS pública para este objetivo. "
+                  "Devuelve exactamente service_id, operation, version, url, method, parameters, "
+                  "content_types, max_bytes, timeout, per_minute, effect, credential_ref y effect_contract. "
+                  "La URL debe ser fija; parámetros van en query GET o cuerpo JSON POST. "
+                  "No inventes credenciales ni incluyas sus valores. credential_ref es una variable "
+                  "de entorno en mayúsculas o null. Declara effect=write si altera datos remotos. "
+                  "Para read usa effect_contract=null. Para write declara effect_contract con "
+                  "kind=create|update|delete|other, identity={source:request|response,field:<campo>} "
+                  "o null, summary={name:<nombre fijo>,context:<contexto fijo no sensible>} "
+                  "y correction={service_id,operation,version,identity_parameter,questions} "
+                  "o null. questions asocia cada parámetro correctivo distinto de la identidad "
+                  "con {description,question}; describe para qué sirve y cómo pedirlo al usuario. "
+                  "El resumen identifica el tipo de efecto; no copies petición, contenido, claves "
+                  "ni datos variables. Pixy lo revisará antes de aprobar el servicio. "
+                  "La corrección debe referirse a una operación real; nunca la inventes. "
+                  "Para escritura en lote, usa identity=null y declara batch con request_field, "
+                  "response_field, index_field, identity_field, status_field, success_value y "
+                  "failure_value. Cada respuesta por elemento debe incluir índice estable y estado; "
+                  "cada éxito debe incluir ID único. No adivines correspondencias por el orden del JSON. "
+                  "Si desconoces un endpoint real, responde {}. Objetivo: " + str(task['request'])[:3000])
+        try:
+            raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
+            spec = json.loads(raw) if isinstance(raw, str) else raw
+            validate_descriptor(spec)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError('Hand no pudo declarar un servicio externo válido') from exc
+        return spec, self.propose_service(spec)
 
     def _name(self, name):
         if not isinstance(name,str) or not re.fullmatch('[a-z][a-z0-9-]{0,63}',name):
@@ -254,6 +380,20 @@ Código anterior: {str(task.get('code', ''))[:24000]}
                 conn.execute('UPDATE versions SET status="rejected" WHERE version_id=?',(vid,))
             self._finish(op)
 
+    def finish_one_off(self, vid):
+        """Retain a verified artifact without making it a reusable skill."""
+        with self.locked():
+            v = self.version(vid)
+            if v['status'] != 'draft':
+                raise ValueError('Only a candidate can finish as one-off')
+            source = self.root/('.'+v['skill_name'])
+            if self.tree_hash(source) != v['artifact_hash']:
+                raise ValueError('Candidate changed after execution')
+            source.rename(self.root/('.one-off-'+vid))
+            with connection(self.db) as conn:
+                conn.execute('UPDATE versions SET status="one_off" WHERE version_id=?', (vid,))
+            return self.version(vid)
+
     def _verify_zip(self, path, name):
         if path.is_symlink() or path.stat().st_size>256*1024*1024:
             raise ValueError('Unsafe or oversized archive')
@@ -321,13 +461,7 @@ Código anterior: {str(task.get('code', ''))[:24000]}
             if not audit['safe']:
                 raise PermissionError(audit.get('reason','Artifact not safe'))
             if audit.get('requires_approval') and not user_approved:
-                from app.common.tracing import get_trace_id
-                trace = correlation_id or get_trace_id()
-                if trace and hasattr(self.pixy, 'check_authorization') and self.pixy.check_authorization(trace):
-                    self.pixy.consume_authorization(trace, consumer='hand:' + vid)
-                    user_approved = True
-                else:
-                    raise PermissionError(audit.get('reason','Approval required'))
+                raise PermissionError(audit.get('reason','Approval required'))
             current = self.active(name)
             if active.exists() and not current:
                 raise ValueError('Unregistered active directory')
@@ -442,16 +576,20 @@ Código anterior: {str(task.get('code', ''))[:24000]}
         self._finish(op)
         return v
 
-    def prepare_execution(self, vid, eid, code_hash):
+    def prepare_execution(self, vid, eid, code_hash, *, user_approved=False):
         if not re.fullmatch('run_[a-f0-9]{32}',eid):
             raise ValueError('Invalid execution ID')
         with self.locked():
             v = self.version(vid)
-            if v['status']!='active':
-                raise ValueError('Execution requires an active skill')
-            source = self.root/v['skill_name']
+            if v['status'] not in {'active', 'draft'}:
+                raise ValueError('Execution requires an active or draft skill')
+            source = self.root/v['skill_name'] if v['status'] == 'active' else self.root/('.'+v['skill_name'])
             if self.tree_hash(source)!=v['artifact_hash'] or sha((source/'app'/'main.py').read_bytes())!=code_hash:
                 raise ValueError('Execution artifact differs from approved skill')
+            if v['status'] == 'draft':
+                audit = self.pixy.audit_artifact(source, json.loads(v['manifest']), v['artifact_hash'])
+                if not audit['safe'] or (audit.get('requires_approval') and not user_approved):
+                    raise PermissionError(audit.get('reason', 'Candidate audit or approval failed'))
             target = self.root.parent/'execution_inputs'/eid/'skill'
             if target.exists():
                 if self.tree_hash(target)!=v['artifact_hash']:
@@ -482,13 +620,16 @@ Código anterior: {str(task.get('code', ''))[:24000]}
         if not isinstance(order,dict) or set(order) != {'header','plan'}:
             raise ValueError('Orden de recuperación inválida')
         header = order['header']
-        if not isinstance(header,dict) or set(header) != {'case_id','issued_by','authorization_id','nonce','plan_hash'}:
+        required = {'case_id','issued_by','authorization_id','nonce','plan_hash'}
+        allowed = required | {'order_id'}
+        if not isinstance(header,dict) or not required <= set(header) or not set(header) <= allowed:
             raise ValueError('Encabezado de recuperación inválido')
         if header['issued_by'] != 'heart':
             raise PermissionError('Solo Heart emite órdenes de recuperación')
         case_id = validate_case_id(header['case_id'])
         core = validate_plan(order['plan'])
-        if set(order['plan']) != {'target','steps','capabilities'}:
+        expected_plan = {'target','steps','capabilities'} | ({'task_id'} if core['target'] == 'task' else set())
+        if set(order['plan']) != expected_plan:
             raise ValueError('La orden contiene campos fuera del contrato')
         h = plan_hash(case_id,core)
         if h != header['plan_hash']:
@@ -518,7 +659,7 @@ Código anterior: {str(task.get('code', ''))[:24000]}
 
     def create_recovery(self, order):
         header,case_id,core,h = self._recovery_order(order)
-        authorizations = getattr(self.pixy,'authorizations',None)
+        authorizations = self.authorization_port or getattr(self.pixy,'authorizations',None)
         if authorizations is None:
             raise PermissionError('Pixy no tiene un registro de autorizaciones')
         with self.locked():
@@ -603,7 +744,17 @@ Código anterior: {str(task.get('code', ''))[:24000]}
             self._verify_recovery_skill(row,case_id,core,h)
             if row['status'] in {'created','consuming'}:
                 self._set_recovery(case_id,'consuming')
-                self.pixy.authorizations.consume(*self._authorization_terms(header,case_id,core,h),consumer='hand:'+case_id)
+                authorizations = self.authorization_port or getattr(self.pixy,'authorizations',None)
+                if authorizations is None:
+                    raise PermissionError('Hand no recibió un puerto de autorizaciones')
+                if self.authorization_port:
+                    if not header.get('order_id'):
+                        raise PermissionError('La orden de Heart no contiene order_id')
+                    authorizations.claim_order(
+                        header['order_id'], *self._authorization_terms(header,case_id,core,h),
+                        consumer='hand:'+case_id)
+                else:
+                    authorizations.consume(*self._authorization_terms(header,case_id,core,h),consumer='hand:'+case_id)
                 self._set_recovery(case_id,'executing')
         for index,spec in enumerate(core['steps']):
             step = self._step(case_id,index)

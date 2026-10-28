@@ -3,8 +3,8 @@ import json
 import secrets
 import time
 import uuid
-from app.common.database import connection, migrate
-from app.common.recovery import validate_case_id, TARGETS
+from app.kernel.database import connection, migrate
+from app.heart.catalog import validate_case_id, TARGETS
 
 STATUSES = {'pending', 'approved', 'denied', 'consumed', 'expired', 'superseded'}
 
@@ -63,33 +63,10 @@ class AuthorizationStore:
             return self._row(row)
 
     def verify_by_trace(self, trace_id, capability=None, target=None):
-        auth = self.get_by_trace(trace_id)
-        if not auth or auth['status'] != 'approved':
-            return None
-        if capability and capability not in auth['capabilities']:
-            return None
-        if target and auth['target'] != target:
-            return None
-        return auth
+        raise PermissionError('trace_id solo correlaciona; no concede autoridad')
 
     def consume_by_trace(self, trace_id, capability=None, consumer='hand'):
-        auth_id = None
-        with connection(self.path) as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            self._expire(conn)
-            row = conn.execute(
-                'SELECT * FROM pixy_authorizations WHERE (trace_id=? OR case_id=?) AND status="approved" ORDER BY created_at DESC LIMIT 1',
-                (str(trace_id), str(trace_id))).fetchone()
-            if not row:
-                return None
-            record = self._row(row)
-            if capability and capability not in record['capabilities']:
-                return None
-            auth_id = record['authorization_id']
-            conn.execute(
-                'UPDATE pixy_authorizations SET status="consumed", consumed_at=?, consumed_by=? WHERE authorization_id=?',
-                (time.time(), str(consumer), auth_id))
-        return self.get(auth_id) if auth_id else None
+        raise PermissionError('trace_id solo correlaciona; presenta authorization_id y términos completos')
 
     def issue(self, case_id, capabilities, target, plan_hash, requested_by, trace_id=None):
         validate_case_id(case_id)
@@ -99,7 +76,7 @@ class AuthorizationStore:
         tid = trace_id or (case_id if str(case_id).startswith(('req-', 'trace-', 'tr-')) else None)
         if not tid:
             try:
-                from app.common.tracing import get_trace_id
+                from app.kernel.tracing import get_trace_id
                 tid = get_trace_id() or case_id
             except Exception:
                 tid = case_id
@@ -110,8 +87,6 @@ class AuthorizationStore:
         with connection(self.path) as conn:
             conn.execute('BEGIN IMMEDIATE')
             self._expire(conn)
-            # Only one question may be open: a bare "y" must never approve an older plan.
-            conn.execute('UPDATE pixy_authorizations SET status="superseded" WHERE status="pending"')
             conn.execute('''INSERT INTO pixy_authorizations(authorization_id,case_id,trace_id,issued_by,authorized_for,
                 requested_by,capabilities,target,plan_hash,nonce,status,created_at,expires_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -121,10 +96,14 @@ class AuthorizationStore:
         return record
 
     def pending(self):
+        records = self.pending_all()
+        return records[-1] if records else None
+
+    def pending_all(self):
         with connection(self.path) as conn:
             self._expire(conn)
-            return self._row(conn.execute(
-                'SELECT * FROM pixy_authorizations WHERE status="pending" ORDER BY created_at DESC LIMIT 1').fetchone())
+            return [self._row(row) for row in conn.execute(
+                'SELECT * FROM pixy_authorizations WHERE status="pending" ORDER BY created_at')]
 
     def decide(self, authorization_id, approve, decided_by):
         with connection(self.path) as conn:

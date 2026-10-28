@@ -1,0 +1,6 @@
+.azure-ollama.local.ps1
+.env
+*.log
+.tools/
+.gcloud/
+

@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from app.common.database import connect
+from app.kernel.database import connect
 from contextlib import contextmanager
 import json
 import logging
@@ -17,7 +17,7 @@ class MemoryEngine:
         os.makedirs(self.data_dir, exist_ok=True)
         
         self.agent_md_path = os.path.join(self.data_dir, "agent.md")
-        self.db_path = os.path.abspath(os.getenv("KHAI_DB_PATH") or os.path.join(self.data_dir, "..", "openclaw.db")) # Raíz de data
+        self.db_path = os.path.abspath(os.getenv("KHAI_DB_PATH") or os.path.join(self.data_dir, "..", "control.sqlite3"))
         
         if db_path:
             self.db_path = str(db_path)
@@ -25,7 +25,7 @@ class MemoryEngine:
         if identity is None:
             self._ensure_files()
         self._init_db()
-        from app.common.database import adopt_schema
+        from app.kernel.database import adopt_schema
         adopt_schema(self.db_path,'memory',['preferences','long_term_events','hypotheses'])
 
     @contextmanager
@@ -81,6 +81,16 @@ class MemoryEngine:
                     failures INTEGER DEFAULT 0,
                     created_at TEXT,
                     status TEXT DEFAULT 'evaluating' -- 'evaluating', 'promoted', 'discarded'
+                )
+            ''')
+
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS hypothesis_contexts (
+                    hypothesis_id INTEGER,
+                    context TEXT,
+                    successes INTEGER DEFAULT 0,
+                    failures INTEGER DEFAULT 0,
+                    PRIMARY KEY (hypothesis_id, context)
                 )
             ''')
             
