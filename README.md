@@ -78,37 +78,19 @@ El nombre GOD es histórico: no permite administrar el VPS, modificar el Core ni
 ## Uso desde Telegram
 
 ```text
-/help
-/?
-/pixy diagnóstico
-/p explica el último error
-/make objetivo
-/tasks
-/artifact TASK_ID
-/approve TASK_ID TOKEN
-/deny TASK_ID TOKEN
-/cancel TASK_ID
-/expect TASK_ID archivo_relativo SHA256_ESPERADO
-/verify TASK_ID EXECUTION_ID success
-/verify TASK_ID EXECUTION_ID failure
-/rules
-/rule approve RULE_ID [RULE_ID_SUSTITUIDA]
-/rule rollback RULE_ID
-/service show DESCRIPTOR_HASH
-/service approve DESCRIPTOR_HASH
-/service deny DESCRIPTOR_HASH
-/api VALOR
-/us VALOR
-/pas VALOR
+/help o /?
+/mode <low|mid|high|?> o /m <low|mid|high|?>
+/pixy <mensaje> o /p <mensaje>
+/health
+/cancel [TASK_ID] o /stop [TASK_ID]
+/restart [core|proxy]
+/us <usuario> /pas <contraseña>
+/api <valor>
 ```
 
-`/expect` se registra antes de ejecutar. `/verify` se usa sobre el resultado `UNVERIFIED` de una ejecución concreta. Una cancelación en curso se confirma consultando `/tasks`.
+`/help` y `/?` muestran los comandos disponibles. `/mode` (o `/m`) selecciona el motor conversacional (`low`=Gemini, `mid`=Dolphin CPU Spot, `high`=Dolphin GPU NVIDIA L4 Spot, `?`=estado y créditos CLP) y notifica cada transición con `[Mode = x]`. `/health` consulta directamente a Heart el estado de RAM, disco e integridad de bases SQLite. `/cancel` y `/stop` detienen los objetivos activos (o el `TASK_ID` indicado). `/restart` reinicia en secuencia segura ambos contenedores Docker (`khai_core` y `khai_docker_proxy`). Los comandos privados `/us`, `/pas` y `/api` pueden enviarse juntos en un mismo mensaje (ej. `/us usuario /pas clave`) o en mensajes separados.
 
-`/help` y `/?` muestran el listado completo de comandos. `/pixy` y `/p`
-dirigen el mensaje directamente a Pixy. Pixy consulta primero a Heart y, cuando
-necesita evidencia, a Senses; después documenta el diagnóstico en Heart y
-explica al usuario la evidencia, las hipótesis y la solución propuesta. Las
-preguntas de seguridad de Pixy se responden con `y` o `n`.
+`/pixy` y `/p` dirigen el mensaje directamente a Pixy. Cuando ocurre un problema o se solicita un diagnóstico, Pixy le indica a Heart que hay un incidente; Heart inicia la investigación con la ayuda de Senses y le entrega el resultado junto con una propuesta de solución a Pixy para su aprobación, la cual puede o no requerir intervención del usuario (`y` o `n`). La consulta, aprobación o reversión de reglas de aprendizaje y descriptores de servicio también se realiza conversando con Pixy mediante `/p`.
 
 ## Instalación y operación
 

@@ -179,7 +179,7 @@ flowchart TD
 1. **Clasificación Rápida de Intenciones en Estado `ROUTING`:**
    - Fase de enrutamiento determinista de baja latencia previa a cualquier consumo de LLM.
 2. **Estrategia Híbrida de Enrutamiento:**
-   - **Nivel 1 (Comandos Deterministas):** Atiende comandos administrativos (`/approve`, `/verify`, `/tasks`, `/service`, `/status`) sin costo cognitivo.
+   - **Nivel 1 (Comandos Deterministas Simplificados):** Atiende en Telegram únicamente `/help` (`/?`), `/mode` (`/m`), `/pixy` (`/p`), `/health`, `/cancel` (`/stop`), `/restart` (reinicio secuencial de `khai_core` y `khai_docker_proxy`) y captura privada `/us`, `/pas`, `/api` (en un mismo mensaje o por separado). Reglas y servicios se gestionan conversando con Pixy en `/p`.
    - **Nivel 2 (Coincidencia Semántica con Embeddings Locales):** Uso de `SkillSelector` con embeddings locales (`sentence-transformers` o modelo configurado) para evaluar similitud contra el catálogo de `SkillSpec` activas, aplicando umbral de corte y margen de desempate.
    - **Nivel 3 (Composición de Habilidades):** Identificación de objetivos que pueden resolverse encadenando dos o más habilidades existentes sin generar nuevo código.
    - **Nivel 4 (Generación en Hand):** Solo si no existe ninguna habilidad compatible en catálogo, se deriva a Brain y Hand para generación de código nuevo.

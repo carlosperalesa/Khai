@@ -3,11 +3,15 @@
 > **Vigencia (28 de octubre de 2026):** Este documento conserva el diagnóstico
 > y las decisiones del plan de recuperación F4 tal como se redactaron. La sección
 > «Situación actual del proyecto» y las referencias al commit desplegado describen
-> ese corte histórico. El estado operativo local vigente es F5 en curso y está
-> documentado en [README.md](./README.md),
+> ese corte histórico. El estado operativo vigente es Beta V4 desplegada en
+> `vm-carlosperales` (con piloto Dolphin en GCP por WireGuard y comandos
+> simplificados `/m`, `/p`, `/health`, `/cancel`|`/stop`, `/restart`,
+> `/us`|`/pas`|`/api`) y F5 en curso, documentado en [README.md](./README.md),
 > [GEMINI.md](./.agents/GEMINI.md) y
-> [el roadmap](./docs/ESTADO_MIGRACION_Y_ROADMAP.md). La VM sigue en la revisión
-> anterior; este plan no autoriza desplegar ni purgar datos.
+> [el roadmap](./docs/ESTADO_MIGRACION_Y_ROADMAP.md). En el flujo médico vigente,
+> Pixy le indica a Heart que hay un problema; Heart investiga con Senses y
+> entrega el resultado con la solución propuesta a Pixy para su aprobación (que
+> puede o no requerir intervención del usuario).
 
 ## 1. Problema
 

@@ -1,6 +1,7 @@
 """Reviewer: never rewrites reviewed code or dispatches model-authored commands."""
 import ast
 import json
+import re
 from pathlib import Path
 import yaml
 import time
@@ -77,9 +78,20 @@ class PixyMind:
     @staticmethod
     def secret_instruction(kind):
         commands = {'username': '/us', 'password': '/pas', 'api_key': '/api'}
+        if isinstance(kind, (list, tuple, set)):
+            kinds = [k for k in ('username', 'password', 'api_key') if k in set(kind)]
+            if not kinds:
+                raise ValueError('Tipo de credencial inválido')
+            if set(kinds) == {'username', 'password'}:
+                return 'Por favor ingresa tu usuario con /us y tu contraseña con /pas (puedes enviarlos en un mismo mensaje o por separado).'
+            return 'Por favor ingresa ' + ', '.join(commands[k] + ' <valor>' for k in kinds) + '.'
         if kind not in commands:
             raise ValueError('Tipo de credencial inválido')
-        return 'Ingresa la credencial solicitada con ' + commands[kind] + ' <valor>.'
+        if kind == 'username':
+            return 'Por favor ingresa tu usuario con /us <usuario> (si también necesitas contraseña puedes incluirla en el mismo mensaje con /pas <contraseña>).'
+        if kind == 'password':
+            return 'Por favor ingresa tu contraseña con /pas <contraseña>.'
+        return 'Por favor ingresa la credencial solicitada con /api <valor>.'
 
     def _analyze_code_ast(self, code, manifest=None):
         try:
@@ -152,29 +164,66 @@ class PixyMind:
     def process_request(self, message, is_automated=False):
         return self.direct_response(message)
 
+    def _conversational_governance(self, request, source):
+        """Permite gestionar reglas y descriptores de servicio conversando con Pixy."""
+        lower = request.lower().strip()
+        service_command = request.split()
+        if service_command and service_command[0].lower() == 'service':
+            if len(service_command) == 3 and service_command[1].lower() in {'show', 'approve', 'deny'}:
+                service_port = self.manager.pixy_services
+                record = service_port.get(service_command[2])
+                if not record:
+                    raise ValueError('Descriptor de servicio desconocido')
+                if service_command[1].lower() == 'show':
+                    return json.dumps({'hash': record['descriptor_hash'], 'status': record['status'],
+                                       'write_summary_review': (record['spec']['effect_contract']['summary']
+                                                                if record['spec']['effect'] == 'write' else None),
+                                       'descriptor': record['spec']}, ensure_ascii=False, sort_keys=True)
+                decision = service_port.decide(service_command[2],
+                    service_command[1].lower() == 'approve', decided_by=source)
+                return 'Descriptor ' + decision['descriptor_hash'] + ': ' + decision['status']
+
+        # Gestión conversacional de reglas (ej. "aprueba la regla rule_...", "revierte la regla rule_...")
+        rule_match = re.search(r'\b(rule_[a-zA-Z0-9_-]+)\b', request)
+        c = getattr(self.manager, 'coordinator', None)
+        if rule_match and c and hasattr(c, 'learning'):
+            rule_id = rule_match.group(1)
+            if any(w in lower for w in ('aprueb', 'aprobar', 'activa', 'approve')):
+                c.learning.activate(rule_id, None, source=source)
+                return f'Regla {rule_id} aprobada y activada.'
+            if any(w in lower for w in ('reviert', 'revertir', 'rollback', 'desactiv')):
+                c.learning.rollback(rule_id, source=source)
+                return f'Regla {rule_id} revertida.'
+
+        # Gestión conversacional de descriptores de servicio por hash SHA256
+        hash_match = re.search(r'\b([a-f0-9]{64})\b', lower)
+        if hash_match and hasattr(self.manager, 'pixy_services') and self.manager.pixy_services:
+            desc_hash = hash_match.group(1)
+            record = self.manager.pixy_services.get(desc_hash)
+            if record:
+                if any(w in lower for w in ('aprueb', 'aprobar', 'activa', 'approve')):
+                    decision = self.manager.pixy_services.decide(desc_hash, True, decided_by=source)
+                    return f"Descriptor de servicio {decision['descriptor_hash']} aprobado ({decision['status']})."
+                if any(w in lower for w in ('rechaz', 'denieg', 'deny')):
+                    decision = self.manager.pixy_services.decide(desc_hash, False, decided_by=source)
+                    return f"Descriptor de servicio {decision['descriptor_hash']} rechazado ({decision['status']})."
+                if any(w in lower for w in ('muestr', 'mostrar', 'ver', 'show', 'detalle')):
+                    return json.dumps({'hash': record['descriptor_hash'], 'status': record['status'],
+                                       'write_summary_review': (record['spec']['effect_contract']['summary']
+                                                                if record['spec']['effect'] == 'write' else None),
+                                       'descriptor': record['spec']}, ensure_ascii=False, sort_keys=True)
+        return None
+
     def direct_response(self, message, source='telegram'):
         request = message.strip()
         if not request:
             return 'Pixy directa. Usa `/p diagnóstico`, `/p explica el último error` o `/p ayuda`.'
         if request.lower() in {'ayuda', 'help', '?'}:
-            return ('Pixy directa: puedo explicar errores, consultar el estado y pedir evidencia a Heart y Senses. '
-                    'Para operaciones sensibles responderé `apruebas: y/n`.')
-        service_command = request.split()
-        if service_command and service_command[0].lower() == 'service':
-            if len(service_command) != 3 or service_command[1].lower() not in {'show', 'approve', 'deny'}:
-                raise ValueError('Usa /service show|approve|deny DESCRIPTOR_HASH')
-            service_port = self.manager.pixy_services
-            record = service_port.get(service_command[2])
-            if not record:
-                raise ValueError('Descriptor de servicio desconocido')
-            if service_command[1].lower() == 'show':
-                return json.dumps({'hash': record['descriptor_hash'], 'status': record['status'],
-                                   'write_summary_review': (record['spec']['effect_contract']['summary']
-                                                            if record['spec']['effect'] == 'write' else None),
-                                   'descriptor': record['spec']}, ensure_ascii=False, sort_keys=True)
-            decision = service_port.decide(service_command[2],
-                service_command[1].lower() == 'approve', decided_by=source)
-            return 'Descriptor ' + decision['descriptor_hash'] + ': ' + decision['status']
+            return ('Pixy directa: puedo explicar errores, consultar el estado, gestionar reglas o servicios '
+                    'y pedir evidencia a Heart y Senses. Para operaciones sensibles responderé `apruebas: y/n`.')
+        gov_reply = self._conversational_governance(request, source)
+        if gov_reply is not None:
+            return gov_reply
         decision_parts = request.lower().split()
         if decision_parts and decision_parts[0] in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(decision_parts) <= 2:
             approve = decision_parts[0] in {'y', 'yes', 'sí', 'si'}
@@ -273,15 +322,25 @@ class PixyMind:
             f"- {t['id']}: estado={t['state']}, solicitud=\"{t.get('request', '')[:80]}\", error={t.get('error') or t.get('feedback') or 'ninguno'}"
             for t in reversed(recent_tasks)
         ) if recent_tasks else "No hay tareas recientes registradas."
+        rules_list = getattr(self.manager, 'rules', None)
+        rules_summary = "\n".join(
+            f"- {r['rule_id']} [{r['status']}]: {r['content']}"
+            for r in (rules_list.all() if rules_list else [])
+        ) or "Sin reglas registradas."
 
         raw = self.llm.generate_content(
             'Eres Pixy, supervisora técnica y observadora de Khai. Sé concisa, técnica y directa; ve al grano sin relleno, discursos ni sermones. '
             'PROHIBIDO EL USO DE EMOTICONES O EMOJIS: nunca uses emoticones ni emojis en tus respuestas. '
             'No inventes fallos ni accesos inexistentes. '
             'Pixy no remedia ni modifica tareas directamente; Heart es el único encargado del diagnóstico médico y la remediación del sistema. '
+            'Cuando el usuario deba ingresar credenciales de acceso, pídeselo con una frase como: '
+            '"por favor ingresa tu usuario con /us y tu contraseña con /pas" (o /api para llaves API), '
+            'indicando que puede enviar ambos datos en el mismo mensaje o en mensajes separados. '
+            'Las reglas propuestas por Dreams y los descriptores de servicio se consultan, aprueban o revierten conversando contigo por /p. '
             'Si el usuario pregunta por un fallo o problema técnico, indica la evidencia y sugiere el diagnóstico de Heart. '
             'Nunca pidas confirmaciones como "apruebas: y/n" a menos que Heart haya formulado una propuesta de acción técnica real.\n\n'
             f'Estado de tareas recientes:\n{tasks_summary}\n\n'
+            f'Reglas de aprendizaje:\n{rules_summary}\n\n'
             f'Mensaje del usuario: {request}',
             response_format=None)
         return str(raw).strip()
@@ -310,7 +369,7 @@ class PixyMind:
                     f"Diagnóstico: {json.dumps(case.get('diagnosis'), ensure_ascii=False)}\n"
                     "No hay un plan automático de infraestructura (Docker) porque el incidente no corresponde a un contenedor caído. "
                     "Indica la evidencia encontrada, la causa probable del error y los pasos concretos que el usuario puede realizar para solucionarlo "
-                    "(ej: reintentar la tarea con /tasks o /make, verificar parámetros o consultar logs específicos). "
+                    "(ej: volver a solicitar el objetivo en lenguaje natural, verificar parámetros o usar /restart si el contenedor está comprometido). "
                     "Sé concisa, técnica y directa sin sermones ni emoticones. PROHIBIDO EL USO DE EMOTICONES O EMOJIS."
                 )
             if auth:

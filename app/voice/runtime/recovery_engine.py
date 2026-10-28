@@ -26,6 +26,7 @@ class RecoveryEngine:
         self.engine, self.delay = engine, delay
         self.exit_process = exit_process or os._exit
         self.spawn = spawn or (lambda fn, *args: threading.Thread(target=fn, args=args, daemon=True).start())
+        self._lock = threading.Lock()
         self.boot = time.time()
         with engine.connect() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS recovery_actions(id TEXT PRIMARY KEY, action TEXT NOT NULL,
@@ -93,6 +94,10 @@ class RecoveryEngine:
 
     def _restart(self, action_id):
         time.sleep(self.delay)
+        with self._lock:
+            self._restart_locked(action_id)
+
+    def _restart_locked(self, action_id):
         receipt = self.get(action_id)
         if receipt['status'] != 'scheduled':
             return

@@ -1518,18 +1518,20 @@ class Coordinator:
                 self.store.update(tid, expected={'WAITING_SERVICE_APPROVAL'}, state='CANCELLED',
                                   error='Descriptor de servicio rechazado u obsoleto')
         elif state == 'WAITING_SECRET':
-            receipt = self.manager.pixy_control.secret_request(task['secret_request_id'])
-            if not receipt:
+            req_ids = task.get('secret_request_ids') or [task['secret_request_id']]
+            receipts = [self.manager.pixy_control.secret_request(rid) for rid in req_ids]
+            if not all(receipts):
                 raise ValueError('Solicitud privada de credencial perdida')
-            if receipt['status'] == 'captured':
-                credential = self.manager.voice_credentials.status(receipt['env_key'])
-                if (not credential['available'] or
-                        credential['version'] < receipt['expected_version'] + 1):
-                    raise ValueError('Recibo de credencial sin versión disponible en Voice')
+            if all(r['status'] == 'captured' for r in receipts):
+                for r in receipts:
+                    credential = self.manager.voice_credentials.status(r['env_key'])
+                    if (not credential['available'] or
+                            credential['version'] < r['expected_version'] + 1):
+                        raise ValueError('Recibo de credencial sin versión disponible en Voice')
                 self.store.update(tid, expected={'WAITING_SECRET'}, state='READY',
-                                  secret_receipt_id=receipt['receipt_id'])
+                                  secret_receipt_id=receipts[-1]['receipt_id'])
                 self.notify(f'{tid}: credencial recibida por Voice; reanudando tarea.')
-            elif receipt['status'] == 'expired' or time.time() >= receipt['expires_at']:
+            elif any(r['status'] == 'expired' or time.time() >= r['expires_at'] for r in receipts):
                 self.store.update(tid, expected={'WAITING_SECRET'}, state='EXHAUSTED',
                                   error='Captura privada de credencial vencida')
         elif state == 'REVIEWING':

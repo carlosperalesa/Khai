@@ -90,7 +90,7 @@ Toda la lógica del sistema reside en `app/` dividida en órganos con responsabi
    - Se detona únicamente ante dos eventos de tarea en `Coordinator`:
      1. **Éxito verificado:** Cuando una tarea pasa a `VERIFYING` con evidencia de éxito comprobada (`coordinator.py` línea ~408).
      2. **Fallo de proceso:** Cuando una ejecución termina con error de proceso (`process_exit`, `coordinator.py` línea ~387).
-   - **Consolidación de Reglas:** Cuando una versión de skill acumula $\ge 3$ muestras verificadas con $\ge 80\%$ de éxito, Dreams propone una regla a Pixy (`data/control.sqlite3`, repositorio lógico de Pixy). Dicha regla **permanece en estado `proposed`** y nunca se activa automáticamente: requiere aprobación humana explícita (`/rule approve`).
+   - **Consolidación de Reglas:** Cuando una versión de skill acumula $\ge 3$ muestras verificadas con $\ge 80\%$ de éxito, Dreams propone una regla a Pixy (`data/control.sqlite3`, repositorio lógico de Pixy). Dicha regla **permanece en estado `proposed`** y nunca se activa automáticamente: requiere aprobación humana explícita conversando con Pixy mediante `/p`.
 
 ---
 
@@ -206,8 +206,12 @@ ROUTING
   Contrastar también los recibos por elemento frente a respuestas parciales de
   un lote. Corregir lo que falle; no declarar F5 cerrada por pruebas unitarias.
   Después completar la validación de cierre y actualizar la documentación
-  final. Más adelante, eliminar la mayor parte de los comandos `/`, como pidió
-  Carlos. Si surge una decisión nueva, preguntar con contexto, riesgos, todas
+  final. La simplificación de comandos `/` en Telegram ya quedó implementada:
+  permanecen activos `/help` (`/?`), `/mode` (`/m`), `/pixy` (`/p`), `/health`,
+  `/cancel` (`/stop`), `/restart` (reinicia en secuencia `khai_core` y
+  `khai_docker_proxy`) y `/us`, `/pas`, `/api` (aceptados juntos en un mismo
+  mensaje o por separado). Reglas y servicios se gestionan conversando con Pixy
+  en `/p`. Si surge una decisión nueva, preguntar con contexto, riesgos, todas
   las opciones viables y «¿Necesitas más información?».
 - No hacer commit, push, purga ni despliegue al terminar esta sesión. La VM
   conserva la revisión anterior. Continuar desde los cambios locales actuales.

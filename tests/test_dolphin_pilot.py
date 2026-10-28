@@ -119,10 +119,31 @@ class DolphinPilotTests(unittest.TestCase):
                 self.assertEqual(second_reply, 'Respuesta desde Gemini.')
                 gateway._generate_dolphin.assert_not_called()
 
-            mgr = SimpleNamespace(coordinator=MagicMock(), dolphin=ctrl)
+            mgr = SimpleNamespace(
+                coordinator=MagicMock(),
+                dolphin=ctrl,
+                heart=SimpleNamespace(run_diagnostic_fast=lambda: {
+                    'vitals': {'status': 'ok', 'ram_percent': 31.2, 'disk_percent': 24.0, 'disk_free': 10 * 1024**3},
+                    'integrity': {'status': 'ok', 'databases': {'control.sqlite3': 'ok'}},
+                }),
+                recovery_executor=MagicMock(),
+                secret_capture=SimpleNamespace(capture=MagicMock(side_effect=['secret_u1', 'secret_p1'])),
+            )
+            mgr.coordinator.store.all.return_value = [{'id': 'task_1', 'state': 'RUNNING'}]
             with patch.object(ctrl, 'status', return_value='[Mode = low]\nMotor activo: Gemini'):
                 self.assertEqual(_command(mgr, 'telegram:1', '/m ?'), '[Mode = low]\nMotor activo: Gemini')
                 self.assertEqual(_command(mgr, 'telegram:2', '/mode ?'), '[Mode = low]\nMotor activo: Gemini')
+            self.assertIn('Objetivos activos detenidos: task_1', _command(mgr, 'telegram:3', '/stop'))
+            self.assertIn('Estado Heart: ok', _command(mgr, 'telegram:4', '/health'))
+            self.assertIn('Reinicio de contenedores Docker (core, proxy) programado', _command(mgr, 'telegram:5', '/restart'))
+            self.assertEqual(_command(mgr, 'telegram:6', '/tasks'), 'Comando no disponible. Consulta /help.')
+
+            from app.pixy.pixy import PixyMind
+            from app.voice.voice import secret_command
+            self.assertIn('ingresa tu usuario con /us y tu contraseña con /pas',
+                          PixyMind.secret_instruction(['username', 'password']).lower())
+            sec_reply = secret_command(mgr, '/us carlos /pas clave123', 'owner', 'chat1')
+            self.assertEqual(sec_reply, 'Credenciales guardadas. Recibos: secret_u1, secret_p1')
 
 
 if __name__ == '__main__':

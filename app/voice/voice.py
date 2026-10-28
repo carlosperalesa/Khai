@@ -3,6 +3,9 @@ import asyncio
 import hmac
 import logging
 import os
+import re
+import threading
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
@@ -10,7 +13,6 @@ from fastapi import FastAPI, HTTPException, Request
 from app.bootstrap import ModuleManager
 from app.mind.coordinator import Coordinator
 from app.pixy.control import InstanceLock
-from app.kernel.database import connection
 from app.kernel.tracing import TracingFilter, trace_scope, new_trace_id
 
 logger = logging.getLogger(__name__)
@@ -64,25 +66,13 @@ app = FastAPI(title='Khai', lifespan=lifespan)
 
 HELP_TEXT = """Comandos disponibles:
 /help o /? - muestra esta ayuda.
-/pixy <mensaje> o /p <mensaje> - habla directamente con Pixy.
-/make <objetivo> - crea un objetivo ejecutable.
-/tasks - consulta objetivos activos y recientes.
-/artifact <ID> - muestra el artefacto de un objetivo.
-/approve <ID> <TOKEN> - aprueba una ejecución solicitada.
-/deny <ID> <TOKEN> - rechaza una ejecución solicitada.
-/cancel <ID> - cancela un objetivo.
-/expect <ID> <archivo> <SHA256> - fija una verificación antes de ejecutar.
-/verify <ID> <RUN_ID> success|failure - registra el resultado observado.
-/rules - consulta reglas de aprendizaje.
-/rule approve <ID> [ID_SUSTITUIDA] - activa una regla propuesta.
-/rule rollback <ID> - revierte una regla.
-/export <TASK_ID> <archivo> - pone un resultado en cuarentena.
-/fetch <servicio> <operación> <archivo> [JSON] - descarga mediante Voice.
-/publish <ASSET_ID> - publica un archivo aprobado.
-/asset <ASSET_ID> - entrega un archivo publicado.
-/unpublish <ASSET_ID> - retira un archivo.
 /mode <low|mid|high|?> o /m <low|mid|high|?> - cambia o consulta el modo LLM (low=Gemini, mid=Dolphin CPU Spot, high=Dolphin GPU L4 Spot, ?=status).
-Las aprobaciones de Pixy se responden con y/n cuando ella lo solicite."""
+/pixy <mensaje> o /p <mensaje> - habla directamente con Pixy (diagnóstico, reglas y servicios).
+/health - muestra el estado de salud e integridad del sistema.
+/cancel [ID] o /stop [ID] - detiene el objetivo en curso (o el ID indicado).
+/restart - reinicia el contenedor Docker de Khai.
+/us <usuario> /pas <contraseña> /api <clave> - ingresa credenciales en chat privado (puedes enviarlas juntas en un mismo mensaje o por separado).
+Las aprobaciones y confirmaciones se responden con y/n."""
 
 
 def authenticated_message(data, user_id):
@@ -117,18 +107,28 @@ def secret_command(manager, text, user_id, chat_id):
         return None
     if chat_id is None:
         raise PermissionError('La captura de credenciales requiere un chat privado')
-    if ' ' not in text:
+    matches = list(re.finditer(r'(?:^|\s+)(/us|/pas|/api)(?=\s|$)', text, flags=re.IGNORECASE))
+    if not matches:
         raise ValueError('Captura de credencial inválida')
-    command_name, value = text.split(' ', 1)
-    value = value.strip()
-    receipt = manager.secret_capture.capture(command_name, value, user_id, chat_id)
-    return 'Credencial guardada. Recibo: ' + receipt
+    pairs = []
+    for idx, match in enumerate(matches):
+        cmd = match.group(1).lower()
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        value = text[start:end].strip()
+        if not value:
+            raise ValueError('Captura de credencial inválida')
+        pairs.append((cmd, value))
+    receipts = [manager.secret_capture.capture(cmd, val, user_id, chat_id) for cmd, val in pairs]
+    if len(receipts) == 1:
+        return 'Credencial guardada. Recibo: ' + receipts[0]
+    return 'Credenciales guardadas. Recibos: ' + ', '.join(receipts)
 
 
 def urgent_command(text):
     name = text.split(maxsplit=1)[0].lower()
-    return name in {'/cancel', '/tasks', '/approve', '/deny', '/verify', '/expect', '/service',
-                    '/mode', '/m', '/on', '/off', '/dolphin', 'y', 'yes', 'sí', 'si', 'n', 'no'}
+    return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m',
+                    'y', 'yes', 'sí', 'si', 'n', 'no'}
 
 
 def process_ordinary(manager, source, trace_id, text):
@@ -203,18 +203,24 @@ async def run_inbox(manager, *, urgent):
 
 
 def command(manager, source, text):
-    if not hasattr(manager,'assets') or text.split()[0].lower() not in {'/fetch','/export','/publish','/asset','/unpublish'}:
-        return _command(manager,source,text)
-    with connection(manager.assets.db) as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        previous = conn.execute('SELECT * FROM voice_commands WHERE source=?',(source,)).fetchone()
-        if previous:
-            return previous['reply'] if previous['status']=='completed' else 'Operación anterior sin confirmar; no se repetirá automáticamente.'
-        conn.execute('INSERT INTO voice_commands VALUES (?,"pending",NULL)',(source,))
-    result = _command(manager,source,text)
-    with connection(manager.assets.db) as conn:
-        conn.execute('UPDATE voice_commands SET status="completed",reply=? WHERE source=?',(result,source))
-    return result
+    return _command(manager, source, text)
+
+
+def _format_health(manager):
+    if not hasattr(manager, 'heart') or manager.heart is None:
+        return 'Heart no está disponible.'
+    if hasattr(manager.heart, 'run_diagnostic_fast'):
+        report = manager.heart.run_diagnostic_fast()
+        vitals = report.get('vitals') or {}
+        integrity = report.get('integrity') or {}
+        dbs = integrity.get('databases') or {}
+        db_summary = ', '.join(f'{k}={v}' for k, v in sorted(dbs.items())) or 'sin bases'
+        free_gb = round((vitals.get('disk_free') or 0) / (1024 ** 3), 2)
+        overall = 'ok' if vitals.get('status') == 'ok' and integrity.get('status') == 'ok' else 'alerta'
+        return (f"Estado Heart: {overall} | RAM: {vitals.get('ram_percent', '?')}% | "
+                f"Disco: {vitals.get('disk_percent', '?')}% ({free_gb} GB libres) | "
+                f"SQLite ({integrity.get('status', '?')}): {db_summary}")
+    return str(manager.heart.check_integrity())
 
 
 def _command(manager, source, text):
@@ -228,89 +234,41 @@ def _command(manager, source, text):
             raise ValueError('Controlador Dolphin no configurado')
         arg = parts[1].lower() if len(parts) >= 2 else '?'
         return manager.dolphin.set_mode(arg)
-    if name == '/on':
-        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
-            raise ValueError('Controlador Dolphin no configurado')
-        arg = parts[1].lower() if len(parts) >= 2 else 'mid'
-        if arg == 'low':
-            arg = 'mid'
-        return manager.dolphin.set_mode(arg)
-    if name == '/off':
-        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
-            raise ValueError('Controlador Dolphin no configurado')
-        return manager.dolphin.set_mode('low')
-    if name == '/dolphin':
-        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
-            raise ValueError('Controlador Dolphin no configurado')
-        return manager.dolphin.set_mode('?')
     if name in {'/pixy', '/p'}:
         return manager.pixy.direct_response(text.partition(' ')[2], source=source)
-    if name == '/service':
-        return manager.pixy.direct_response(text[1:], source=source)
     if name in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(parts) <= 2:
         return manager.pixy.direct_response(text, source=source)
-    if name == '/export' and len(parts) == 3:
-        task = c.store.get(parts[1])
-        if not task:
-            raise ValueError('Tarea desconocida')
-        workspace = manager.data_dir/'workspaces'/task['id']/task['artifact_hash']
-        aid = manager.assets.import_result(task,workspace,parts[2],manager.telegram.user_id)
-        return 'Archivo en cuarentena. Aprobar publicación: /publish '+aid
-    if name == '/fetch' and len(parts) >= 4:
-        import json
-        values = text.split(maxsplit=4)
-        params = json.loads(values[4]) if len(values)==5 else {}
-        aid = manager.assets.download(manager.gateway,parts[1],parts[2],params,parts[3],manager.telegram.user_id)
-        return 'Archivo en cuarentena. Aprobar publicación: /publish '+aid
-    if name == '/asset' and len(parts) == 2:
-        manager.assets.deliver(parts[1],manager.telegram.user_id,manager.telegram)
-        return 'Archivo entregado.'
-    if name == '/publish' and len(parts) == 2:
-        manager.assets.publish(parts[1],manager.telegram.user_id,approved=True)
-        return 'Archivo aprobado. /asset '+parts[1]
-    if name == '/unpublish' and len(parts) == 2:
-        manager.assets.unpublish(parts[1],manager.telegram.user_id)
-        return 'Archivo retirado.'
-    if name == '/tasks':
-        return '\n'.join(t['id'] + ': ' + t['state'] for t in c.store.all()[-20:]) or 'Sin tareas.'
-    if name == '/artifact' and len(parts) == 2:
-        task = c.store.get(parts[1])
-        if not task:
-            raise ValueError('Tarea desconocida')
-        return 'SHA256: ' + task.get('artifact_hash', '') + '\n' + task.get('code', 'Sin artefacto')
-    if name in {'/approve', '/deny'} and len(parts) == 3:
-        c.approval(parts[1], parts[2], name == '/approve', source)
-        return 'Decisión registrada.'
-    if name == '/cancel' and len(parts) == 2:
-        c.cancel(parts[1], source)
-        return 'Cancelación registrada; el estado final se confirma con /tasks.'
-    if name == '/verify' and len(parts) == 4 and parts[3] in {'success', 'failure'}:
-        c.verify(parts[1], parts[2], parts[3] == 'success', source)
-        return 'Verificación del usuario registrada con su ejecución.'
-    if name == '/expect' and len(parts) == 4:
-        c.set_criterion(parts[1], parts[2], parts[3], source)
-        return 'Criterio SHA256 registrado antes de ejecutar.'
-    if name == '/rules':
-        if hasattr(manager, 'rules'):
-            return '\n'.join(f"{r['rule_id']} [{r['status']}]: {r['content']}" for r in manager.rules.all()) or 'Sin reglas.'
-        return 'Sin reglas.'
-    if name == '/rule' and len(parts) in {3, 4}:
-        if parts[1] == 'approve':
-            c.learning.activate(parts[2], parts[3] if len(parts) == 4 else None, source=source)
-        elif parts[1] == 'rollback' and len(parts) == 3:
-            c.learning.rollback(parts[2], source=source)
-        else:
-            raise ValueError('Usa /rule approve ID [ID_SUSTITUIDO] o /rule rollback ID')
-        return 'Regla actualizada.'
-    if name in {'/help', '/restart', '/new', '/compact'}:
-        return ('/make objetivo; /tasks; /artifact ID; /approve ID TOKEN; /deny ID TOKEN; '
-                '/cancel ID; /verify ID RUN_ID success|failure; /expect ID archivo SHA256; '
-                '/rules; /rule approve ID [ID_SUSTITUIDO]; /rule rollback ID. '
-                '/export TASK archivo; /fetch servicio operación archivo [JSON]; /publish ASSET; /asset ASSET; /unpublish ASSET. '
-                'El historial de evidencia no se borra. Reinicios y administración del host se realizan fuera del agente.')
-    if name in {'/approve', '/deny', '/cancel', '/verify', '/expect', '/rule', '/artifact',
-                '/export','/fetch','/asset','/publish','/unpublish'}:
-        raise ValueError('Comando incompleto; consulta /help')
+    if name == '/health':
+        return _format_health(manager)
+    if name in {'/cancel', '/stop'}:
+        if len(parts) == 2:
+            c.cancel(parts[1], source)
+            return f'Objetivo {parts[1]} detenido.'
+        active = [t for t in c.store.all()
+                  if t.get('state') not in {'COMPLETED', 'FAILED', 'CANCELLED', 'EXHAUSTED', 'UNFULFILLABLE'}]
+        if not active:
+            return 'No hay objetivos en curso para detener.'
+        for idx, t in enumerate(active):
+            c.cancel(t['id'], f'{source}:stop:{idx}')
+        return 'Objetivos activos detenidos: ' + ', '.join(t['id'] for t in active)
+    if name == '/restart':
+        targets = ([parts[1].lower()]
+                   if len(parts) >= 2 and parts[1].lower() in {'core', 'proxy'}
+                   else ['core', 'proxy'])
+        if hasattr(manager, 'recovery_executor') and manager.recovery_executor is not None:
+            try:
+                ids = []
+                for t in targets:
+                    aid = 'rec_' + uuid.uuid4().hex
+                    manager.recovery_executor.submit(aid, 'restart_container', t)
+                    ids.append(f'{t}:{aid}')
+                return f"Reinicio de contenedores Docker ({', '.join(targets)}) programado ({', '.join(ids)})."
+            except Exception as exc:
+                logger.warning('Proxy de recuperación no disponible para /restart (%s); forzando salida local', type(exc).__name__)
+        threading.Timer(1.0, lambda: os._exit(75)).start()
+        return 'Reiniciando proceso principal de Khai...'
+    if name.startswith('/'):
+        return 'Comando no disponible. Consulta /help.'
     return None
 
 
