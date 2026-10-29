@@ -117,7 +117,7 @@ class Coordinator:
         if mailbox is not None:
             mailbox.on_delivered = self._notification_delivered
 
-    def notify(self, text):
+    def notify(self, text, buttons=None, message_thread_id=None, chat_id=None):
         if not text or not str(text).strip():
             return
         cleaned = re.sub(r'^(task_[a-f0-9]{32}|run_[a-f0-9]{32}|auth_[a-f0-9]{32}|case-[a-f0-9]{16,32}):\s*', '', str(text).strip())
@@ -136,6 +136,19 @@ class Coordinator:
         task = self.store.get(task_id) if task_id else None
         sid = (task or {}).get('conversation_id') or context.get('conversation_id')
         metadata = {'conversation_id': sid, 'task_id': task_id}
+        if buttons:
+            metadata['buttons'] = buttons
+        th_id = message_thread_id or context.get('thread_id') or context.get('message_thread_id')
+        ch_id = chat_id or context.get('chat_id')
+        if sid and (not th_id or not ch_id) and hasattr(self, 'conversations'):
+            conv = self.conversations.get_conversation(sid)
+            if conv:
+                ch_id = ch_id or conv.get('chat_id')
+                th_id = th_id or conv.get('thread_id')
+        if th_id:
+            metadata['message_thread_id'] = th_id
+        if ch_id:
+            metadata['chat_id'] = ch_id
         if sid:
             kinds = {'WAITING_SCOPE': 'scope', 'WAITING_INPUT_CONFIRMATION': 'inputs',
                      'WAITING_CREATION_APPROVAL': 'creation', 'WAITING_APPROVAL': 'execution',
@@ -172,7 +185,18 @@ class Coordinator:
         mailbox = getattr(self.manager, 'voice_mailbox', None)
         if mailbox is not None:
             try:
-                while mailbox.deliver_one(lambda text: self.manager.telegram.send_message(text, parse_mode=None)):
+                def _do_send(text, meta=None):
+                    kwargs = {'parse_mode': None}
+                    if meta:
+                        if meta.get('buttons'):
+                            kwargs['buttons'] = meta['buttons']
+                        if meta.get('message_thread_id'):
+                            kwargs['message_thread_id'] = meta['message_thread_id']
+                        if meta.get('chat_id'):
+                            kwargs['chat_id'] = meta['chat_id']
+                    return self.manager.telegram.send_message(text, **kwargs)
+
+                while mailbox.deliver_one(_do_send):
                     pass
             except Exception:
                 logger.warning('Entrega Telegram incierta; revisar outbox durable')
@@ -185,7 +209,14 @@ class Coordinator:
             try:
                 message_ids = []
                 for offset in range(0, min(len(text), 64000), 3900):
-                    receipt = self.manager.telegram.send_message(text[offset:offset + 3900], parse_mode=None)
+                    kwargs = {'parse_mode': None}
+                    if metadata.get('buttons'):
+                        kwargs['buttons'] = metadata['buttons']
+                    if metadata.get('message_thread_id'):
+                        kwargs['message_thread_id'] = metadata['message_thread_id']
+                    if metadata.get('chat_id'):
+                        kwargs['chat_id'] = metadata['chat_id']
+                    receipt = self.manager.telegram.send_message(text[offset:offset + 3900], **kwargs)
                     if isinstance(receipt, dict) and type((receipt.get('result') or {}).get('message_id')) is int:
                         message_ids.append(receipt['result']['message_id'])
                 if metadata.get('conversation_id'):
@@ -250,8 +281,19 @@ class Coordinator:
         tid = trace_id or get_trace_id() or new_trace_id()
         direct = str(text).lstrip().startswith(('/make ', '/do '))
         context = current_turn.get() or self.conversations.turn(source) or {}
+        cid = context.get('conversation_id')
+        if cid and not direct:
+            for t in reversed(self.store.all()):
+                if (t.get('conversation_id') == cid and t.get('state') == 'ROUTING'
+                        and t['id'] not in self._llm_jobs
+                        and (time.time() - t.get('created_at', 0)) < 3.0):
+                    combined = f"{t['request']}\n\n{text}"
+                    self.store.update(t['id'], expected={'ROUTING'}, request=combined,
+                                      source_request=combined)
+                    self.conversations.bind(source, t['id'])
+                    return self.store.get(t['id'])
         task = self.store.create(source, text, trace_id=tid,
-                                 conversation_id=context.get('conversation_id'),
+                                 conversation_id=cid,
                                  kind='objective' if direct else 'turn',
                                  input_confirmation_required=not direct)
         self.conversations.bind(source, task['id'])
@@ -1378,7 +1420,16 @@ class Coordinator:
         self._collect_llm_jobs()
         self._schedule_mailbox()
         self.store.flush_events()
-        for task in self.store.all():
+        all_tasks = self.store.all()
+        in_flight_states = {'ROUTING', 'SCOPE_PLANNING', 'RESOLVING_SCOPE', 'GENERATING', 'REVIEWING',
+                            'SUBMITTED', 'READY', 'RUNNING', 'VERIFYING', 'DIAGNOSING'}
+        active_by_conversation = {}
+        for t in all_tasks:
+            cid = t.get('conversation_id')
+            if cid and t.get('state') in in_flight_states:
+                active_by_conversation.setdefault(cid, []).append(t)
+
+        for task in all_tasks:
             goal_token = current_goal_revision.set((task['id'], task.get('goal_revision', 0)))
             try:
                 self._supervise_agent(task)
@@ -1408,6 +1459,13 @@ class Coordinator:
                 if time.time() >= task['deadline']:
                     self.store.update(task['id'], expected={'WAITING_FEEDBACK'}, state='EXHAUSTED', error='Feedback vencido')
                 continue
+            cid = task.get('conversation_id')
+            if cid and task['state'] == 'ROUTING':
+                active_tasks = active_by_conversation.get(cid, [])
+                older_active = next((t for t in active_tasks if t['id'] != task['id']
+                                     and t.get('created_at', 0) < task.get('created_at', 0)), None)
+                if older_active:
+                    continue
             if background and task['state'] in {'ROUTING', 'SCOPE_PLANNING', 'RESOLVING_SCOPE', 'GENERATING', 'REVIEWING'}:
                 if task['id'] not in self._llm_jobs:
                     self._llm_jobs[task['id']] = self._llm_executor.submit(self._run_task, task)

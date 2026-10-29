@@ -179,6 +179,12 @@ class PixyPort:
         self.__plane = plane
         self.__authorizations = plane.authorizations
 
+    def get(self, *args, **kwargs):
+        return self.__authorizations.get(*args, **kwargs)
+
+    def get_by_trace(self, *args, **kwargs):
+        return self.__authorizations.get_by_trace(*args, **kwargs)
+
     def issue(self, *args, **kwargs):
         return self.__authorizations.issue(*args, **kwargs)
 

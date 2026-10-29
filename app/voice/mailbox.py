@@ -87,10 +87,16 @@ class VoiceMailbox:
             if not row:
                 return False
             conn.execute("UPDATE voice_outbox SET status='sending' WHERE delivery_id=?", (row['delivery_id'],))
+        import json
+        meta = json.loads(row['metadata']) if row['metadata'] else {}
         try:
             message_ids = []
             for offset in range(0, len(row['text']), 3900):
-                receipt = sender(row['text'][offset:offset + 3900])
+                chunk = row['text'][offset:offset + 3900]
+                try:
+                    receipt = sender(chunk, meta)
+                except TypeError:
+                    receipt = sender(chunk)
                 if isinstance(receipt, dict):
                     mid = (receipt.get('result') or {}).get('message_id')
                     if type(mid) is int:

@@ -15,6 +15,7 @@ from app.mind.coordinator import Coordinator
 from app.pixy.control import InstanceLock
 from app.kernel.tracing import TracingFilter, trace_scope, new_trace_id
 from app.voice.help import HELP_TEXT
+from app.mind.conversation import current_turn
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ def secret_command(manager, text, user_id, chat_id):
 def urgent_command(text):
     name = text.split(maxsplit=1)[0].lower()
     return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m', '/mode?', '/m?',
+                    '/chats', '/c', '/new', '/clear', '/archive',
                     'y', 'yes', 'sí', 'si', 'n', 'no'}
 
 
@@ -145,10 +147,22 @@ def process_ordinary(manager, source, trace_id, text):
                 if result.text:
                     c.notify(result.text)
                 return
-            reply = command(manager, source, text)
+            try:
+                reply = command(manager, source, text)
+            except ValueError as exc:
+                reply = str(exc)
             if reply is not None:
-                c.conversations.complete(source, {'result': reply})
-                c.notify(reply)
+                buttons = None
+                if isinstance(reply, dict):
+                    buttons = reply.get('buttons')
+                    reply_text = reply.get('text', '')
+                else:
+                    reply_text = str(reply)
+                c.conversations.complete(source, {'result': reply_text})
+                if buttons:
+                    c.notify(reply_text, buttons=buttons)
+                else:
+                    c.notify(reply_text)
                 return
             c.intake(source, text, trace_id=trace_id)
     finally:
@@ -208,6 +222,57 @@ def _command(manager, source, text):
         return manager.pixy.direct_response(payload, source=source)
     if name in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(parts) <= 2:
         return manager.pixy.direct_response(text, source=source)
+    if name in {'/chats', '/c'}:
+        turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
+        owner_id = str(manager.telegram.user_id)
+        chat_id = turn.get('chat_id') or owner_id
+        thread_id = turn.get('thread_id')
+        if len(parts) > 1:
+            target = text.partition(' ')[2].strip()
+            switched = c.conversations.switch_conversation(owner_id, chat_id, target, thread_id=thread_id)
+            if not switched:
+                return f"No se encontró la conversación '{target}'."
+            return f"Conversación activa: {switched['title']}"
+        active = c.conversations.list_conversations(owner_id, chat_id, thread_id=thread_id)
+        if not active:
+            return "No hay conversaciones activas."
+        lines = ["Conversaciones activas:"]
+        buttons = []
+        for idx, conv in enumerate(active, 1):
+            marker = "[Actual] " if conv.get('is_current') else ""
+            lines.append(f"{idx}. {marker}{conv['title']}")
+            btn_label = f"{marker}{conv['title']}"[:30]
+            buttons.append([{"label": btn_label, "value": f"/c {idx}"}])
+        buttons.append([
+            {"label": "Nuevo chat", "value": "/new"},
+            {"label": "Limpiar actual", "value": "/clear"}
+        ])
+        return {"text": "\n".join(lines), "buttons": buttons}
+    if name == '/new':
+        turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
+        owner_id = str(manager.telegram.user_id)
+        chat_id = turn.get('chat_id') or owner_id
+        thread_id = turn.get('thread_id')
+        title = text.partition(' ')[2].strip() or None
+        conv = c.conversations.new_conversation(owner_id, chat_id, title=title, thread_id=thread_id)
+        return f"Nueva conversación iniciada: {conv['title']}"
+    if name == '/clear':
+        turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
+        owner_id = str(manager.telegram.user_id)
+        chat_id = turn.get('chat_id') or owner_id
+        thread_id = turn.get('thread_id')
+        conv = c.conversations.clear_conversation(owner_id, chat_id, thread_id=thread_id)
+        return "Conversación reiniciada."
+    if name == '/archive':
+        turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
+        owner_id = str(manager.telegram.user_id)
+        chat_id = turn.get('chat_id') or owner_id
+        thread_id = turn.get('thread_id')
+        target = text.partition(' ')[2].strip() or None
+        conv = c.conversations.archive_conversation(owner_id, chat_id, target=target, thread_id=thread_id)
+        if not conv:
+            return "No se pudo archivar la conversación."
+        return f"Conversación archivada: {conv['title']}"
     if name == '/health':
         return _format_health(manager)
     if name in {'/cancel', '/stop'}:
@@ -267,10 +332,12 @@ async def webhook(request: Request):
             elif hasattr(manager, 'voice_mailbox') and manager.voice_mailbox:
                 msg = data.get('message') or (data.get('callback_query') or {}).get('message') or {}
                 conversation_chat = str((msg.get('chat') or {}).get('id', user_id))
+                thread_id = msg.get('message_thread_id')
                 manager.coordinator.conversations.begin(
                     source, trace_id, text, user_id, conversation_chat,
                     msg.get('message_id') if 'message' in data else None,
-                    (msg.get('reply_to_message') or {}).get('message_id'))
+                    (msg.get('reply_to_message') or {}).get('message_id'),
+                    thread_id=thread_id)
                 manager.voice_mailbox.accept(source, trace_id, text, urgent=urgent_command(text))
             elif hasattr(manager, 'coordinator') and manager.coordinator:
                 await asyncio.to_thread(process_ordinary, manager, source, trace_id, text)

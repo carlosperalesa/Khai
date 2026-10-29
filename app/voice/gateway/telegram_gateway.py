@@ -1,7 +1,7 @@
 import requests
 import json
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import logging
 import functools
 from app.voice.help import HELP_TEXT, HELP_BUTTONS
@@ -72,17 +72,21 @@ class TelegramHandler:
     def send_message(
         self,
         text: str,
-        buttons: Optional[List[Dict]] = None,
+        buttons: Optional[List[Any]] = None,
         parse_mode: str = "HTML",
-        image_path: Optional[str] = None
+        image_path: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        message_thread_id: Optional[int] = None
     ) -> Dict:
-        """Enviar mensaje con botones opcionales"""
+        """Enviar mensaje con botones opcionales y soporte para hilos de Telegram"""
         
         payload = {
-            "chat_id": self.user_id,
+            "chat_id": chat_id or self.user_id,
             "text": text,
             "parse_mode": parse_mode
         }
+        if message_thread_id:
+            payload["message_thread_id"] = message_thread_id
         
         if not parse_mode:
             payload.pop("parse_mode", None)
@@ -90,13 +94,17 @@ class TelegramHandler:
         if buttons is None and text == HELP_TEXT:
             buttons = HELP_BUTTONS
         if buttons:
-            reply_markup = {
-                "inline_keyboard": [
+            if isinstance(buttons[0], list):
+                inline_keyboard = [
+                    [{"text": btn['label'], "callback_data": btn['value']} for btn in row]
+                    for row in buttons
+                ]
+            else:
+                inline_keyboard = [
                     [{"text": btn['label'], "callback_data": btn['value']}]
                     for btn in buttons
                 ]
-            }
-            payload["reply_markup"] = json.dumps(reply_markup)
+            payload["reply_markup"] = json.dumps({"inline_keyboard": inline_keyboard})
         
         try:
             if image_path:

@@ -299,6 +299,8 @@ class DolphinController:
 
     def set_mode(self, mode: str) -> str:
         mode = (mode or '?').strip().lower()
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low'}
+        mode = aliases.get(mode, mode)
         if mode in {'?', 'status', 'info'}:
             return self.status()
         if mode == 'low':
@@ -309,6 +311,8 @@ class DolphinController:
 
     def start(self, profile: str = 'mid') -> str:
         profile = (profile or 'mid').strip().lower()
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low'}
+        profile = aliases.get(profile, profile)
         if profile == 'low':
             return self.stop()
         if profile not in PROFILES:
