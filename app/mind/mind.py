@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Dict
+from typing import Dict, Optional
 from pydantic import BaseModel, Field, ValidationError
 from app.pixy.control import BudgetExceeded
 
@@ -9,8 +9,6 @@ from app.mind.brain import Brain as LLMManager
 from app.mind.memory import MemoryEngine
 
 logger = logging.getLogger("Mind")
-
-from typing import Dict, Optional
 
 class PossibleCause(BaseModel):
     cause: str = Field(..., description="La causa raíz probable.")
@@ -68,8 +66,6 @@ class Mind:
             return {"action": "PS", "reply": ""}
         if msg_lower in ["limpiar", "/limpiar", "cleanup", "/cleanup"]:
             return {"action": "CLEANUP", "reply": ""}
-        if msg_lower in ["hola", "buenas", "buen dia", "buenos dias", "buenos días", "buenas tardes", "buenas noches", "hey", "que tal", "qué tal"]:
-            return {"action": "GENERAL_CHAT", "reply": "Hola ¿En qué trabajamos hoy?"}
             
         return None
         
@@ -82,11 +78,8 @@ class Mind:
         if static_intent:
             return static_intent
             
-        # Guardar el mensaje del usuario en memoria
-        self.memory.append_long_term("user_chat", message)
-        
-        # Recuperar las últimas interacciones para el contexto
-        chat_history = self.memory.get_chat_history(limit=100)
+        # Recuperar las últimas interacciones verificadas para el contexto
+        chat_history = self.memory.get_chat_history(limit=12)
 
         personality_prompt = self.memory.get_system_prompt()
         schema = MindResponse.model_json_schema()
@@ -108,7 +101,7 @@ Debes clasificar la intención de este mensaje en una de estas 5 categorías:
 2. INVESTIGATE: Una skill ha fallado por un problema ambiental (ej. timeout, error de red) o necesitas evidencia externa que no posees.
 3. ACTION_REQUIRED: Pide crear/ejecutar una skill, o debes corregir un error basándote en tu Failure Analysis.
 4. STATE_MACHINE_INPUT: Está dando una respuesta corta a una pregunta anterior.
-5. GENERAL_CHAT: Preguntas teóricas, charla general.
+5. GENERAL_CHAT: Preguntas teóricas, charla general, relatos o conversación abierta.
 
 Tu respuesta DEBE ser EXCLUSIVAMENTE un objeto JSON válido que respete este JSON Schema:
 {json.dumps(schema, indent=2)}
@@ -118,7 +111,7 @@ REGLAS PARA EL JSON:
 - En 'failure_analysis_intent', OBLIGATORIAMENTE debes llenar 'possible_causes' con MÚLTIPLES hipótesis de la causa del fallo con diferentes niveles de confianza (ej. API caída 0.7, URL mal 0.2).
 - INVESTIGATE: Si decides investigar, debes proporcionar 'investigate_target' Y OBLIGATORIAMENTE 'investigate_reason' (¿qué buscas y por qué?).
 - MANIFEST RICO: Si la acción es ACTION_REQUIRED, 'extracted_goal' DEBE terminar con un bloque [MANIFEST] en formato JSON. IMPORTANTE: El campo 'purpose' del manifest DEBE SER MUY DETALLADO (ej. "Calculadora de divisas que consulta a una API externa REST"). No uses propósitos cortos o Pixy lo rechazará.
-- CONCISIÓN: Sé directo y conciso en 'reply' (máximo 1 o 2 oraciones). Cero relleno robótico, discursos o sermones.
+- CONCISIÓN: Sé directo y conciso en 'reply' (1 o 2 oraciones para confirmaciones operativas; si es GENERAL_CHAT y el usuario pide un relato, historia o desarrollo extenso, cumple con la extensión solicitada sin relleno robótico ni sermones).
 - PROHIBIDO EL USO DE EMOTICONES O EMOJIS: Nunca uses emoticones ni emojis en 'reply' ni en ninguna parte del JSON.
 - ¡Devuelve el raw JSON válido directamente!
 """
@@ -135,30 +128,25 @@ REGLAS PARA EL JSON:
             response = self._validate_response(result_text.strip())
             
             intent = response.failure_analysis_intent if response.is_failure_analysis else response.normal_intent
-            if intent and intent.action == 'GENERAL_CHAT' and not response.is_failure_analysis:
-                conversation_prompt = (
-                    f"{personality_prompt}\n\n"
-                    "Responde en español al mensaje del propietario como Khai. "
-                    "Sé conciso. No afirmes haber ejecutado herramientas, enviado mensajes "
-                    "ni consultado datos externos. Si se requiere una acción, dilo claramente.\n\n"
-                    f"Historial reciente:\n{self.memory.get_chat_history(limit=10)}\n\n"
-                    f"Mensaje: {message}\nRespuesta:")
-                try:
-                    intent.reply = self.llm.generate_content(
-                        conversation_prompt, purpose='conversation')
-                except Exception as exc:
-                    logger.warning('Respuesta conversacional de respaldo (%s)', type(exc).__name__)
-            
-            # Guardar pensamiento interno
-            if intent and intent.reasoning_summary:
-                self.memory.append_long_term("system_msg", f"[Khai Reasoning]: {intent.reasoning_summary}")
-            
-            # Guardar la respuesta generada
-            if intent and intent.reply:
-                self.memory.append_long_term("khai_chat", intent.reply)
-                
             if not intent:
-                return {"action": "GENERAL_CHAT", "reply": "Error interno: Falló la selección de intent."}
+                return {
+                    "action": "GENERAL_CHAT",
+                    "reply": "Error interno: Falló la selección de intent.",
+                    "error": "Falló la selección de intent",
+                }
+
+            dolphin_ctrl = getattr(self.llm, 'dolphin', None)
+            if dolphin_ctrl is not None and intent.reply:
+                banner = dolphin_ctrl.consume_transition_banner(dolphin_ctrl.get_active_mode())
+                if banner and not intent.reply.startswith('[Mode ='):
+                    intent.reply = banner + intent.reply
+            
+            # Persistir turno en memoria únicamente tras obtener respuesta válida
+            self.memory.append_long_term("user_chat", message)
+            if intent.reasoning_summary:
+                self.memory.append_long_term("system_msg", f"[Khai Reasoning]: {intent.reasoning_summary}")
+            if intent.reply:
+                self.memory.append_long_term("khai_chat", intent.reply)
             
             # Formatear el dict clásico
             out_dict = {
@@ -185,17 +173,74 @@ REGLAS PARA EL JSON:
             raise
         except ValidationError as ve:
             logger.error("Error de validación estructurada en Mind: %s", ve)
-            return {"action": "GENERAL_CHAT", "reply": "No pude interpretar la respuesta del proveedor. Reformularé la solicitud antes de fallar."}
+            return {
+                "action": "GENERAL_CHAT",
+                "reply": "No pude interpretar la respuesta del proveedor. Reformularé la solicitud antes de fallar.",
+                "error": f"Validación estructurada fallida: {ve}",
+            }
         except Exception as e:
             logger.error("Error procesando mensaje en Mind: %s", e)
-            return {"action": "GENERAL_CHAT", "reply": f"Error de IA: {str(e)}"}
+            return {
+                "action": "GENERAL_CHAT",
+                "reply": f"Error de IA: {str(e)}",
+                "error": str(e),
+            }
 
     @staticmethod
     def _validate_response(raw: str) -> MindResponse:
+        cleaned = (raw or "").strip()
         try:
-            return MindResponse.model_validate_json(raw)
+            return MindResponse.model_validate_json(cleaned)
         except ValidationError as original:
-            repaired = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', raw)
-            if repaired == raw:
-                raise original
-            return MindResponse.model_validate_json(repaired)
+            repaired = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', cleaned)
+            if repaired != cleaned:
+                try:
+                    return MindResponse.model_validate_json(repaired)
+                except ValidationError:
+                    pass
+            candidate = cleaned
+            if not candidate.startswith('{') and '{' in candidate and '}' in candidate:
+                candidate = candidate[candidate.find('{'):candidate.rfind('}') + 1]
+            try:
+                data = json.loads(candidate)
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                if 'normal_intent' in data or 'failure_analysis_intent' in data:
+                    if 'is_failure_analysis' not in data:
+                        data['is_failure_analysis'] = bool(data.get('failure_analysis_intent'))
+                    return MindResponse.model_validate(data)
+                valid_actions = {'HEALTH_CHECK', 'INVESTIGATE', 'ACTION_REQUIRED', 'STATE_MACHINE_INPUT', 'GENERAL_CHAT'}
+                action = str(data.get('action') or 'GENERAL_CHAT').upper().strip()
+                if action not in valid_actions:
+                    action = 'GENERAL_CHAT'
+                reply = (data.get('reply') or data.get('response') or data.get('text')
+                         or data.get('message') or data.get('answer') or '')
+                if not reply and action == 'GENERAL_CHAT':
+                    str_vals = [v.strip() for k, v in data.items()
+                                if k not in {'action', 'reasoning_summary', 'is_failure_analysis'}
+                                and isinstance(v, str) and v.strip()]
+                    if str_vals:
+                        reply = "\n\n".join(str_vals)
+                if reply or data.get('action'):
+                    return MindResponse(
+                        is_failure_analysis=False,
+                        normal_intent=NormalIntent(
+                            reasoning_summary=str(data.get('reasoning_summary') or 'Respuesta estructurada directa.'),
+                            action=action,
+                            reply=str(reply),
+                            extracted_goal=str(data.get('extracted_goal') or ''),
+                            investigate_target=str(data.get('investigate_target') or ''),
+                            investigate_reason=str(data.get('investigate_reason') or ''),
+                        ),
+                    )
+            if cleaned and not cleaned.startswith('{'):
+                return MindResponse(
+                    is_failure_analysis=False,
+                    normal_intent=NormalIntent(
+                        reasoning_summary='Respuesta en texto directo adaptada a GENERAL_CHAT.',
+                        action='GENERAL_CHAT',
+                        reply=cleaned,
+                    ),
+                )
+            raise original

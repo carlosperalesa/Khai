@@ -184,20 +184,19 @@ class CoordinatorTests(Fixture):
         self.assertFalse(current['owner_reviews'][0]['satisfied'])
         self.assertIn('corrige la fuente', current['owner_reviews'][0]['feedback'])
 
-    def test_multiple_pending_questions_require_id_for_natural_reply(self):
+    def test_multiple_pending_questions_default_to_most_recent_without_id(self):
         scope = self.store.create('telegram:scope', 'consulta', state='WAITING_SCOPE')
         review = self.store.create('telegram:review', 'resultado', state='UNVERIFIED',
                                    execution_id='run_' + 'e' * 32)
-        with patch.object(self.c, 'notify') as notify:
-            process_ordinary(self.manager, 'telegram:ambiguous', 'trace-ambiguous',
+        with patch.object(self.c, 'notify'):
+            process_ordinary(self.manager, 'telegram:natural', 'trace-natural',
                              'El resumen está incorrecto')
-        self.assertEqual(self.store.get(scope['id'])['state'], 'WAITING_SCOPE')
-        self.assertEqual(self.store.get(review['id'])['state'], 'UNVERIFIED')
-        self.assertIn('Incluye el ID', notify.call_args.args[0])
-        process_ordinary(self.manager, 'telegram:review-specific', 'trace-specific',
-                         review['id'] + ' El resumen está incorrecto')
         self.assertEqual(self.store.get(review['id'])['state'], 'RESOLVING_SCOPE')
         self.assertEqual(self.store.get(scope['id'])['state'], 'WAITING_SCOPE')
+        with patch.object(self.c, 'notify'):
+            process_ordinary(self.manager, 'telegram:scope-specific', 'trace-specific',
+                             scope['id'] + ' Santiago')
+        self.assertEqual(self.store.get(scope['id'])['state'], 'RESOLVING_SCOPE')
 
     def test_zero_exit_error_text_is_not_success(self):
         task = self.artifact(state='RUNNING', execution_id='run_'+'a'*32)

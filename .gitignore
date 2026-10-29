@@ -1,5 +1,6 @@
 # Entorno y Secretos
 .env
+GEMINI_API.txt
 secrets.env
 data/certs/
 

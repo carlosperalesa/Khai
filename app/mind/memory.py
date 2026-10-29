@@ -420,7 +420,7 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
                 })
             return events
 
-    def get_chat_history(self, limit: int = 100) -> str:
+    def get_chat_history(self, limit: int = 12) -> str:
         with self._get_conn() as conn:
             cur = conn.execute('''
                 SELECT * FROM long_term_events 
@@ -430,14 +430,15 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
             rows = cur.fetchall()
             chat_history = ""
             for row in reversed(rows):
+                content = str(row["content"] or "").strip()
                 if row["event_type"] == "user_chat":
-                    chat_history += f'Usuario: {row["content"]}\n'
+                    chat_history += f'Usuario: {content}\n'
                 elif row["event_type"] == "khai_chat":
-                    chat_history += f'Khai: {row["content"]}\n'
+                    chat_history += f'Khai: {content}\n'
                 elif row["event_type"] == "pixy_chat":
-                    chat_history += f'Pixy: {row["content"]}\n'
+                    chat_history += f'Pixy: {content}\n'
                 elif row["event_type"] == "system_msg":
-                    chat_history += f'[SISTEMA]: {row["content"]}\n'
+                    chat_history += f'[SISTEMA]: {content}\n'
             return chat_history
 
     def clear_chat_history(self) -> None:

@@ -18,6 +18,60 @@ def _name(value, label):
     return value
 
 
+def normalize_schema(value, default_field='result'):
+    """Normalize simplified LLM schema templates into strict object schemas."""
+    if not isinstance(value, dict):
+        return {'type': 'object', 'properties': {default_field: {'type': 'string'}},
+                'required': [default_field], 'additionalProperties': False}
+    if value.get('type') == 'object' and isinstance(value.get('properties'), dict):
+        raw_props = value['properties']
+        req = value.get('required')
+    else:
+        raw_props = {k: v for k, v in value.items()
+                     if k not in {'type', 'properties', 'required', 'additionalProperties'}}
+        req = value.get('required')
+    props = {}
+    for k, v in raw_props.items():
+        clean_k = re.sub(r'[^a-z0-9_-]', '_', str(k).strip().lower())[:64]
+        if not clean_k or not clean_k[0].isalpha():
+            clean_k = 'f_' + (clean_k or 'val')
+        if isinstance(v, dict):
+            t = str(v.get('type', 'string')).lower().strip()
+        elif isinstance(v, str):
+            t = v.lower().strip()
+        else:
+            t = 'string'
+        if t in {'int', ' int'}:
+            t = 'integer'
+        elif t in {'float', 'double', 'decimal', 'num'}:
+            t = 'number'
+        elif t in {'bool'}:
+            t = 'boolean'
+        elif t in {'str', 'text'}:
+            t = 'string'
+        elif t in {'list'}:
+            t = 'array'
+        elif t in {'dict', 'map'}:
+            t = 'object'
+        if t not in PRIMITIVES:
+            t = 'string'
+        props[clean_k] = {'type': t}
+    if isinstance(req, list):
+        clean_req = []
+        for r in req:
+            rk = re.sub(r'[^a-z0-9_-]', '_', str(r).strip().lower())[:64]
+            if rk in props and rk not in clean_req:
+                clean_req.append(rk)
+    else:
+        clean_req = list(props.keys())
+    return {
+        'type': 'object',
+        'properties': props,
+        'required': clean_req,
+        'additionalProperties': False,
+    }
+
+
 def _schema(value, label):
     if not isinstance(value, dict) or value.get('type') != 'object':
         raise ValueError(f'{label} must be an object schema')

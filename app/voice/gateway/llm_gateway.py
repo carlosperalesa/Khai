@@ -53,60 +53,90 @@ class LLMManager:
             logger.warning("No se encontraron API keys en el entorno (Gemini, Azure, OpenAI).")
 
     def _load_status(self) -> Dict:
-        if self.provider_db:
+        if getattr(self, 'provider_db', None):
             from app.kernel.database import connection
             with connection(self.provider_db) as conn:
                 return dict(conn.execute("SELECT key_id,cooldown_until FROM provider_status"))
-        return self.memory.get_provider_status()
+        if getattr(self, 'memory', None):
+            return self.memory.get_provider_status()
+        return {}
 
-    def _mark_key_failed(self, key_id: str):
-        cooldown_until = time.time() + self.cooldown_seconds
-        if self.provider_db:
+    def _mark_key_failed(self, key_id: str, cooldown: float = None):
+        wait = getattr(self, 'cooldown_seconds', 60) if cooldown is None else cooldown
+        cooldown_until = time.time() + wait
+        if getattr(self, 'provider_db', None):
             from app.kernel.database import connection
             with connection(self.provider_db) as conn:
                 conn.execute("INSERT OR REPLACE INTO provider_status VALUES (?,?)",(key_id,cooldown_until))
-        else:
+        elif getattr(self, 'memory', None):
             self.memory.set_provider_cooldown(key_id, cooldown_until)
 
+    def _dolphin_endpoint(self) -> str:
+        env_url = os.getenv('KHAI_DOLPHIN_URL', '').strip()
+        if env_url:
+            return env_url.rstrip('/')
+        dolphin_ctrl = getattr(self, 'dolphin', None)
+        if dolphin_ctrl is not None and getattr(dolphin_ctrl, 'endpoint', ''):
+            return str(dolphin_ctrl.endpoint).strip().rstrip('/')
+        secrets = getattr(self, 'secrets', None)
+        if secrets is not None and hasattr(secrets, 'get'):
+            sec_url = secrets.get('KHAI_DOLPHIN_URL')
+            if sec_url:
+                return str(sec_url).strip().rstrip('/')
+        return ''
+
+    def _call_dolphin(self, prompt: str, endpoint: str, kwargs: Dict) -> str:
+        try:
+            return self._generate_dolphin(prompt, endpoint, kwargs)
+        except TypeError:
+            return self._generate_dolphin(prompt, endpoint)
+
     def generate_content(self, prompt: str, **kwargs) -> str:
-        """Genera contenido iterando sobre el pool global de llaves (Unified Fallback)."""
-        if len(prompt) > 100000:
-            raise ValueError('Contexto excede el límite de 100000 caracteres por llamada')
-        is_conv = kwargs.get('purpose') == 'conversation'
+        """Genera contenido en cascada según el modo activo (mid/high -> Dolphin -> Cloud; low -> Cloud -> Dolphin)."""
+        rf = kwargs.get('response_format')
+        is_json = isinstance(rf, dict) and rf.get('type') == 'json_object'
+        dolphin_ctrl = getattr(self, 'dolphin', None)
+        active_mode = (dolphin_ctrl.get_active_mode()
+                       if dolphin_ctrl is not None
+                       else os.getenv('KHAI_DOLPHIN_MODE', 'low').strip().lower())
+        endpoint = self._dolphin_endpoint()
         conv_banner = ''
-        if is_conv:
-            dolphin_ctrl = getattr(self, 'dolphin', None)
-            active_mode = dolphin_ctrl.get_active_mode() if dolphin_ctrl is not None else None
-            endpoint = os.getenv('KHAI_DOLPHIN_URL', '').strip().rstrip('/')
-            if endpoint and (active_mode in {None, 'mid', 'high'}):
-                try:
-                    answer = self._generate_dolphin(prompt, endpoint)
-                    if dolphin_ctrl is not None and active_mode in {'mid', 'high'}:
-                        conv_banner = dolphin_ctrl.consume_transition_banner(active_mode)
-                    return conv_banner + answer
-                except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-                    logger.warning('Dolphin no disponible (%s); se usará el proveedor de respaldo',
-                                   type(exc).__name__)
-                    if dolphin_ctrl is not None:
-                        dolphin_ctrl.mark_fallback_to_low()
+        tried_dolphin = False
+
+        if endpoint and active_mode in {'mid', 'high'}:
+            tried_dolphin = True
+            try:
+                answer = self._call_dolphin(prompt, endpoint, kwargs)
+                if dolphin_ctrl is not None and not is_json:
+                    conv_banner = dolphin_ctrl.consume_transition_banner(active_mode)
+                return (conv_banner + answer) if conv_banner and not is_json else answer
+            except Exception as exc:
+                logger.warning('Dolphin no disponible (%s); se usará el proveedor de respaldo en cascada',
+                               type(exc).__name__)
+                if dolphin_ctrl is not None:
+                    dolphin_ctrl.mark_fallback_to_low()
+                    if not is_json:
                         conv_banner = dolphin_ctrl.consume_transition_banner('low')
-            elif dolphin_ctrl is not None:
-                conv_banner = dolphin_ctrl.consume_transition_banner('low')
+        elif dolphin_ctrl is not None and not is_json:
+            conv_banner = dolphin_ctrl.consume_transition_banner('low')
+
         status = self._load_status()
         now = time.time()
         
-        # Opciones avanzadas o forzadas (ej: para Pixy VIP channel)
         forced_key = kwargs.get("forced_key")
         forced_type = kwargs.get("forced_type")
         
         if forced_key and forced_type:
             pool = [{"type": forced_type, "key": forced_key, "id": "FORCED_KEY"}]
         else:
-            pool = self.api_keys_pool
+            ready = [c for c in self.api_keys_pool if now > status.get(c['id'], 0)]
+            cooling = sorted(
+                [c for c in self.api_keys_pool if now <= status.get(c['id'], 0)],
+                key=lambda c: status.get(c['id'], 0),
+            )
+            pool = ready + cooling
 
         for current_cred in pool:
-            if time.time() <= status.get(current_cred['id'], 0):
-                continue
             budget = current_budget.get()
             if budget is not None:
                 task = budget()
@@ -116,15 +146,28 @@ class LLMManager:
             try:
                 generate = getattr(self, '_generate_' + current_cred['type'])
                 result = generate(prompt, current_cred['key'], kwargs)
-                return (conv_banner + result) if is_conv and conv_banner else result
+                return (conv_banner + result) if conv_banner and not is_json else result
             except Exception as exc:
                 # Never print credentials, URLs with keys, or full SDK exception payloads.
                 logger.warning('Proveedor %s falló (%s)', current_cred['id'], type(exc).__name__)
-                self._mark_key_failed(current_cred['id'])
+                msg = str(exc)
+                if isinstance(exc, ValueError) and ('Gemini no devolvió candidatos' in msg or 'Gemini devolvió candidato vacío' in msg):
+                    continue
+                http_code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                cooldown = 300 if http_code in {401, 403, 429} else getattr(self, 'cooldown_seconds', 60)
+                self._mark_key_failed(current_cred['id'], cooldown=cooldown)
+
+        if endpoint and not tried_dolphin and not (forced_key and forced_type):
+            try:
+                answer = self._call_dolphin(prompt, endpoint, kwargs)
+                return (conv_banner + answer) if conv_banner and not is_json else answer
+            except Exception as exc:
+                logger.warning('Respaldo Dolphin falló (%s)', type(exc).__name__)
+
         raise ValueError("Unified Fallback agotó todos los intentos y llaves.")
 
-    def _generate_dolphin(self, prompt: str, endpoint: str) -> str:
-        """Dolphin solo redacta conversación; el enrutamiento y las decisiones usan Gemini."""
+    def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
+        """Ejecuta inferencia en el nodo privado Dolphin (Ollama) con soporte texto y JSON."""
         from ipaddress import ip_address
         from urllib.parse import urlsplit
         parsed = urlsplit(endpoint)
@@ -138,12 +181,17 @@ class LLMManager:
             raise ValueError('KHAI_DOLPHIN_URL requiere una IP privada explícita') from exc
         if not address.is_private or address.is_loopback or address.is_link_local:
             raise ValueError('KHAI_DOLPHIN_URL requiere una IP privada de Azure')
-        timeout = min(30.0, max(1.0, float(os.getenv('KHAI_DOLPHIN_TIMEOUT', '8'))))
-        response = requests.post(endpoint + '/api/generate', json={
+        timeout = min(180.0, max(1.0, float(os.getenv('KHAI_DOLPHIN_TIMEOUT', '90'))))
+        num_predict = max(256, int(os.getenv('KHAI_DOLPHIN_NUM_PREDICT', '2048')))
+        payload = {
             'model': os.getenv('KHAI_DOLPHIN_MODEL', 'dolphin3:8b'),
             'prompt': prompt, 'stream': False,
-            'options': {'num_predict': 400},
-        }, timeout=timeout, allow_redirects=False)
+            'options': {'num_predict': num_predict},
+        }
+        rf = (kwargs or {}).get('response_format')
+        if isinstance(rf, dict) and rf.get('type') == 'json_object':
+            payload['format'] = 'json'
+        response = requests.post(endpoint + '/api/generate', json=payload, timeout=timeout, allow_redirects=False)
         response.raise_for_status()
         answer = response.json()['response']
         if not isinstance(answer, str) or not answer.strip():
@@ -169,7 +217,16 @@ class LLMManager:
         headers = {"Content-Type": "application/json"}
         response = requests.post(url, json=payload, headers=headers, timeout=kwargs.get("_timeout", 60))
         response.raise_for_status()
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        data = response.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            reason = (data.get("promptFeedback") or {}).get("blockReason") or "sin_candidatos"
+            raise ValueError(f"Gemini no devolvió candidatos ({reason})")
+        parts = ((candidates[0].get("content") or {}).get("parts")) or []
+        if not parts or not isinstance(parts[0].get("text"), str):
+            reason = candidates[0].get("finishReason") or "sin_texto"
+            raise ValueError(f"Gemini devolvió candidato vacío ({reason})")
+        return parts[0]["text"].strip()
 
     def _generate_azure(self, prompt: str, key: str, kwargs: Dict) -> str:
         endpoint = (self.secrets.get("AZURE_OPENAI_ENDPOINT") if self.secrets else os.getenv("AZURE_OPENAI_ENDPOINT"))

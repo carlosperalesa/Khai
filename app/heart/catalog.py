@@ -13,6 +13,7 @@ ACTIONS = {
     'health_check': {'capability': 'HealthCheck', 'mutating': False, 'targets': {'core', 'proxy'}},
     'retry_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
     'remediate_task': {'capability': 'TaskRemediate', 'mutating': False, 'targets': {'task'}},
+    'create_skill': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
 }
 CAUSE_TAXONOMY = {
     'syntax_or_code': {

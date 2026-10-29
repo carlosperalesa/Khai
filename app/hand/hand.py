@@ -1,3 +1,4 @@
+from urllib.parse import urlsplit
 import ast
 import hashlib
 import json
@@ -15,7 +16,7 @@ from app.pixy.control import InstanceLock
 from app.pixy.control import BudgetExceeded
 from app.voice.runtime.contract import digest, skill_metadata, default_runtime_capabilities
 from app.hand.catalog import SkillCatalog
-from app.hand.skill_spec import validate_skill_spec
+from app.hand.skill_spec import normalize_schema, validate_skill_spec
 from app.voice.gateway.service_registry import validate_descriptor
 
 RECOVERY_STEP_TIMEOUT = 300
@@ -160,10 +161,10 @@ Manifiesto: {json.dumps(task.get('manifest', {}), ensure_ascii=False)}
 Servicios aprobados para este objetivo: {json.dumps(task.get('services', []), ensure_ascii=False)}
 Reglas aplicables: {json.dumps(guidelines, ensure_ascii=False)}
 Hipótesis a probar: {hypothesis or ''}
-Resultado/rechazo anterior: {str(task.get('feedback', ''))[:8000]}
+Resultado/rechazo anterior: {str(task.get('feedback', ''))}
 Alcance confirmado por el propietario: {json.dumps((task.get('scope_revisions') or [{}])[-1], ensure_ascii=False)}
 Contrato de acción planificada: {json.dumps(task.get('planned_skill_spec') or {}, ensure_ascii=False)}
-Código anterior: {str(task.get('code', ''))[:24000]}
+Código anterior: {str(task.get('code', ''))}
 '''
         code = self.llm.generate_content(prompt)
         if '```python' in code:
@@ -207,21 +208,38 @@ Código anterior: {str(task.get('code', ''))[:24000]}
         if not self.llm:
             return None
         services = task.get('services', [])
-        prompt = ("Describe esta capacidad reutilizable como JSON con description, use_cases, "
-                  "input_schema y output_schema. Ambos schemas deben ser objetos con properties, "
-                  "required y additionalProperties=false; cada propiedad tiene solo type. "
-                  "Puedes incluir extraction_templates como patrones literales con slots "
-                  "{campo:number}, {campo:integer}, {campo:currency}, {campo:city} o {campo:text}; "
-                  "cada patrón debe cubrir todos los campos requeridos. "
+        template = {
+            "description": "Descripción clara de la capacidad reutilizable",
+            "use_cases": ["Caso de uso representativo"],
+            "input_schema": {"parametro": "string"},
+            "output_schema": {"resultado": "string"}
+        }
+        prompt = ("Describe esta capacidad reutilizable siguiendo esta plantilla JSON:\n"
+                  + json.dumps(template, ensure_ascii=False) + "\n"
+                  "Puedes incluir extraction_templates opcionales con slots "
+                  "{campo:number}, {campo:integer}, {campo:currency}, {campo:city} o {campo:text}. "
                   "Separa parámetros de la solicitud concreta. No incluyas claves ni valores secretos. "
-                  "Objetivo: " + str(task['request'])[:3000] + "\n"
+                  "Objetivo: " + str(task['request']) + "\n"
                   "Servicio disponible: " + json.dumps(services, ensure_ascii=False))
         try:
             raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
-            proposed = json.loads(raw)
-            spec = {'skill_id': name, 'description': proposed['description'],
-                    'use_cases': proposed['use_cases'], 'input_schema': proposed['input_schema'],
-                    'output_schema': proposed['output_schema'], 'runtime': mode,
+            proposed = json.loads(raw) if isinstance(raw, str) else raw
+            in_s = proposed.get('input_schema') or proposed.get('inputs') or {}
+            out_s = proposed.get('output_schema') or proposed.get('outputs') or {'result': 'string'}
+            if 'additionalProperties' not in in_s:
+                in_s = normalize_schema(in_s, default_field='query')
+            if 'additionalProperties' not in out_s:
+                out_s = normalize_schema(out_s, default_field='result')
+            desc = str(proposed.get('description') or task.get('request') or name).strip()
+            if len(desc) < 10:
+                desc = f'Capacidad reutilizable para {desc}.'
+            use_cases = proposed.get('use_cases')
+            if not isinstance(use_cases, list) or not use_cases:
+                use_cases = [desc[:200]]
+            spec = {'skill_id': name, 'description': desc[:1000],
+                    'use_cases': [str(u).strip()[:300] for u in use_cases if str(u).strip()] or [desc[:200]],
+                    'input_schema': in_s,
+                    'output_schema': out_s, 'runtime': mode,
                     'dependencies': dependencies, 'services': services,
                     'verifier': {'kind': (task.get('criterion') or {}).get('kind', 'owner_criterion')}}
             if 'extraction_templates' in proposed:
@@ -237,33 +255,114 @@ Código anterior: {str(task.get('code', ''))[:24000]}
             raise RuntimeError('Hand has no service proposal port')
         return self.service_proposals.propose(descriptor)
 
+    @staticmethod
+    def _normalize_service_descriptor(spec):
+        if not isinstance(spec, dict) or not spec.get('url'):
+            return spec
+
+        def _clean_ident(val, fallback):
+            s = re.sub(r'[^a-z0-9_-]', '_', str(val or '').strip().lower()).strip('_')
+            s = re.sub(r'_+', '_', s)
+            if not s or not s[0].isalpha():
+                s = fallback + ('_' + s if s else '')
+            return s[:64]
+
+        url = str(spec.get('url') or '').strip()
+        if url.startswith('http://'):
+            url = 'https://' + url[7:]
+        elif not url.startswith('https://'):
+            url = 'https://' + url
+
+        sid_raw = spec.get('service_id')
+        if not sid_raw or sid_raw in {'service', 'svc', 'api'} or '.' in str(sid_raw):
+            try:
+                host = urlsplit(url).hostname or ''
+                parts = [p for p in host.split('.') if p not in {'api', 'www', 'com', 'org', 'net', 'io', 'dev'}]
+                if parts:
+                    sid_raw = parts[0]
+            except Exception:
+                pass
+
+        method = str(spec.get('method') or 'GET').upper().strip()
+        if method not in {'GET', 'POST'}:
+            method = 'GET'
+        effect = str(spec.get('effect') or ('read' if method == 'GET' else 'write')).lower().strip()
+        if method == 'GET':
+            effect = 'read'
+        raw_params = spec.get('parameters') if isinstance(spec.get('parameters'), list) else []
+        params = []
+        for p in raw_params[:32]:
+            cp = _clean_ident(p, 'param')
+            if cp not in params:
+                params.append(cp)
+        raw_ct = spec.get('content_types') if isinstance(spec.get('content_types'), list) else []
+        ctypes = [c for c in raw_ct if c in {'application/json', 'text/plain'}] or ['application/json']
+        try:
+            max_b = max(1, min(2 * 1024 * 1024, int(spec.get('max_bytes') or 65536)))
+        except Exception:
+            max_b = 65536
+        try:
+            timeout = max(1, min(30, int(float(spec.get('timeout') or 15))))
+        except Exception:
+            timeout = 15
+        try:
+            per_min = max(1, min(60, int(spec.get('per_minute') or 30)))
+        except Exception:
+            per_min = 30
+        cred = spec.get('credential_ref')
+        if isinstance(cred, str):
+            cred = cred.strip().upper()
+            if not re.fullmatch(r'^[A-Z][A-Z0-9_]{2,127}$', cred):
+                cred = None
+        else:
+            cred = None
+        return {
+            'service_id': _clean_ident(sid_raw, 'svc'),
+            'operation': _clean_ident(spec.get('operation'), 'op'),
+            'version': _clean_ident(spec.get('version') or 'v1', 'v1'),
+            'url': url,
+            'method': method,
+            'parameters': params,
+            'content_types': ctypes,
+            'max_bytes': max_b,
+            'timeout': timeout,
+            'per_minute': per_min,
+            'effect': effect,
+            'credential_ref': cred,
+            'effect_contract': None if effect == 'read' else spec.get('effect_contract'),
+        }
+
     def describe_service(self, task):
         """Propose a fixed Voice operation; only Pixy can activate it."""
         if self.llm is None:
             raise RuntimeError('No hay LLM para proponer el servicio externo')
-        prompt = ("Propón un descriptor JSON de UNA operación HTTPS pública para este objetivo. "
-                  "Devuelve exactamente service_id, operation, version, url, method, parameters, "
-                  "content_types, max_bytes, timeout, per_minute, effect, credential_ref y effect_contract. "
-                  "La URL debe ser fija; parámetros van en query GET o cuerpo JSON POST. "
-                  "No inventes credenciales ni incluyas sus valores. credential_ref es una variable "
-                  "de entorno en mayúsculas o null. Declara effect=write si altera datos remotos. "
-                  "Para read usa effect_contract=null. Para write declara effect_contract con "
-                  "kind=create|update|delete|other, identity={source:request|response,field:<campo>} "
-                  "o null, summary={name:<nombre fijo>,context:<contexto fijo no sensible>} "
-                  "y correction={service_id,operation,version,identity_parameter,questions} "
-                  "o null. questions asocia cada parámetro correctivo distinto de la identidad "
-                  "con {description,question}; describe para qué sirve y cómo pedirlo al usuario. "
-                  "El resumen identifica el tipo de efecto; no copies petición, contenido, claves "
-                  "ni datos variables. Pixy lo revisará antes de aprobar el servicio. "
-                  "La corrección debe referirse a una operación real; nunca la inventes. "
-                  "Para escritura en lote, usa identity=null y declara batch con request_field, "
-                  "response_field, index_field, identity_field, status_field, success_value y "
-                  "failure_value. Cada respuesta por elemento debe incluir índice estable y estado; "
-                  "cada éxito debe incluir ID único. No adivines correspondencias por el orden del JSON. "
-                  "Si desconoces un endpoint real, responde {}. Objetivo: " + str(task['request'])[:3000])
+        template = {
+            "service_id": "open_meteo",
+            "operation": "forecast",
+            "version": "v1",
+            "url": "https://api.open-meteo.com/v1/forecast",
+            "method": "GET",
+            "parameters": ["latitude", "longitude", "daily", "timezone"],
+            "content_types": ["application/json"],
+            "max_bytes": 65536,
+            "timeout": 15,
+            "per_minute": 30,
+            "effect": "read",
+            "credential_ref": None,
+            "effect_contract": None
+        }
+        prompt = ("Propón un descriptor JSON de UNA operación HTTPS pública para este objetivo "
+                  "siguiendo exactamente esta plantilla:\n"
+                  + json.dumps(template, ensure_ascii=False) + "\n"
+                  "La URL debe ser HTTPS fija; parámetros van en query GET o cuerpo JSON POST. "
+                  "No inventes credenciales ni incluyas sus valores; usa credential_ref=null si es pública "
+                  "o el nombre de la variable de entorno en MAYÚSCULAS. "
+                  "Para lectura (GET) usa effect=\"read\" y effect_contract=null. "
+                  "Si desconoces un endpoint real, responde {}. Objetivo: " + str(task['request']))
         try:
             raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
             spec = json.loads(raw) if isinstance(raw, str) else raw
+            spec = self._normalize_service_descriptor(spec)
             validate_descriptor(spec)
         except (ValueError, TypeError, KeyError) as exc:
             raise ValueError('Hand no pudo declarar un servicio externo válido') from exc
@@ -472,7 +571,7 @@ Código anterior: {str(task.get('code', ''))[:24000]}
                     self._archive(current)
                 with connection(self.db) as conn:
                     conn.execute('UPDATE versions SET status="approved",pixy_audit_id=? WHERE version_id=?',
-                                 (audit['audit_id'],vid))
+                                 (audit.get('audit_id') or ('audit_' + uuid.uuid4().hex),vid))
                 if current:
                     active.rename(old)
                 try:

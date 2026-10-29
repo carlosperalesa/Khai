@@ -1,13 +1,22 @@
 """Bounded, domain-neutral clarification of an owner's requested outcome."""
 import json
+import re
 
 
 def _questions(value):
-    if not isinstance(value, list) or len(value) > 4:
-        raise ValueError('Invalid clarification questions')
-    if any(not isinstance(item, str) or not 8 <= len(item.strip()) <= 300 for item in value):
-        raise ValueError('Invalid clarification question')
-    return [item.strip() for item in value]
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for item in value[:4]:
+        if not isinstance(item, str):
+            continue
+        q = item.strip()[:300]
+        if not q:
+            continue
+        if len(q) < 8:
+            q = f'¿Puedes aclarar: {q}?'
+        cleaned.append(q)
+    return cleaned
 
 
 class RequirementsPlanner:
@@ -15,46 +24,65 @@ class RequirementsPlanner:
         self.llm = llm
 
     def questions(self, request, input_schema=None):
+        template = {"questions": []}
         prompt = (
             'Antes de crear o ejecutar una herramienta, identifica solo datos que falten '
-            'para satisfacer el objetivo y criterios observables de salida. No inventes '
-            'valores ni hagas preguntas de permisos. Devuelve JSON {"questions": [string]}. '
-            'Si la petición ya es completa, devuelve una lista vacía. Máximo cuatro '
-            'preguntas breves, agrupadas si es natural. Pide datos concretos, no '
-            'una segunda confirmación de permiso. Campos obligatorios aún sin valor '
-            'de una skill existente: ' + json.dumps(input_schema or {}, ensure_ascii=False)[:2000] +
-            '. Objetivo: ' + request[:3000]
+            'para satisfacer el objetivo. No inventes valores ni hagas preguntas de permisos. '
+            'Devuelve JSON siguiendo esta plantilla:\n'
+            + json.dumps(template, ensure_ascii=False) + '\n'
+            'Si la petición ya es completa, devuelve {"questions": []}. Máximo cuatro '
+            'preguntas breves. Campos obligatorios de la skill: '
+            + json.dumps(input_schema or {}, ensure_ascii=False)
+            + '. Objetivo: ' + request
         )
-        result = json.loads(self.llm.generate_content(prompt, response_format={'type': 'json_object'}))
-        return _questions(result['questions'])
+        raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(result, dict):
+            return []
+        return _questions(result.get('questions', []))
 
     def resolve(self, request, questions, answer, previous=None):
+        template = {
+            "purpose": "Objetivo completo actualizado con la respuesta del propietario",
+            "required_output": ["Resultado observable esperado"],
+            "params": {},
+            "missing_questions": []
+        }
         prompt = (
             'Integra la respuesta del propietario con el objetivo sin añadir requisitos '
             'que no haya pedido. Conserva los requisitos de la revisión anterior '
-            'salvo que el propietario los cambie explícitamente. Devuelve JSON con purpose (objetivo completo), '
-            'required_output (lista de resultados observables), params (objeto de '
-            'parámetros declarados), missing_questions (lista de preguntas si persiste '
-            'una ambigüedad esencial). La respuesta del propietario confirma el alcance; '
-            'no pidas una segunda confirmación. No inventes datos. Máximo cuatro '
-            'preguntas adicionales. Objetivo: ' + request[:3000] + '\nPreguntas: ' +
-            json.dumps(questions, ensure_ascii=False) + '\nRevisión anterior: ' +
-            json.dumps(previous or {}, ensure_ascii=False)[:3000] + '\nRespuesta: ' + answer[:3000]
+            'salvo que el propietario los cambie explícitamente. Devuelve JSON siguiendo esta plantilla:\n'
+            + json.dumps(template, ensure_ascii=False) + '\n'
+            'Objetivo: ' + request + '\nPreguntas: '
+            + json.dumps(questions, ensure_ascii=False) + '\nRevisión anterior: '
+            + json.dumps(previous or {}, ensure_ascii=False) + '\nRespuesta: ' + answer
         )
-        result = json.loads(self.llm.generate_content(prompt, response_format={'type': 'json_object'}))
-        if not isinstance(result, dict) or not isinstance(result.get('purpose'), str):
-            raise ValueError('Invalid resolved objective')
-        purpose = result['purpose'].strip()
-        outputs = result.get('required_output')
-        params = result.get('params')
-        if not 8 <= len(purpose) <= 3000 or not isinstance(outputs, list) or len(outputs) > 12:
-            raise ValueError('Invalid objective scope')
-        if any(not isinstance(item, str) or not 2 <= len(item.strip()) <= 200 for item in outputs):
-            raise ValueError('Invalid required output')
-        if not isinstance(params, dict) or len(params) > 32 or any(
-                not isinstance(key, str) or not key.isidentifier()
-                or isinstance(value, (dict, list)) or value is None
-                for key, value in params.items()):
-            raise ValueError('Invalid scope parameters')
-        return {'purpose': purpose, 'required_output': [item.strip() for item in outputs],
-                'params': params, 'missing_questions': _questions(result.get('missing_questions', []))}
+        raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(result, dict):
+            result = {}
+        purpose = str(result.get('purpose') or f"{request} ({answer})").strip()[:3000]
+        if len(purpose) < 8:
+            purpose = f"Objetivo confirmado: {purpose or request}"[:3000]
+        raw_outputs = result.get('required_output')
+        if isinstance(raw_outputs, list) and raw_outputs:
+            outputs = [str(item).strip()[:200] for item in raw_outputs[:12] if len(str(item).strip()) >= 2]
+        else:
+            outputs = []
+        if not outputs:
+            outputs = [purpose[:160]]
+        raw_params = result.get('params') if isinstance(result.get('params'), dict) else {}
+        params = {}
+        for k, v in list(raw_params.items())[:32]:
+            ck = re.sub(r'[^a-zA-Z0-9_]', '_', str(k).strip())
+            if not ck or not ck.isidentifier() or v is None:
+                continue
+            if isinstance(v, (dict, list)):
+                v = json.dumps(v, ensure_ascii=False)
+            params[ck] = v
+        return {
+            'purpose': purpose,
+            'required_output': outputs,
+            'params': params,
+            'missing_questions': _questions(result.get('missing_questions', [])),
+        }

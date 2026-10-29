@@ -50,8 +50,9 @@ class ControlStore:
             conn.close()
 
     def create(self, source, request, **extra):
+        now = time.time()
         task = dict(id="task_" + uuid.uuid4().hex, source=source, request=request,
-                    state="ROUTING", created_at=time.time(), deadline=time.time() + 1800,
+                    state="ROUTING", created_at=now, updated_at=now, deadline=now + 1800,
                     generations=0, executions=0, llm_calls=0,
                     max_generations=INITIAL_TASK_BUDGET['generations'],
                     max_executions=INITIAL_TASK_BUDGET['executions'],
@@ -84,6 +85,7 @@ class ControlStore:
             task = json.loads(row[0])
             fn(task)
             task["revision"] += 1
+            task["updated_at"] = time.time()
             conn.execute("UPDATE control_tasks SET document=? WHERE id=?", (json.dumps(task), task_id))
             self._queue_event(conn,task,'task_state')
             return task
@@ -147,6 +149,7 @@ class ControlStore:
             task = json.loads(row[0])
             fn(task)
             task["revision"] += 1
+            task["updated_at"] = time.time()
             conn.execute("UPDATE control_tasks SET document=? WHERE id=?", (json.dumps(task), task_id))
             conn.execute("INSERT INTO control_commands VALUES (?)", (source,))
             self._queue_event(conn,task,'owner_command')

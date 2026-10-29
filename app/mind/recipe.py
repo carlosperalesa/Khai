@@ -30,18 +30,18 @@ class RevisionPlanner:
             '"missing" significa que el propietario afirma que el efecto no ocurrió; '
             'no implica que sea seguro repetirlo. Conserva las demás como provisionales '
             'hasta el y final del propietario. '
-            'Objetivo: ' + goal[:2000] + '\nCorrección: ' + feedback[:2000] +
-            '\nAcciones y recibos: ' + json.dumps(steps, ensure_ascii=False)[:5000])
+            'Objetivo: ' + goal + '\nCorrección: ' + feedback +
+            '\nAcciones y recibos: ' + json.dumps(steps, ensure_ascii=False))
         raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
         result = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(result, dict) or set(result) != {'step_id', 'problem'}:
+        if not isinstance(result, dict):
             raise ValueError('Invalid owner correction classification')
-        step_id = result['step_id']
+        step_id = result.get('step_id')
         if step_id is not None and step_id not in {step['id'] for step in recipe['steps']}:
             raise ValueError('Correction targets an unknown action')
-        if result['problem'] not in {'missing', 'incorrect', 'other'}:
+        if result.get('problem') not in {'missing', 'incorrect', 'other'}:
             raise ValueError('Invalid correction problem')
-        return result
+        return {'step_id': step_id, 'problem': result['problem']}
 
     def effect_index(self, answer, count, allow_llm=True):
         """Interpret an owner's relative-order answer, never infer resource contents."""
@@ -63,63 +63,67 @@ class RevisionPlanner:
             return int(answer.strip())
         if matches or not allow_llm or self.llm is None:
             return None
+        template = {"index": 1}
         prompt = (
             'Interpreta exclusivamente si la respuesta del propietario identifica '
-            'por ORDEN una de las escrituras registradas. No conoces sus títulos '
-            'ni contenidos. Si la respuesta menciona solo un título, una fecha o '
-            'cualquier atributo sin vincularlo a una posición, devuelve null. '
-            'No elijas por defecto. Devuelve exactamente JSON '
-            '{"index":entero|null,"evidence":texto|null}; evidence debe ser '
-            'una cita literal breve de la expresión de orden del propietario. '
-            'con índice desde 1 hasta ' + str(count) + '. Respuesta: ' + answer[:500])
+            'por ORDEN una de las escrituras registradas (desde 1 hasta ' + str(count) + '). '
+            'Si la respuesta no identifica una posición por orden, devuelve {"index": null}.\n'
+            'Plantilla JSON:\n' + json.dumps(template) + '\n'
+            'Respuesta: ' + answer)
         try:
             raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
             result = json.loads(raw) if isinstance(raw, str) else raw
-            if not isinstance(result, dict) or set(result) != {'index', 'evidence'}:
+            if not isinstance(result, dict):
                 return None
-            index, evidence = result['index'], result['evidence']
-            if (type(index) is not int or not 1 <= index <= count
-                    or not isinstance(evidence, str)
-                    or evidence.casefold() not in normalized
-                    or not re.search(r'\b(despu[eé]s|antes|final|inicio|reciente|anterior|posterior|últim[ao]|ultim[ao]|primer[ao]?|segund[ao]|tercer[ao]?)\b',
-                                     evidence.casefold())):
+            index = result.get('index')
+            if type(index) is not int or not 1 <= index <= count:
+                return None
+            evidence = result.get('evidence')
+            if isinstance(evidence, str) and not re.search(
+                    r'\b(despu[eé]s|antes|final|inicio|reciente|anterior|posterior|últim[ao]|ultim[ao]|primer[ao]?|segund[ao]|tercer[ao]?|[0-9]+)\b',
+                    evidence.casefold()):
                 return None
             return index
         except Exception:
             return None
 
     def effect_inputs(self, answer, questions, required=None):
-        """Identify relevant correction fields, accepting only literal owner evidence."""
+        """Identify relevant correction fields and extracted values using a JSON template."""
         if not questions:
             return {'required': [], 'provided': {}}
         if self.llm is None:
             return None
+        template = {
+            "required": list(questions.keys())[:1],
+            "provided": {}
+        }
         prompt = (
-            'La persona describe una corrección de un efecto externo. Selecciona solo '
-            'los parámetros necesarios para esa corrección, según sus descripciones. '
-            'No selecciones otros parámetros de la misma operación. Si ya se preguntó '
-            'por parámetros concretos, consérvalos en required. Para cada valor ya '
-            'proporcionado, copia una cita literal breve de la respuesta en provided; '
-            'no inventes valores ni infieras identificadores. Devuelve exactamente JSON '
-            '{"required":[nombres],"provided":{nombre:cita_literal}}. Parámetros: ' +
-            json.dumps(questions, ensure_ascii=False)[:3000] +
-            '. Ya preguntados: ' + json.dumps(required or [], ensure_ascii=False) +
-            '. Respuesta: ' + answer[:1000])
+            'La persona describe una corrección de un efecto externo. Selecciona los '
+            'parámetros necesarios para esa corrección y extrae los valores ya indicados '
+            'por el propietario en provided. Si ya se preguntó por parámetros concretos, '
+            'consérvalos en required. Devuelve JSON siguiendo esta plantilla:\n'
+            + json.dumps(template, ensure_ascii=False)
+            + '\nParámetros: ' + json.dumps(questions, ensure_ascii=False)
+            + '\nYa preguntados: ' + json.dumps(required or [], ensure_ascii=False)
+            + '\nRespuesta: ' + answer)
         try:
             raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
             result = json.loads(raw) if isinstance(raw, str) else raw
-            fields = result['required']
-            provided = result['provided']
-            if (set(result) != {'required', 'provided'} or not isinstance(fields, list)
-                    or not fields or len(fields) != len(set(fields))
+            if not isinstance(result, dict):
+                return None
+            fields = result.get('required')
+            provided = result.get('provided')
+            if (not isinstance(fields, list) or not fields
                     or any(field not in questions for field in fields)
                     or not set(required or []).issubset(fields)
-                    or not isinstance(provided, dict) or not set(provided).issubset(fields)
-                    or any(not isinstance(quote, str) or not quote.strip()
-                           or quote.casefold() not in answer.casefold()
-                           for quote in provided.values())):
+                    or not isinstance(provided, dict)
+                    or not set(provided).issubset(fields)
+                    or any(v is None or not str(v).strip() for v in provided.values())):
                 return None
-            return {'required': fields, 'provided': provided}
+            return {
+                'required': list(dict.fromkeys(fields)),
+                'provided': {k: str(v).strip() for k, v in provided.items()},
+            }
         except (ValueError, TypeError, KeyError, AttributeError):
             return None
 

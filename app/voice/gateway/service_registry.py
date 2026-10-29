@@ -176,6 +176,11 @@ class ServiceRegistry:
                                (digest,)).fetchone()
         return {**dict(row), 'spec': json.loads(row['descriptor'])} if row else None
 
+    def all(self):
+        with connection(self.db_path) as conn:
+            rows = conn.execute('SELECT * FROM service_descriptors ORDER BY proposed_at ASC').fetchall()
+        return [{**dict(row), 'spec': json.loads(row['descriptor'])} for row in rows]
+
     def active_services(self):
         with connection(self.db_path) as conn:
             rows = conn.execute("SELECT descriptor FROM service_descriptors WHERE status='approved'").fetchall()
@@ -207,6 +212,9 @@ class PixyServicePort:
 
     def get(self, digest):
         return self.__registry.get(digest)
+
+    def all(self):
+        return self.__registry.all()
 
     def decide(self, digest, approve, decided_by):
         return self.__registry.decide(digest, approve, decided_by)

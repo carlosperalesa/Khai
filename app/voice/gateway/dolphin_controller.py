@@ -323,7 +323,7 @@ class DolphinController:
                 self._set_mode_state(profile, mark_notified=True)
                 ready = self._wait_ollama_ready(timeout_sec=10)
                 estado_red = 'conectado por túnel WireGuard' if ready else 'arrancando servicio Ollama'
-                return f"[Mode = {profile}]\nDolphin ya está activo en modo {spec['label']} ({estado_red}). {self.billing_summary()}"
+                return f"[Mode = {profile}]"
             if curr_mt == target_mt and curr_status == 'TERMINATED':
                 resp = requests.post(
                     self._gce_url(f'instances/{quote(self.instance)}/start'),
@@ -334,12 +334,8 @@ class DolphinController:
                 self._wait_operation(resp.json()['name'])
                 self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
                 self._set_mode_state(profile, mark_notified=True)
-                ready = self._wait_ollama_ready(timeout_sec=45)
-                suf = 'Túnel WireGuard y Ollama listos.' if ready else 'VM iniciada; Ollama terminará de responder en unos segundos.'
-                return (
-                    f"[Mode = {profile}]\nDolphin encendido en modo {spec['label']}. {suf} "
-                    f"Auto-apagado tras 5 min sin actividad. {self.billing_summary()}"
-                )
+                self._wait_ollama_ready(timeout_sec=45)
+                return f"[Mode = {profile}]"
             del_resp = requests.delete(
                 self._gce_url(f'instances/{quote(self.instance)}'),
                 headers=self._headers(),
@@ -383,22 +379,15 @@ class DolphinController:
         self._wait_operation(ins_resp.json()['name'])
         self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
         self._set_mode_state(profile, mark_notified=True)
-        ready = self._wait_ollama_ready(timeout_sec=45)
-        suf = 'Túnel WireGuard y Ollama listos.' if ready else 'VM creada; Ollama terminará de responder en unos segundos.'
-        return (
-            f"[Mode = {profile}]\nDolphin encendido en modo {spec['label']} sobre disco {self.disk} (32 GB). "
-            f"{suf} Auto-apagado tras 5 min sin actividad. {self.billing_summary()}"
-        )
+        self._wait_ollama_ready(timeout_sec=45)
+        return f"[Mode = {profile}]"
 
     def stop(self) -> str:
         current = self.get_instance()
         self._record_stop()
         self._set_mode_state('low', mark_notified=True)
         if current is None:
-            return (
-                f"[Mode = low]\nActivo en Gemini (instancia Dolphin ya estaba apagada; disco {self.disk} en reposo). "
-                f"{self.billing_summary()}"
-            )
+            return "[Mode = low]"
         resp = requests.delete(
             self._gce_url(f'instances/{quote(self.instance)}'),
             headers=self._headers(),
@@ -407,10 +396,7 @@ class DolphinController:
         if resp.status_code != 404:
             resp.raise_for_status()
             self._wait_operation(resp.json()['name'])
-        return (
-            f"[Mode = low]\nActivo en Gemini. Instancia Spot de Dolphin eliminada y cobro de cómputo detenido. "
-            f"El disco {self.disk} (32 GB) permanece en reposo. {self.billing_summary()}"
-        )
+        return "[Mode = low]"
 
     def status(self) -> str:
         current = self.get_instance()

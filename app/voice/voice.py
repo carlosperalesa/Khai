@@ -127,7 +127,7 @@ def secret_command(manager, text, user_id, chat_id):
 
 def urgent_command(text):
     name = text.split(maxsplit=1)[0].lower()
-    return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m',
+    return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m', '/mode?', '/m?',
                     'y', 'yes', 'sí', 'si', 'n', 'no'}
 
 
@@ -140,11 +140,14 @@ def process_ordinary(manager, source, trace_id, text):
                                                        'WAITING_FEEDBACK', 'WAITING_CREATION_APPROVAL',
                                                        'WAITING_EFFECT_DECISION', 'WAITING_EFFECT_DETAIL'}]
             named = any(task['id'] in {words[0], words[-1]} for task in pending_questions) if words else False
-            if len(pending_questions) > 1 and not named:
-                manager.coordinator.notify(
-                    'Hay varias preguntas pendientes. Incluye el ID del objetivo: ' +
-                    ', '.join(task['id'] for task in pending_questions))
-                return
+            if len(pending_questions) > 1 and not named and words:
+                # Sin ID: la respuesta corresponde a la pregunta pendiente más reciente.
+                latest = manager.coordinator.latest_task(pending_questions)
+                if words[0].casefold() in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(words) == 1:
+                    text = words[0] + ' ' + latest['id']
+                elif latest['state'] != 'WAITING_CREATION_APPROVAL':
+                    text = latest['id'] + ' ' + text.strip()
+                words = text.split()
         decision = bool(words and words[0].casefold() in {'y', 'yes', 'sí', 'si', 'n', 'no'}
                         and len(words) <= 2)
         reply = None
@@ -166,7 +169,9 @@ def process_ordinary(manager, source, trace_id, text):
                     and not authorizations and target is None):
                 reply = manager.coordinator.accept_review_reply(source, text)
             elif reviews and (approvals or authorizations) and target is None:
-                reply = 'Hay decisiones y resultados pendientes. Responde y/n con el ID correspondiente.'
+                latest = manager.coordinator.latest_task(reviews + approvals)
+                if latest in reviews:
+                    reply = manager.coordinator.accept_review_reply(source, words[0] + ' ' + latest['id'])
         if reply is None:
             reply = command(manager, source, text)
         if reply is None:
@@ -229,13 +234,14 @@ def _command(manager, source, text):
     name = parts[0].lower()
     if name in {'/help', '/?'}:
         return HELP_TEXT
-    if name in {'/mode', '/m'}:
+    if name in {'/mode', '/m', '/mode?', '/m?'}:
         if not hasattr(manager, 'dolphin') or manager.dolphin is None:
             raise ValueError('Controlador Dolphin no configurado')
-        arg = parts[1].lower() if len(parts) >= 2 else '?'
+        arg = '?' if name.endswith('?') else (parts[1].lower() if len(parts) >= 2 else '?')
         return manager.dolphin.set_mode(arg)
-    if name in {'/pixy', '/p'}:
-        return manager.pixy.direct_response(text.partition(' ')[2], source=source)
+    if name in {'/pixy', '/p', '/pixy?', '/p?'}:
+        payload = '?' if name.endswith('?') and len(parts) == 1 else text.partition(' ')[2]
+        return manager.pixy.direct_response(payload, source=source)
     if name in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(parts) <= 2:
         return manager.pixy.direct_response(text, source=source)
     if name == '/health':

@@ -113,15 +113,7 @@ class Recovery:
 
     @staticmethod
     def select_evidence_resources(question):
-        """Heart decides which telemetry resources to request from Senses based on the inquiry."""
-        q = (question or '').lower()
-        if any(term in q for term in ('memoria', 'ram', 'disco', 'disk', 'espacio')):
-            return ['storage', 'core_logs', 'pixy']
-        if any(term in q for term in ('proxy', 'docker', 'contenedor', 'container')):
-            return ['container_state_proxy', 'container_state_core', 'core_logs', 'pixy']
-        if any(term in q for term in ('db', 'database', 'sqlite', 'tabla', 'integridad')):
-            return ['storage', 'pixy']
-        # Basal diagnostic profile determined by Heart
+        """Heart solicita siempre el perfil basal completo de telemetría a Senses."""
         return ['storage', 'container_state_core', 'container_state_proxy', 'core_logs', 'pixy']
 
     # ------------------------------------------------------------- case intake
@@ -244,12 +236,91 @@ class Recovery:
                           plan_hash=plan_hash(case_id, plan))
 
     # --------------------------------------------------------------- diagnosis
-    @staticmethod
-    def diagnose(evidence, failure_override=None):
-        findings = []
-        def add(code, severity, detail, remedy=None):
-            findings.append({'code': code, 'severity': severity, 'detail': detail, 'remedy': remedy})
+    def _llm_analyze_incident(self, evidence, findings, latest_task=None):
+        llm = getattr(self, 'llm', None) or getattr(getattr(self, 'hand', None), 'llm', None)
+        if llm is None or not callable(getattr(llm, 'generate_content', None)):
+            return None
+        # No llamar al LLM si solo hay hallazgos de infraestructura puros ya resueltos o todo está ok
+        has_task_or_log_issue = bool(latest_task) or any(
+            f['code'] in {'task_failure', 'core_error_burst', 'syntax_or_code', 'missing_capability',
+                          'dependency_error', 'invalid_result'}
+            for f in findings
+        )
+        if not has_task_or_log_issue:
+            return None
+        skills_list = []
+        cat = getattr(getattr(self, 'hand', None), 'catalog', None)
+        if cat is not None and callable(getattr(cat, 'active', None)):
+            try:
+                active = cat.active()
+                if isinstance(active, list):
+                    skills_list = [r.get('skill_id') for r in active[:20] if isinstance(r, dict) and r.get('skill_id')]
+            except Exception:
+                skills_list = []
+        log_excerpt = ((evidence.get('core_logs') or {}).get('text') or '')[-2500:]
+        task_excerpt = {
+            'id': latest_task.get('id'),
+            'state': latest_task.get('state'),
+            'request': latest_task.get('request'),
+            'error': latest_task.get('error'),
+            'feedback': latest_task.get('feedback'),
+            'manifest': latest_task.get('manifest'),
+        } if isinstance(latest_task, dict) else None
+        template = {
+            "cause_code": "syntax_or_code",
+            "root_cause": "Explicación concisa de la causa raíz observada en logs y tarea",
+            "corrective_instruction": "Instrucción técnica exacta para que Hand resuelva o cree las habilidades necesarias",
+            "steps": [
+                {
+                    "id": "paso_1",
+                    "use_existing_skill": None,
+                    "new_skill": {
+                        "skill_id": "nombre-habilidad",
+                        "description": "Habilidad para resolver el problema",
+                        "capabilities": [],
+                        "inputs": {},
+                        "outputs": {"result": "string"}
+                    }
+                }
+            ]
+        }
+        prompt = (
+            "Eres Heart, el médico del sistema Khai. Analiza los logs y el estado del fallo para proponer una solución.\n"
+            f"Habilidades disponibles en Hand: {json.dumps(skills_list, ensure_ascii=False)}\n"
+            f"Tarea fallida más reciente: {json.dumps(task_excerpt, ensure_ascii=False)}\n"
+            f"Últimos logs de Core:\n{log_excerpt}\n\n"
+            "Si no requiere ninguna habilidad (0 pasos), usa \"steps\": []. "
+            "Si requiere crear o usar 1 o más habilidades en Hand para resolverlo, "
+            "ofrece tantas como sean necesarias siguiendo esta plantilla JSON:\n"
+            f"{json.dumps(template, ensure_ascii=False)}"
+        )
+        try:
+            raw = llm.generate_content(prompt, response_format={'type': 'json_object'})
+            if not isinstance(raw, str):
+                return None
+            cleaned = raw.strip()
+            if cleaned.startswith('```json'):
+                cleaned = cleaned[7:]
+            if cleaned.startswith('```'):
+                cleaned = cleaned[3:]
+            if cleaned.endswith('```'):
+                cleaned = cleaned[:-3]
+            parsed = json.loads(cleaned.strip())
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
 
+    def diagnose(self, evidence, failure_override=None):
+        findings = []
+        def add(code, severity, detail, remedy=None, corrective_instruction=None, steps=None):
+            item = {'code': code, 'severity': severity, 'detail': detail, 'remedy': remedy}
+            if corrective_instruction:
+                item['corrective_instruction'] = corrective_instruction
+            if steps:
+                item['steps'] = steps
+            findings.append(item)
+
+        latest_failed = None
         if failure_override:
             cause_code = failure_override.get('cause_code', 'syntax_or_code')
             detail = failure_override.get('detail', '')
@@ -302,11 +373,39 @@ class Recovery:
             failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED'}]
             if failed_tasks:
                 # Tomar la tarea fallida más reciente (A07: nunca tomar la más vieja)
-                latest = sorted(failed_tasks, key=lambda t: t.get('updated_at', 0), reverse=True)[0]
-                err = latest.get('error') or latest.get('feedback') or 'Fallo no especificado'
+                latest_failed = sorted(
+                    failed_tasks,
+                    key=lambda t: (t.get('updated_at') or t.get('created_at') or 0),
+                    reverse=True,
+                )[0]
+                err = latest_failed.get('error') or latest_failed.get('feedback') or 'Fallo no especificado'
                 add('task_failure', 'high',
-                    f"La tarea {latest['id']} ('{latest.get('request', '')[:80]}') terminó con estado {latest['state']}: {str(err)[:300]}.",
-                    remedy=f"retry_task:{latest['id']}")
+                    f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') terminó con estado {latest_failed['state']}: {str(err)[:300]}.",
+                    remedy=f"retry_task:{latest_failed['id']}")
+
+        llm_diag = self._llm_analyze_incident(evidence, findings, latest_task=latest_failed)
+        if isinstance(llm_diag, dict):
+            instr = str(llm_diag.get('corrective_instruction') or '').strip()
+            root_cause = str(llm_diag.get('root_cause') or '').strip()
+            steps = llm_diag.get('steps') if isinstance(llm_diag.get('steps'), list) else []
+            task_finding = next((f for f in findings if str(f.get('remedy') or '').startswith(('retry_task:', 'remediate_task:'))), None)
+            if task_finding:
+                if root_cause:
+                    task_finding['detail'] = f"{task_finding['detail']} Causa detectada: {root_cause[:300]}"
+                if instr:
+                    task_finding['corrective_instruction'] = instr[:1000]
+                if steps:
+                    task_finding['steps'] = steps[:8]
+            elif steps and (instr or root_cause):
+                new_tid = 'task_' + uuid.uuid4().hex
+                add(
+                    str(llm_diag.get('cause_code') or 'syntax_or_code'),
+                    'high',
+                    root_cause or instr,
+                    remedy=f'create_skill:{new_tid}',
+                    corrective_instruction=instr or root_cause,
+                    steps=steps[:8],
+                )
 
         status = 'critical' if any(f['severity'] == 'critical' for f in findings) else \
                  'degraded' if findings else 'ok'
@@ -322,17 +421,24 @@ class Recovery:
         if not remedies:
             return None
 
-        # Si el fallo corresponde a una tarea detenida/fallida, formular plan de reactivación y remediación
-        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:'))), None)
+        # Si el fallo corresponde a una tarea detenida/fallida o requiere crear skill reparadora
+        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:', 'create_skill:'))), None)
         if task_remedy:
             action, tid = task_remedy['remedy'].split(':', 1)
             steps = [{'action': action, 'target': 'task'}]
             plan = {'target': 'task', 'steps': steps, 'capabilities': ['TaskRemediate'], 'task_id': tid}
             validate_plan(plan)
+            summary = f'Corregir o ejecutar solución en Hand para {tid} ({task_remedy["code"]}).'
+            if task_remedy.get('corrective_instruction'):
+                summary += f" Acción: {task_remedy['corrective_instruction'][:240]}"
             plan.update(reason=task_remedy['code'],
-                        summary=f'Corregir o reintentar la tarea {tid} tras solventar el diagnóstico ({task_remedy["code"]}).',
-                        risk='low', impact=f'La tarea {tid} se reactivará y generará una corrección con feedback causal.',
+                        summary=summary,
+                        risk='low', impact=f'La tarea {tid} se ejecutará en Hand con las instrucciones de remediación de Heart.',
                         reversible=True, requires_approval=requires_approval(plan))
+            if task_remedy.get('corrective_instruction'):
+                plan['corrective_instruction'] = task_remedy['corrective_instruction']
+            if task_remedy.get('steps'):
+                plan['proposed_steps'] = task_remedy['steps']
             return plan
 
         chosen = next((f for f in remedies if f['remedy'] == 'restart:proxy'), remedies[0])
@@ -417,13 +523,21 @@ class Recovery:
                 tid = case['plan'].get('task_id')
                 if not tid and case.get('diagnosis'):
                     for f in case['diagnosis'].get('findings', []):
-                        if f.get('remedy', '').startswith(('retry_task:', 'remediate_task:')):
+                        if f.get('remedy', '').startswith(('retry_task:', 'remediate_task:', 'create_skill:')):
                             tid = f['remedy'].split(':', 1)[1]
                             break
                 coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
                 if tid and coord:
                     try:
-                        coord.retry_task(tid, authorization_id=case['authorization_id'])
+                        retry_kwargs = {'authorization_id': case['authorization_id']}
+                        if case['plan'].get('corrective_instruction'):
+                            retry_kwargs['corrective_instruction'] = case['plan']['corrective_instruction']
+                        if case['plan'].get('proposed_steps'):
+                            retry_kwargs['proposed_steps'] = case['plan']['proposed_steps']
+                        try:
+                            coord.retry_task(tid, **retry_kwargs)
+                        except TypeError:
+                            coord.retry_task(tid, authorization_id=case['authorization_id'])
                         execution = {'status': 'running', 'steps': [{'action': 'retry_task', 'target': 'task', 'status': 'running', 'task_id': tid}]}
                         return self._move(case_id, 'HAND_EXECUTING', expected={'AUTHORIZED'}, execution=execution)
                     except Exception as exc:

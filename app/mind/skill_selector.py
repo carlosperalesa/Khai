@@ -101,7 +101,7 @@ class SkillSelector:
                   'Si faltan parámetros obligatorios, elige la capacidad y omite esos parámetros '
                   'para que Khai los pregunte; nunca inventes valores. Si ninguna sirve, usa null. '
                   'No inventes permisos ni capacidades.\n'
-                  'Solicitud: ' + query[:2000] + '\nOpciones: ' + json.dumps(options, ensure_ascii=False))
+                  'Solicitud: ' + query + '\nOpciones: ' + json.dumps(options, ensure_ascii=False))
         try:
             proposal = json.loads(self.llm.generate_content(prompt, response_format={'type': 'json_object'}))
             match = next((record for record in records if record['skill_id'] == proposal.get('skill_id')), None)

@@ -65,6 +65,23 @@ por créditos y el saldo estimado en CLP. Cada cambio de modelo emite [Mode = x]
 | Heart | Médico del sistema: signos vitales basales y máquina de estados de recuperación. |
 | Senses | Observabilidad acotada de solo lectura (logs con epoch, estado de BD, contenedores). |
 
+### Simplificaciones y Modelo de Enrutamiento Unificado (28 de octubre de 2026)
+
+1. **Enrutamiento LLM Unificado y Cascada Completa:**
+   - En modo `/m low`: La inferencia se dirige al pool Cloud (Gemini / Azure / OpenAI) con reintento automático entre claves disponibles y respaldo final en Dolphin.
+   - En modo `/m mid` y `/m high`: La inferencia se envía prioritariamente al nodo privado Dolphin en puerto 11434; ante cualquier indisponibilidad de la VM Spot, conmuta fluidamente al pool Cloud.
+   - Todos los órganos (`Mind`, `Pixy`, `Hand`, `Heart`) utilizan esta cascada unificada sin bifurcaciones paralelas.
+2. **Modelo Binario de Planificación (`ActionPlanner`):**
+   - Una petición del usuario se clasifica de forma binaria: `0` habilidades requeridas (charla general o consulta directa de sistema) o `N >= 1` habilidades requeridas (1 o múltiples habilidades indistintamente).
+   - Se inyecta al LLM la lista de habilidades activas junto con una plantilla JSON estandarizada para proponer pasos o nuevas especificaciones `SkillSpec`.
+3. **Gobernanza Conversacional sin Copia de IDs:**
+   - Pixy gestiona reglas de aprendizaje y descriptores de servicio de manera conversacional (`/p`). El usuario no necesita copiar hashes SHA256 de 64 caracteres ni identificadores largos (`rule_...`, `auth_...`, `task_...`).
+   - Al responder `y` o `n` sin ID específico, el sistema resuelve la decisión sobre la solicitud pendiente más reciente.
+4. **Resiliencia en Recuperación (`Heart` y `Coordinator`):**
+   - Heart genera diagnósticos basados en el perfil completo basal de telemetría y propone planes declarativos de reintento (`retry_task`), remediación o creación de habilidades (`create_skill`).
+   - `Coordinator.retry_task` es consciente del estado previo de la tarea y reanuda en `ROUTING` cuando no existe manifiesto generado, evitando fallos de clave (`KeyError: 'manifest'`).
+   - Aislamiento estricto de memoria: los eventos de conversación a largo plazo se persisten únicamente tras una respuesta válida del LLM, y las llamadas fallidas marcan la tarea como `FAILED` para evitar envenenamiento del historial.
+
 ## Modos de ejecución
 
 | Modo | Uso | Autorización |
@@ -213,6 +230,12 @@ para el cierre; no se ha hecho commit, purga ni despliegue. No se instaló
 una dependencia adicional de cifrado ni se cambió la custodia de secretos.
 El `.venv` local fue recreado con Python 3.12 y se instalaron solo los
 requerimientos de desarrollo necesarios; no se instalaron herramientas extra.
+
+## Simplificaciones y saneamiento de interacción (Octubre 2026)
+
+1. **Saneamiento conversacional:** Eliminación de prefijos y variables internas en el canal de usuario (`task_...:`, `auth_...`, `case-...`, `run_...`), boilerplates obsoletos de comandos (`/verify ...`, `/cancel ...`) y notificaciones redundantes de progreso intermedio. Los cambios de modo muestran exclusivamente `[Mode = <modo>]`, reservando la telemetría detallada de costos, máquinas y túnel para `/mode ?`.
+2. **Normalización de servicios externos:** Sanitización de identificadores y dominios de servicio mediante la biblioteca estándar (`urllib.parse` y expresiones regulares) para evitar rechazos por caracteres inválidos como puntos o guiones en nombres de host (e.g. `openweathermap.org` -> `openweathermap_org`).
+3. **Propagación en remediación de Heart:** Cuando Heart autoriza la remediación o creación de una nueva habilidad/servicio, la tarea se re-enruta (`ROUTING`) con capacidades de red habilitadas y reseteo de manifiesto caduco, garantizando que el código generado cuente con los servicios aprobados.
 
 ## Documentación
 

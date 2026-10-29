@@ -10,6 +10,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
+import re
 import requests
 
 from app.pixy.budget import current_budget
@@ -110,12 +111,15 @@ class Coordinator:
         self.revision_planner = RevisionPlanner(getattr(manager, 'llm', None))
 
     def notify(self, text):
+        if not text or not str(text).strip():
+            return
+        cleaned = re.sub(r'^(task_[a-f0-9]{32}|run_[a-f0-9]{32}|auth_[a-f0-9]{32}|case-[a-f0-9]{16,32}):\s*', '', str(text).strip())
         mailbox = getattr(self.manager, 'voice_mailbox', None)
         if mailbox is not None:
-            mailbox.enqueue(str(text))
+            mailbox.enqueue(cleaned)
             self._schedule_mailbox()
             return
-        self._notifications.put(str(text))
+        self._notifications.put(cleaned)
         self._schedule_mailbox()
 
     def _deliver_notifications(self):
@@ -337,6 +341,14 @@ class Coordinator:
             completed = self.store.get(task['id'])
             self.notify(f"{task['id']}: " + present_recipe(completed))
 
+    @staticmethod
+    def latest_task(tasks):
+        """Elemento pendiente más reciente; el propietario no necesita copiar IDs."""
+        if not tasks:
+            return None
+        return max(enumerate(tasks), key=lambda pair: (
+            pair[1].get('updated_at') or pair[1].get('created_at') or 0, pair[0]))[1]
+
     def accept_scope_reply(self, source, text):
         """Bind an ordinary reply to exactly one pending objective and revision."""
         if text.startswith('/'):
@@ -348,10 +360,8 @@ class Coordinator:
         selected = next((task for task in pending if words[0] == task['id']), None) if words else None
         if selected:
             answer = words[1].strip() if len(words) == 2 else ''
-        elif len(pending) == 1:
-            selected, answer = pending[0], text.strip()
         else:
-            return 'Hay varias preguntas pendientes. Responde con ID y respuesta: ' + ', '.join(t['id'] for t in pending)
+            selected, answer = self.latest_task(pending), text.strip()
         if not answer:
             return 'Falta la respuesta para ' + selected['id']
         cancelled = answer.casefold().strip(' .!') in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}
@@ -366,8 +376,7 @@ class Coordinator:
                 'source': source, 'revision': task['revision']})
             task['state'] = 'RESOLVING_SCOPE'
         self.store.command(source, selected['id'], apply)
-        return (selected['id'] + ': objetivo cancelado.' if cancelled else
-                selected['id'] + ': respuesta incorporada; revisaré el alcance antes de crear la herramienta.')
+        return ('Objetivo cancelado.' if cancelled else None)
 
     @staticmethod
     def _input_values(task):
@@ -392,10 +401,8 @@ class Coordinator:
         selected = next((task for task in pending if words[0] == task['id']), None) if words else None
         if selected:
             answer = words[1].strip() if len(words) == 2 else ''
-        elif len(pending) == 1:
-            selected, answer = pending[0], text.strip()
         else:
-            return 'Hay varias confirmaciones pendientes. Incluye el ID del objetivo: ' + ', '.join(t['id'] for t in pending)
+            selected, answer = self.latest_task(pending), text.strip()
         normalized = answer.casefold().strip(' .!')
         cancelled = normalized in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}
         accepted = normalized in {'y', 'yes', 'sí', 'si', 'confirmo', 'confirmar'}
@@ -422,12 +429,12 @@ class Coordinator:
                 task['state'] = 'RESOLVING_SCOPE'
         self.store.command(source, selected['id'], apply)
         if cancelled:
-            return selected['id'] + ': objetivo cancelado.'
+            return 'Objetivo cancelado.'
         if accepted:
-            return selected['id'] + ': datos confirmados; continuaré con la tarea.'
+            return None
         if needs_change:
-            return selected['id'] + ': ¿Qué dato quieres cambiar y cuál es el nuevo valor?'
-        return selected['id'] + ': incorporaré el cambio antes de ejecutar.'
+            return '¿Qué dato quieres cambiar y cuál es el nuevo valor?'
+        return None
 
     def accept_effect_decision(self, source, text):
         """A new external effect requires an explicit decision tied to this objective."""
@@ -437,10 +444,8 @@ class Coordinator:
             return None
         words = text.strip().split()
         selected = next((task for task in pending if task['id'] in words), None)
-        if not selected and len(pending) == 1:
-            selected = pending[0]
         if not selected:
-            return 'Hay varias decisiones pendientes. Incluye el ID del objetivo.'
+            selected = self.latest_task(pending)
         choice = next((word for word in words if word != selected['id']), '')
         options = selected.get('effect_options') or {}
         if choice not in options:
@@ -498,10 +503,8 @@ class Coordinator:
             return None
         words = text.strip().split()
         selected = next((task for task in pending if task['id'] in words), None)
-        if not selected and len(pending) == 1:
-            selected = pending[0]
         if not selected:
-            return 'Hay varias aclaraciones pendientes. Incluye el ID del objetivo.'
+            selected = self.latest_task(pending)
         answer = text.replace(selected['id'], '', 1).strip()
         if answer.casefold().strip(' .!') in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}:
             self.store.command(source, selected['id'], lambda task: task.update(state='CANCELLED'))
@@ -632,13 +635,8 @@ class Coordinator:
             selected = selected_by_suffix
         answer = (words[1].strip() if selected and words[0] == selected['id'] and len(words) == 2
                   else words[0] if selected_by_suffix else text.strip())
-        if not selected and len(pending) == 1:
-            selected = pending[0]
         if not selected:
-            if words and words[0].casefold() in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
-                return ('Hay varios resultados pendientes. Incluye el ID: ' +
-                        ', '.join(task['id'] for task in pending))
-            return None
+            selected = self.latest_task(pending)
         if selected['state'] == 'WAITING_FEEDBACK':
             if answer.casefold().strip(' .!') in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}:
                 self.store.command(source, selected['id'], lambda task: task.update(state='CANCELLED'))
@@ -655,16 +653,16 @@ class Coordinator:
         rejected = normalized.startswith('no,') or normalized.startswith('no ') or normalized.startswith('no:')
         if accepted:
             if selected.get('batch_incomplete'):
-                return selected['id'] + ': hay efectos externos sin confirmar; explica qué ocurrió o cancela.'
+                return 'hay efectos externos sin confirmar; explica qué ocurrió o cancela.'
             self.verify(selected['id'], selected['execution_id'], True, source)
-            return selected['id'] + ': resultado aceptado y ligado a la ejecución.'
+            return 'resultado aceptado.'
         if ask_feedback:
             def wait_for_detail(task):
                 if task['state'] != 'UNVERIFIED':
                     raise ValueError('Resultado obsoleto')
                 task['state'] = 'WAITING_FEEDBACK'
             self.store.command(source, selected['id'], wait_for_detail)
-            return selected['id'] + ': ¿Qué falta o qué debería cambiar en la respuesta?'
+            return '¿Qué falta o qué debería cambiar en la respuesta?'
         feedback = (answer[3:].strip(' :,.') if normalized.startswith('no,') else
                     answer[2:].strip(' :,.') if rejected else answer.strip())
         if not feedback:
@@ -960,14 +958,34 @@ class Coordinator:
                 pass  # Durable cancellation is retried by tick.
         return task
 
-    def retry_task(self, task_id, authorization_id=None):
+    def retry_task(self, task_id, authorization_id=None, corrective_instruction=None, proposed_steps=None):
+        if not authorization_id:
+            raise PermissionError('El reintento requiere la autorización concreta de Pixy')
+        existing = self.store.get(task_id)
+        if existing is None:
+            goal = corrective_instruction or 'Remediación autorizada por Heart'
+            created = self.store.create(
+                'heart:' + str(authorization_id),
+                goal,
+                id=task_id,
+                state='ROUTING',
+                feedback=corrective_instruction,
+                creation_consent={
+                    'source': 'heart:' + str(authorization_id),
+                    'task_revision': 0,
+                    'allowed_services': [],
+                    'allowed_capabilities': ['Network', 'FileSystem', 'Database'],
+                    'allowed_skill_ids': [],
+                },
+            )
+            self.notify(f"Tarea de remediación {task_id} creada en Hand por orden autorizada de Heart.")
+            return created
+
         def apply(task):
             if task['state'] in {'UNKNOWN', 'CANCELLED', 'COMPLETED', 'UNVERIFIED'}:
                 raise ValueError('La tarea no puede reintentarse sin reconciliar su estado')
             if task['state'] not in {'FAILED', 'EXHAUSTED', 'DIAGNOSING'}:
                 raise ValueError('La tarea no está en un estado remediable')
-            if not authorization_id:
-                raise PermissionError('El reintento requiere la autorización concreta de Pixy')
             extension = {
                 'authorization_id': authorization_id,
                 'created_at': time.time(),
@@ -980,10 +998,33 @@ class Coordinator:
             task['max_executions'] += extension['executions']
             task['max_llm_calls'] += extension['llm_calls']
             task['attempt_number'] = task.get('attempt_number', 1) + 1
-            task['state'] = 'GENERATING'
+            if corrective_instruction:
+                prev_fb = str(task.get('feedback') or '').strip()
+                task['feedback'] = (f"{prev_fb}\n[Heart]: {corrective_instruction}".strip()
+                                    if prev_fb else f"[Heart]: {corrective_instruction}")
+            needs_reroute = (
+                not task.get('manifest')
+                or bool(proposed_steps)
+                or (bool(corrective_instruction) and any(
+                    k in str(corrective_instruction).lower()
+                    for k in ('habilidad', 'skill', 'servicio', 'service', 'crear', 'receta', 'paso', 'plantilla')
+                ))
+            )
+            if needs_reroute:
+                task['state'] = 'ROUTING'
+                task['manifest'] = None
+                task['recipe'] = None
+                task['execution_id'] = None
+                consent = task.get('creation_consent') or {}
+                consent['allowed_capabilities'] = ['Network', 'FileSystem', 'Database']
+                task['creation_consent'] = consent
+            elif task.get('recipe') and task.get('execution_id') is None:
+                task['state'] = 'RECIPE_STEP'
+            else:
+                task['state'] = 'GENERATING'
             task['deadline'] = time.time() + 1800
         retried = self.store.mutate(task_id, apply)
-        self.notify(f"Tarea {task_id} reanudada por orden autorizada de Heart; el consumo histórico se conserva. Iniciando generación...")
+        self.notify("Tarea reanudada por orden autorizada de Heart; generando solución...")
         return retried
 
     def approval(self, task_id, token, approve, source):
@@ -1023,7 +1064,7 @@ class Coordinator:
             if task['state'] != 'UNVERIFIED' or task.get('execution_id') != execution_id:
                 raise ValueError('La verificaciÃ³n no corresponde al resultado pendiente')
             if success and task.get('batch_incomplete'):
-                raise PermissionError('Hay efectos externos sin confirmar')
+                raise PermissionError('hay efectos externos sin confirmar')
             task['verification'] = {'success': success, 'evidence': {'owner': source, 'execution_id': execution_id}}
             task['state'] = 'VERIFYING'
         return self.store.command(source, task_id, apply)
@@ -1136,17 +1177,39 @@ class Coordinator:
 
     @staticmethod
     def _setup_message(task, proposals):
-        capabilities = ', '.join(
-            f"{item['name']} mediante {item['host']}"
-            for item in proposals)
         requested = (task.get('original_request') or task['request'])[:500]
-        if capabilities:
-            return (f"Para '{requested}' necesito preparar una capacidad nueva y usar "
-                    f"{capabilities}. ¿Autorizas esta configuración para este objetivo y "
-                    "futuros usos de la misma capacidad y alcance una vez verificada? Responde y/n.")
-        return (f"Para '{requested}' necesito preparar una capacidad nueva. "
-                "¿Autorizas esta configuración para este objetivo y futuros usos "
-                "de la misma capacidad y alcance una vez verificada? Responde y/n.")
+        missing = task.get('recipe_missing_specs') or {}
+
+        descriptions = [action['description'] for action in missing.values() if action.get('description')]
+        skill_desc = '; '.join(descriptions) if descriptions else (
+            task.get('planned_skill_spec', {}).get('description')
+            or (task.get('manifest') or {}).get('purpose')
+            or ''
+        )
+        clean_desc = skill_desc.strip()
+        if clean_desc.lower() == requested.lower() or clean_desc.startswith("Capacidad reutilizable para"):
+            clean_desc = ""
+
+        caps = list((task.get('manifest') or {}).get('capabilities') or [])
+        for action in missing.values():
+            for c in action.get('capabilities', []):
+                if c not in caps:
+                    caps.append(c)
+
+        network_items = [f"{item['name']} mediante {item['host']}" for item in (proposals or [])]
+        access_parts = []
+        if network_items:
+            access_parts.append(', '.join(network_items))
+        for c in caps:
+            if c != 'Network' and c not in access_parts:
+                access_parts.append(c)
+
+        access_text = f" con acceso a {', '.join(access_parts)}" if access_parts else ""
+        action_text = f" que {clean_desc}" if clean_desc else ""
+
+        return (f"Para '{requested}' necesito preparar una capacidad nueva{access_text}{action_text}. "
+                "¿Autorizas esta configuración para este objetivo y futuros usos de la misma capacidad "
+                "y alcance una vez verificada? Responde y/n.")
 
     def _with_defaults(self, schema, supplied):
         """Use only explicit saved defaults that satisfy the declared input type."""
@@ -1228,7 +1291,7 @@ class Coordinator:
                                   scope_revisions=revisions, goal_revision=len(revisions),
                                    scope_questions=[], missing_input_schema=None,
                                    effect_constraints=constraints)
-                self.notify(f"{tid}: alcance incorporado; revisaré nuevamente las acciones necesarias.")
+                # intermediate progress suppressed
                 return
             if task.get('missing_input_schema'):
                 values = task.get('recipe_input') if task.get('recipe') else task.get('params')
@@ -1261,7 +1324,7 @@ class Coordinator:
                                       recipe_outputs={'input': resolved['params']},
                                       scope_revisions=revisions, goal_revision=len(revisions),
                                       scope_questions=[])
-                    self.notify(f"{tid}: alcance recibido. Iniciaré las acciones de la receta.")
+                    # intermediate progress suppressed
                 else:
                     next_state = 'ROUTING' if constraints else 'GENERATING'
                     self.store.update(tid, expected={'RESOLVING_SCOPE'}, state=next_state,
@@ -1269,7 +1332,7 @@ class Coordinator:
                                       params=resolved['params'], scope_revisions=revisions,
                                        goal_revision=len(revisions), scope_questions=[],
                                        effect_constraints=constraints)
-                    self.notify(f"{tid}: alcance recibido. Revisaré las acciones necesarias para: " + resolved['purpose'])
+                    # intermediate progress suppressed
         elif state == 'ROUTING':
             request = task['request']
             direct = request.startswith(('/make ', '/do '))
@@ -1280,10 +1343,16 @@ class Coordinator:
             if intent.get('action') == 'ACTION_REQUIRED' and not direct:
                 planner = getattr(self.manager, 'action_planner', None)
                 if planner is not None:
-                    proposal = planner.propose(request, lambda spec:
-                        spec['runtime'] != 'AGENT' and not spec['dependencies']
-                        and self._services_available(spec['services']),
-                        correction_context=task.get('effect_constraints'))
+                    try:
+                        proposal = planner.propose(request, lambda spec:
+                            spec['runtime'] != 'AGENT' and not spec['dependencies']
+                            and self._services_available(spec['services']),
+                            correction_context=task.get('effect_constraints'))
+                    except (ValueError, TypeError, KeyError) as exc:
+                        if task.get('effect_constraints'):
+                            raise
+                        logger.warning('ActionPlanner descartó composición multi-paso (%s); continuando con skill individual', exc)
+                        proposal = None
                     if proposal:
                         recipe = proposal['recipe']
                         missing = proposal['missing_specs']
@@ -1327,7 +1396,7 @@ class Coordinator:
                             missing_input_schema=recipe['input_schema'] if missing_values else None,
                             manifest={'purpose': request, 'capabilities': []})
                         if consent_needed:
-                            self.notify(f"{tid}: " + self._setup_message(task, setup))
+                            self.notify(self._setup_message(task, setup))
                         return
                 if task.get('effect_constraints'):
                     options = self._effect_decision_options(task)
@@ -1396,7 +1465,7 @@ class Coordinator:
                                       manifest=manifest, context=context,
                                       hypothesis_id=hypotheses[0]['id'] if hypotheses else None,
                                       alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
-                    self.notify(f"{tid}: " + self._setup_message(task, setup))
+                    self.notify(self._setup_message(task, setup))
                     return
 
                 self.store.update(tid, expected={'ROUTING'}, state='SCOPE_PLANNING', request=goal,
@@ -1404,7 +1473,7 @@ class Coordinator:
                                   manifest=manifest, context=context,
                                   hypothesis_id=hypotheses[0]['id'] if hypotheses else None,
                                   alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
-                self.notify(f"Objetivo registrado: {tid}. Preparando candidata de Hand...")
+                # intermediate progress suppressed
             elif action == 'INVESTIGATE':
                 output = self.manager.senses.observe(intent.get('investigate_target', 'core_logs'), intent.get('investigate_reason', 'Consulta'))
                 self.store.event(tid, 'observation', {'output': output})
@@ -1418,6 +1487,9 @@ class Coordinator:
             elif action in {'HEALTH_CHECK', 'FASTBEAT', 'SLOWBEAT', 'CLEANUP'}:
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
                 self.notify(json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False))
+            elif intent.get('error'):
+                self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']))
+                self.notify(intent.get('reply') or f"Error de IA: {intent['error']}")
             else:
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
                 self.notify(intent.get('reply') or 'No se ejecutó ninguna acción.')
@@ -1445,7 +1517,7 @@ class Coordinator:
                     return
 
             if not selected_version_id:
-                self.notify(f"{tid}: estoy preparando la capacidad necesaria para esta tarea.")
+                # intermediate progress suppressed
                 self.store.consume(tid, 'generations')
             tags = [task.get('context', 'general')] + task['manifest'].get('capabilities', [])
             if hasattr(self.manager, 'rules'):
@@ -1576,7 +1648,7 @@ class Coordinator:
             elif task['mode'] != 'SAFE' or task.get('dependencies') or 'Network' in task['manifest'].get('capabilities', []) or review['requires_approval']:
                 self._wait_approval(task, review.get('reason', '') + '\nModo: ' + task['mode'] + '; capacidades: ' + ','.join(task['manifest'].get('capabilities', [])) + '; dependencias: ' + ','.join(task.get('dependencies', [])))
             else:
-                self.notify(f"Auditoría de Pixy aprobada. Preparando ejecución en entorno controlado...")
+                # intermediate progress suppressed
                 self.store.update(tid, expected={'REVIEWING'}, state='READY', authorized_hash=task['artifact_hash'])
         elif state == 'READY':
             if task.get('authorized_hash') != task['artifact_hash'] or digest(Path(task['artifact']).read_bytes()) != task['artifact_hash']:
@@ -1600,7 +1672,7 @@ class Coordinator:
                 self.store.update(tid, expected={'READY'}, state='WAITING_INPUT_CONFIRMATION',
                                   input_confirmation_signature=signature)
                 details = '; '.join(presented) or f"objetivo: {(task.get('original_request') or task['request'])[:300]}"
-                self.notify(f"{tid}: usaré estos datos: {details}. "
+                self.notify(f"Usaré estos datos: {details}. "
                             "¿Confirmas o quieres cambiar alguno? Responde sí o indica el cambio.")
                 return
             active_services = (self.manager.voice_services.active_services()
@@ -1639,8 +1711,6 @@ class Coordinator:
                            grants=task.get('grants', []), deadline=task['deadline'])
             if hasattr(self.manager, 'hand') and task.get('version_id'):
                 payload['skill_artifact_hash'] = self.manager.hand.version(task['version_id'])['artifact_hash']
-            if not task.get('recipe'):
-                self.notify(f"{tid}: estoy realizando la tarea.")
             self.store.update(tid, expected={'READY'}, state='SUBMITTED', execution_id=execution_id, payload=payload)
         elif state == 'SUBMITTED':
             result = self.proxy.submit(task['payload'])
@@ -1697,10 +1767,12 @@ class Coordinator:
                 if success is None or success is True:
                     self.store.update(tid, expected={'RUNNING'}, state='UNVERIFIED', result=result,
                                       machine_verification={'success': success, 'evidence': evidence})
-                    self.notify(f"{tid}: {'servicio iniciado' if status == 'started' else 'proceso terminado'}, pendiente de tu evaluación.\n"
-                                f"{str(result.get('stdout', ''))[:1800]}\n"
-                                f"¿Esta es la respuesta esperada? Responde y/n (añade {tid} si hay varias tareas pendientes).\n"
-                                f"/verify {tid} {task['execution_id']} success|failure\n/cancel {tid}")
+                    stdout_text = str(result.get('stdout', '')).strip()
+                    if stdout_text:
+                        msg = f"{stdout_text}\n\n¿Es este el resultado esperado? (y/n)"
+                    else:
+                        msg = "¿Es este el resultado esperado? (y/n)"
+                    self.notify(msg)
                 else:
                     self.store.update(tid, expected={'RUNNING'}, state='VERIFYING', result=result,
                                       verification={'success': success, 'evidence': evidence})
@@ -1749,7 +1821,7 @@ class Coordinator:
             if v['success']:
                 stdout = (task.get('result') or {}).get('stdout', '')
                 out_msg = f"\nResultado:\n{stdout.strip()[:2000]}" if stdout and stdout.strip() else ""
-                self.notify(f"{tid}: Ejecución completada con éxito. Evidencia verificada para {task['execution_id']}.{out_msg}")
+                self.notify(f"Ejecución completada con éxito.{out_msg}")
         elif state == 'DIAGNOSING':
             # Heart es la única autoridad médica del sistema
             case = None
