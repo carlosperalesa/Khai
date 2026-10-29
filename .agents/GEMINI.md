@@ -8,11 +8,16 @@ de F5 está aquí y en `README.md`. Si otra documentación
 contradice estas reglas o el estado de este archivo, no asumir: detenerse,
 señalar la contradicción y conservar el servicio remoto sin cambios.
 
-**Estado operativo Beta V4 (28 de octubre de 2026):** Piloto Dolphin implementado
+**Estado operativo Beta V4 (29 de octubre de 2026):** Piloto Dolphin implementado
 y desplegado bajo arquitectura híbrida (Khai + web en `vm-carlosperales` en Azure
 for Students; nodo efímero Dolphin en Google Cloud `gen-lang-client-0149640270`,
 zona `us-west1-a`, disco único `dolphin-boot-disk` `pd-standard` de 32 GB con
 `auto-delete=no`, enlazado por túnel privado WireGuard `10.200.0.1 <-> 10.200.0.2`).
+Bases de datos SQLite purgadas tras migración v2 de esquema (soporte nativo de
+múltiples conversaciones, foros/temas de supergrupo, botones inline interactivos
+`/c`, `/chats`, `/new`, `/clear`, `/archive`). Correcciones de incidentes
+desplegadas en VM (`PixyPort.get()`, alias `/m h`, `/m m`, `/m l`, encolamiento
+secuencial FIFO de turnos y captura segura de excepciones en comandos).
 Desde Telegram, `/mode` (o `/m`) selecciona el motor conversacional: `/m low`
 usa Gemini y elimina la instancia Spot conservando el disco, `/m mid` levanta una
 VM Spot `e2-standard-8` (Dolphin low / CPU), `/m high` levanta una VM Spot
@@ -21,7 +26,7 @@ estado actual. El timer interno apaga la VM tras 5 minutos sin uso y cada cambio
 de modelo emite la notificación `[Mode = x]`. Se configuraron dos presupuestos con alarmas cada
 `1.000 CLP` (`~1 USD`) en `01074F-B289A3-A589D8` (consumo bruto de créditos vs.
 cobro real neto). Documentación y scripts diferenciados en `Dolphin/gcloud/` y
-`Dolphin/azure/`. Mantener la web operativa en `vm-carlosperales`.
+`Dolphin/azure/`. Nginx y web operativos en `vm-carlosperales`.
 
 ---
 
