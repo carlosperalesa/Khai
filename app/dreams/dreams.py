@@ -36,13 +36,22 @@ class Dreams:
 
         with connection(self.path) as conn:
             conn.execute('BEGIN IMMEDIATE')
-            # 1. Registro durable en task_observations
-            inserted = conn.execute(
-                'INSERT OR IGNORE INTO task_observations VALUES (?,?,?,?,?)',
+            # 1. Deduplicar por ejecución y rechazar atribuciones contradictorias
+            existing = conn.execute(
+                'SELECT outcome FROM task_observations WHERE execution_id=?',
+                (run,)
+            ).fetchone()
+            if existing:
+                if existing[0] != int(success):
+                    raise ValueError(f'Observación contradictoria para la misma ejecución: existente={existing[0]} nuevo={int(success)}')
+                return False
+
+            conn.execute(
+                'INSERT INTO task_observations VALUES (?,?,?,?,?)',
                 (run, tid or 'unknown', int(success),
                  json.dumps(evidence, ensure_ascii=False) if isinstance(evidence, (dict, list)) else str(evidence),
                  time.time())
-            ).rowcount
+            )
             try:
                 conn.execute(
                     'INSERT OR IGNORE INTO control_feedback VALUES (?,?,?,?,?)',
@@ -52,9 +61,6 @@ class Dreams:
                 )
             except Exception:
                 pass
-
-            if not inserted:
-                return False
 
             # 2. Tracking de hipótesis en SQLite
             if hypothesis:
@@ -147,7 +153,18 @@ class Dreams:
                         (skill_name, version_id)
                     ).fetchone()
                     if not already_prop:
-                        skill_proposal_needed = True
+                        guidance = (
+                            'For the verified objective ' + task.get('context', 'recorded in the evidence') +
+                            ', consider reusing skill ' + skill_name + ' version ' + version_id +
+                            '. Recheck applicability and permissions before executing.'
+                        )
+                        rid = None
+                        if self.rules and hasattr(self.rules, 'propose'):
+                            try:
+                                rid = self.rules.propose(guidance, 'dreams:' + skill_name + ':' + version_id, conn=conn)
+                            except Exception:
+                                rid = None
+                        conn.execute('INSERT INTO proposals VALUES (?,?,?)', (skill_name, version_id, rid or 'rule_prop'))
 
         # --- Fin de la transacción principal: ejecutar side-effects externos sin locks ---
 
@@ -156,6 +173,11 @@ class Dreams:
             if self.rules and hasattr(self.rules, 'deprecate'):
                 try:
                     self.rules.deprecate(str_rid, reason=f'Degraded success rate {s_rate:.2f} after {s_uses} uses')
+                except Exception:
+                    pass
+            if self.memory and hasattr(self.memory, 'deprecate_guideline'):
+                try:
+                    self.memory.deprecate_guideline(int(str_rid) if str_rid.isdigit() else str_rid)
                 except Exception:
                     pass
             if self.events and hasattr(self.events, 'emit'):
@@ -168,11 +190,7 @@ class Dreams:
                 self.events.emit('dreams', 'verified_result', correlation_id=tid, task_id=tid,
                     execution_id=run, skill_name=skill_name, version_id=version_id,
                     metadata={'success': success, 'artifact_hash': artifact_hash})
-            if skill_proposal_needed:
-                self.consolidate(skill_name, version_id,
-                    'For the verified objective ' + task.get('context', 'recorded in the evidence') +
-                    ', consider reusing skill ' + skill_name + ' version ' + version_id +
-                    '. Recheck applicability and permissions before executing.')
+            pass
 
         return True
 

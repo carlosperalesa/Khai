@@ -205,7 +205,7 @@ class Recovery:
         except Exception as exc:
             return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__)
 
-        diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail, 'task_id': task_id})
+        diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail, 'task_id': task_id, 'task': task if isinstance(task, dict) else None})
         case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, evidence=evidence, diagnosis=diagnosis)
         plan = self.design(case_id, diagnosis)
         if not plan:
@@ -227,6 +227,16 @@ class Recovery:
             evidence = self.senses.evidence('Heart ' + case_id + ': ' + str(question)[:200], 'before', resources=needed)
         except Exception as exc:
             return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__)
+        tasks = (evidence.get('pixy') or {}).get('recent_tasks') or evidence.get('tasks') or []
+        requested_ids = re.findall(r'\btask_[a-f0-9]{32}\b', str(question))
+        if requested_ids:
+            candidates = [task for task in tasks if task.get('id') in requested_ids]
+        elif re.search(r'(?:[úu]ltim[oa].*(?:error|fallo|fallid)|(?:error|fallo|fallid).*[úu]ltim[oa])',
+                       question, flags=re.IGNORECASE):
+            candidates = [task for task in tasks if task.get('state') in {'FAILED', 'EXHAUSTED'}]
+        else:
+            candidates = tasks
+        evidence['focus_task'] = max(candidates, key=lambda task: task.get('created_at') or 0) if candidates else None
         diagnosis = self.diagnose(evidence)
         case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, evidence=evidence, diagnosis=diagnosis)
         plan = self.design(case_id, diagnosis)
@@ -312,22 +322,28 @@ class Recovery:
 
     def diagnose(self, evidence, failure_override=None):
         findings = []
-        def add(code, severity, detail, remedy=None, corrective_instruction=None, steps=None):
+        from app.heart.catalog import task_binding
+        def add(code, severity, detail, remedy=None, corrective_instruction=None, steps=None, task_binding_info=None):
             item = {'code': code, 'severity': severity, 'detail': detail, 'remedy': remedy}
             if corrective_instruction:
                 item['corrective_instruction'] = corrective_instruction
             if steps:
                 item['steps'] = steps
+            if task_binding_info:
+                item['task_binding'] = task_binding_info
             findings.append(item)
 
         latest_failed = None
+        focus_task = evidence.get('focus_task')
         if failure_override:
             cause_code = failure_override.get('cause_code', 'syntax_or_code')
             detail = failure_override.get('detail', '')
             tid = failure_override.get('task_id')
             action = 'retry_task' if cause_code == 'budget_exhausted' else 'remediate_task'
             remedy = f"{action}:{tid}" if tid else None
-            add(cause_code, 'high', detail, remedy=remedy)
+            override_task = failure_override.get('task') or (focus_task if focus_task and focus_task.get('id') == tid else None)
+            binding = task_binding(override_task if isinstance(override_task, dict) else None)
+            add(cause_code, 'high', detail, remedy=remedy, task_binding_info=binding)
 
         storage = evidence.get('storage') or {}
         vitals, integrity = storage.get('vitals'), storage.get('integrity')
@@ -355,6 +371,9 @@ class Recovery:
         if core.get('oom_killed'):
             add('core_oom_history', 'warning', 'El último cierre del Core fue por falta de memoria (OOMKilled).')
         text = (evidence.get('core_logs') or {}).get('text', '')
+        if focus_task is not None:
+            trace_id = focus_task.get('trace_id')
+            text = '\n'.join(line for line in text.splitlines() if trace_id and trace_id in line)
         boot_epoch = evidence.get('boot_time') if 'boot_time' in evidence else BOOT_TIME
         parsed = parse_log_errors(text, boot_time=boot_epoch)
         active_errors = [e for e in parsed if e['is_active']]
@@ -369,7 +388,9 @@ class Recovery:
         # Observar fallos en tareas recientes (ControlStore vía Pixy) si no hay override
         if not failure_override:
             pixy_data = evidence.get('pixy') or {}
-            tasks = pixy_data.get('recent_tasks') or evidence.get('tasks') or []
+            tasks = ([focus_task] if 'focus_task' in evidence else
+                     pixy_data.get('recent_tasks') or evidence.get('tasks') or [])
+            tasks = [task for task in tasks if task is not None]
             failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED'}]
             if failed_tasks:
                 # Tomar la tarea fallida más reciente (A07: nunca tomar la más vieja)
@@ -381,9 +402,11 @@ class Recovery:
                 err = latest_failed.get('error') or latest_failed.get('feedback') or 'Fallo no especificado'
                 add('task_failure', 'high',
                     f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') terminó con estado {latest_failed['state']}: {str(err)[:300]}.",
-                    remedy=f"retry_task:{latest_failed['id']}")
+                    remedy=f"retry_task:{latest_failed['id']}",
+                    task_binding_info=task_binding(latest_failed))
 
-        llm_diag = self._llm_analyze_incident(evidence, findings, latest_task=latest_failed)
+        scoped_evidence = {**evidence, 'core_logs': {**(evidence.get('core_logs') or {}), 'text': text}}
+        llm_diag = self._llm_analyze_incident(scoped_evidence, findings, latest_task=latest_failed)
         if isinstance(llm_diag, dict):
             instr = str(llm_diag.get('corrective_instruction') or '').strip()
             root_cause = str(llm_diag.get('root_cause') or '').strip()
@@ -405,11 +428,28 @@ class Recovery:
                     remedy=f'create_skill:{new_tid}',
                     corrective_instruction=instr or root_cause,
                     steps=steps[:8],
+                    task_binding_info={'exists': False},
                 )
 
         status = 'critical' if any(f['severity'] == 'critical' for f in findings) else \
                  'degraded' if findings else 'ok'
-        return {'status': status, 'findings': findings}
+        diagnosis = {'status': status, 'findings': findings}
+        if focus_task is not None:
+            diagnosis['task'] = {key: focus_task.get(key) for key in (
+                'id', 'request', 'state', 'routing_action', 'executions', 'execution_id')}
+            diagnosis['observed_task'] = focus_task
+            diagnosis['task_binding'] = task_binding(focus_task)
+            diagnosis['task']['note'] = (
+                'No hay ejecución de una skill registrada para esta tarea.'
+                if not focus_task.get('executions') and not focus_task.get('execution_id') else
+                'El estado de la tarea no acredita por sí solo que el objetivo esté verificado.')
+        elif latest_failed is not None:
+            diagnosis['observed_task'] = latest_failed
+            diagnosis['task_binding'] = task_binding(latest_failed)
+        elif failure_override and isinstance(failure_override.get('task'), dict):
+            diagnosis['observed_task'] = failure_override['task']
+            diagnosis['task_binding'] = task_binding(failure_override['task'])
+        return diagnosis
 
     @staticmethod
     def design(case_id, diagnosis):
@@ -426,19 +466,35 @@ class Recovery:
         if task_remedy:
             action, tid = task_remedy['remedy'].split(':', 1)
             steps = [{'action': action, 'target': 'task'}]
-            plan = {'target': 'task', 'steps': steps, 'capabilities': ['TaskRemediate'], 'task_id': tid}
+            from app.heart.catalog import task_binding
+            binding = task_remedy.get('task_binding') or diagnosis.get('task_binding')
+            if not binding:
+                observed = diagnosis.get('observed_task') or diagnosis.get('task')
+                if isinstance(observed, dict) and observed.get('id') == tid:
+                    binding = task_binding(observed)
+                elif action == 'create_skill':
+                    binding = {'exists': False}
+                else:
+                    binding = {'exists': True, 'goal_revision': 0, 'execution_id': None, 'artifact_hash': None, 'attempt_number': 1}
+            instruction = task_remedy.get('corrective_instruction') or ''
+            proposed = task_remedy.get('steps') or task_remedy.get('proposed_steps') or []
+            plan = {
+                'target': 'task',
+                'steps': steps,
+                'capabilities': ['TaskRemediate'],
+                'task_id': tid,
+                'task_binding': binding,
+                'corrective_instruction': instruction,
+                'proposed_steps': proposed,
+            }
             validate_plan(plan)
             summary = f'Corregir o ejecutar solución en Hand para {tid} ({task_remedy["code"]}).'
-            if task_remedy.get('corrective_instruction'):
-                summary += f" Acción: {task_remedy['corrective_instruction'][:240]}"
+            if instruction:
+                summary += f" Acción: {instruction[:240]}"
             plan.update(reason=task_remedy['code'],
                         summary=summary,
                         risk='low', impact=f'La tarea {tid} se ejecutará en Hand con las instrucciones de remediación de Heart.',
                         reversible=True, requires_approval=requires_approval(plan))
-            if task_remedy.get('corrective_instruction'):
-                plan['corrective_instruction'] = task_remedy['corrective_instruction']
-            if task_remedy.get('steps'):
-                plan['proposed_steps'] = task_remedy['steps']
             return plan
 
         chosen = next((f for f in remedies if f['remedy'] == 'restart:proxy'), remedies[0])
@@ -498,11 +554,18 @@ class Recovery:
 
     # ------------------------------------------------------------- hand-off
     def _order(self, case):
-        plan_keys = ('target', 'steps', 'capabilities', 'task_id') if case['plan']['target'] == 'task' else ('target', 'steps', 'capabilities')
-        return {'header': {'case_id': case['case_id'], 'issued_by': 'heart', 'authorization_id': case['authorization_id'],
-                           'order_id': case.get('execution_order_id'),
-                           'nonce': case['authorization_nonce'], 'plan_hash': case['plan_hash']},
-                'plan': {k: case['plan'][k] for k in plan_keys}}
+        core = validate_plan(case['plan'])
+        return {
+            'header': {
+                'case_id': case['case_id'],
+                'issued_by': 'heart',
+                'authorization_id': case['authorization_id'],
+                'order_id': case.get('execution_order_id'),
+                'nonce': case['authorization_nonce'],
+                'plan_hash': case['plan_hash'],
+            },
+            'plan': core,
+        }
 
     def advance(self, case_id):
         case = self.get(case_id)
@@ -529,16 +592,25 @@ class Recovery:
                 coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
                 if tid and coord:
                     try:
-                        retry_kwargs = {'authorization_id': case['authorization_id']}
-                        if case['plan'].get('corrective_instruction'):
-                            retry_kwargs['corrective_instruction'] = case['plan']['corrective_instruction']
-                        if case['plan'].get('proposed_steps'):
-                            retry_kwargs['proposed_steps'] = case['plan']['proposed_steps']
-                        try:
-                            coord.retry_task(tid, **retry_kwargs)
-                        except TypeError:
-                            coord.retry_task(tid, authorization_id=case['authorization_id'])
-                        execution = {'status': 'running', 'steps': [{'action': 'retry_task', 'target': 'task', 'status': 'running', 'task_id': tid}]}
+                        order = self._order(case)
+                        retried = coord.retry_task(
+                            tid,
+                            authorization_id=case['authorization_id'],
+                            corrective_instruction=case['plan'].get('corrective_instruction'),
+                            proposed_steps=case['plan'].get('proposed_steps'),
+                            order=order,
+                        )
+                        execution = {
+                            'status': 'running',
+                            'order_id': order['header'].get('order_id'),
+                            'task_id': tid,
+                            'steps': [{'action': 'retry_task', 'target': 'task', 'status': 'running', 'task_id': tid}],
+                            'dispatched_task': {
+                                'id': retried['id'] if isinstance(retried, dict) else tid,
+                                'attempt_number': retried.get('attempt_number') if isinstance(retried, dict) else None,
+                                'goal_revision': retried.get('goal_revision') if isinstance(retried, dict) else None,
+                            }
+                        }
                         return self._move(case_id, 'HAND_EXECUTING', expected={'AUTHORIZED'}, execution=execution)
                     except Exception as exc:
                         return self._move(case_id, 'FAILED', expected={'AUTHORIZED'}, error=f'Fallo al reintentar la tarea: {exc}')
@@ -620,13 +692,28 @@ class Recovery:
             if not current_task:
                 return self._move(case_id, 'UNKNOWN', expected={'VERIFYING'}, error=f'Tarea {tid} no encontrada.')
             t_state = current_task.get('state')
-            v = current_task.get('verification') or current_task.get('feedback') or {}
-            v_success = v.get('success', True) if isinstance(v, dict) else True
-            checks = {'task_state': t_state, 'verified_success': v_success, 'task_id': tid}
-            if t_state == 'COMPLETED' and v_success:
+            binding = plan.get('task_binding') or {}
+            prev_attempt = binding.get('attempt_number', 0)
+            curr_attempt = current_task.get('attempt_number', 1)
+            new_execution = current_task.get('execution_id')
+            prev_execution = binding.get('execution_id')
+            is_new_attempt = curr_attempt > prev_attempt or (new_execution is not None and new_execution != prev_execution)
+            v = current_task.get('verification') or current_task.get('machine_verification')
+            v_success = isinstance(v, dict) and v.get('success') is True
+            checks = {
+                'task_state': t_state,
+                'verified_success': v_success,
+                'task_id': tid,
+                'is_new_attempt': is_new_attempt,
+                'attempt_number': curr_attempt,
+                'execution_id': new_execution,
+            }
+            if t_state == 'COMPLETED' and v_success and is_new_attempt:
                 outcome, error = 'RECOVERED', None
             elif t_state == 'COMPLETED' and not v_success:
                 outcome, error = 'FAILED', f'Tarea {tid} completada pero la verificación de éxito falló o fue omitida.'
+            elif t_state == 'COMPLETED' and not is_new_attempt:
+                outcome, error = 'FAILED', f'Tarea {tid} completada pero sin evidencia del nuevo intento de recuperación.'
             elif t_state in {'FAILED', 'EXHAUSTED', 'CANCELLED'}:
                 outcome, error = 'FAILED', f'Tarea {tid} terminó en estado {t_state}.'
             else:

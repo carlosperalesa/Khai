@@ -49,8 +49,9 @@ class RecoveryCatalogTests(unittest.TestCase):
                 'capabilities': ['TaskRemediate']}
         with self.assertRaises(ValueError):
             validate_plan(base)
-        one = dict(base, task_id='task_' + '1' * 32)
-        two = dict(base, task_id='task_' + '2' * 32)
+        binding = {'exists': True, 'goal_revision': 0, 'execution_id': None, 'artifact_hash': None, 'attempt_number': 1}
+        one = dict(base, task_id='task_' + '1' * 32, task_binding=binding)
+        two = dict(base, task_id='task_' + '2' * 32, task_binding=binding)
         self.assertNotEqual(plan_hash('case-20261026aaaabbbb', one),
                             plan_hash('case-20261026aaaabbbb', two))
 
@@ -423,7 +424,8 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 self.assertEqual(retried_task['max_generations'], 8)
                 self.assertEqual(retried_task['attempt_number'], 2)
                 self.assertEqual(retried_task['budget_extensions'][0]['authorization_id'], pending_auth['authorization_id'])
-                self.assertEqual(retried_task['error'], 'Presupuesto agotado: generations')
+                self.assertIsNone(retried_task['error'])
+                self.assertEqual(retried_task['recovery_history'][0]['error'], 'Presupuesto agotado: generations')
 
                 # Simulate completed verified task
                 coordinator.store.update(tid, expected={'GENERATING'}, state='COMPLETED',

@@ -4,6 +4,67 @@ Khai es un asistente personal para Telegram que interpreta objetivos, genera o r
 
 El proyecto utilizaba originalmente nombres de OpenClaw. Los contenedores Docker ahora se denominan `khai_core` y `khai_docker_proxy`. Su motor de ejecución es propio; no utiliza el Gateway de OpenClaw ni el runtime de Hermes Agent. Ambos proyectos sirvieron como referencias de diseño.
 
+## Bloque 3 local: recuperación y aprendizaje con transacciones compartidas (29 de octubre de 2026)
+
+Implementado bajo la opción A: transacciones compartidas en SQLite (`ControlUnitOfWork`) reutilizando los puertos y máquinas de estados existentes. No añade LangGraph ni dependencias externas.
+
+- Heart vincula planes a la identidad observada (`task_binding`), emite órdenes declarativas canónicas validadas y supervisa la ejecución sin tolerar resultados antiguos o inferidos.
+- Hand consume la autorización de Pixy y despacha la remediación atómicamente en Control Plane junto con la transición del Coordinator (`build_attempt`) y extensión acotada de presupuestos.
+- Dreams deduplica observaciones por `execution_id`, rechaza explícitamente atribuciones contradictorias y consolida propuestas de habilidades y reglas atómicamente con `Rules.propose`.
+- `Rules.rollback` y aprobación de reglas operan de manera atómica bajo transacciones `BEGIN IMMEDIATE`.
+- Detalles y contratos en [el bloque 3](docs/BLOQUE3_RECUPERACION_Y_APRENDIZAJE.md).
+
+## Bloque 2 local: ejecución y cancelación (29 de octubre de 2026)
+
+Voice valida cada admisión externa contra la tarea vigente en SQLite. Cancelar
+bloquea las peticiones siguientes; una petición ya admitida conserva su recibo.
+Las escrituras inciertas no se repiten automáticamente.
+
+Los servicios AGENT mantienen supervisión y gateway mientras sigan activos,
+incluso después de aceptar el resultado. El estado del proceso se conserva por
+separado de la aceptación del objetivo. Una corrección espera la parada confirmada
+antes de replantear las acciones y mantiene el mismo objetivo.
+
+Suite completa del corte: **232/232 pruebas**, incluyendo 20 nuevas de autoridad,
+cancelación y supervisión. Sin dependencias nuevas ni cambios en Azure.
+Quedan pendientes recuperación y aprendizaje, credenciales, presupuestos de
+proveedores y entrega incierta de Telegram. Detalles y límites en
+[el bloque 2](docs/BLOQUE2_EJECUCION_Y_CANCELACION.md).
+
+## Bloque 1 local: conversación persistente (29 de octubre de 2026)
+
+Implementado sobre SQLite, Voice y Coordinator existentes, sin dependencias nuevas.
+Cada chat Telegram conserva una sesión; los mensajes se resuelven como charla u
+operaciones internas estructuradas. Las respuestas se vinculan con preguntas
+realmente enviadas; las correcciones mantienen el objetivo y descartan trabajo
+de revisiones anteriores. El planificador desarrolla objetivos ya resueltos,
+sin una segunda clasificación de charla frente a acción.
+
+Suite completa del corte: **212/212 pruebas**, incluyendo 22 nuevas de
+conversación, decisiones y revisiones. La prueba de composición cierra sus workers
+antes de retirar los datos temporales. Los demás bloques de la auditoría siguen
+pendientes; este resultado no valida todavía Telegram ni proveedores reales.
+No hubo commit, push, purga ni despliegue. Detalles y límites en
+[el bloque 1](docs/BLOQUE1_CONVERSACION_PERSISTENTE.md).
+
+## Revisión local anterior de interacciones (29 de octubre de 2026)
+
+La revisión SSH de solo lectura encontró el checkout de Azure en `6a47f3d`.
+Las correcciones siguientes están **solo en el workspace local**, pendientes de
+autorización de despliegue: el planificador comprueba también solicitudes que
+Mind clasifica como charla o respuesta corta, recibe historial y estado real de
+tareas, y no publica promesas de ejecución descartadas. Heart centra el
+diagnóstico en la tarea actual; los fallos anteriores se consultan expresamente.
+`/?` y `/help` muestran `/mode low`, `/mode mid`, `/mode high` y `/mode ?`
+con botones que envían el comando completo.
+
+La suite completa de este corte pasó **190/190 pruebas** con Python 3.12.
+Esto valida contratos y flujos locales con proveedores simulados; falta la
+comprobación real en Telegram tras la activación. No se hizo commit, push,
+purga, reconstrucción ni reinicio remoto. El detalle y los límites están en
+[la revisión de interacciones](docs/REVISION_INTERACCIONES_2026-10-29.md).
+Las cifras y estados de los apartados siguientes pertenecen a cortes anteriores.
+
 ## Estado de esta revisión
 
 `README.md`, [`.agents/GEMINI.md`](.agents/GEMINI.md) y

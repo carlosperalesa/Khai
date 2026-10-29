@@ -16,6 +16,7 @@ import uuid
 from app.kernel.database import connect, connection, migrate
 from app.pixy.authorization import AuthorizationStore
 from app.pixy.control import ControlStore
+from app.kernel.execution_authority import VoiceExecutionPort
 
 
 class Authority(str, Enum):
@@ -147,6 +148,9 @@ class CoordinatorPort:
     def update(self, *args, **kwargs):
         return self.__store.update(*args, **kwargs)
 
+    def observe_execution(self, *args, **kwargs):
+        return self.__store.observe_execution(*args, **kwargs)
+
     def consume(self, *args, **kwargs):
         return self.__store.consume(*args, **kwargs)
 
@@ -254,6 +258,9 @@ class HandPort:
             order_id, authorization_id, nonce, case_id, capabilities,
             target, plan_hash, consumer)
 
+    def dispatch_task_recovery(self, header, plan, transition):
+        return self.__plane.dispatch_task_recovery(header, plan, transition)
+
 
 class ControlPlane:
     """Composition-only owner of the common store and its scoped ports."""
@@ -301,6 +308,7 @@ class ControlPlane:
             hand=HandPort(self),
         )
         self.voice_secrets = VoiceSecretPort(self)
+        self.voice_execution = VoiceExecutionPort(self.path)
 
     def create_secret_request(self, user_id, chat_id, kind, env_key, provider,
                               purpose, expected_version=0, ttl=900):
@@ -467,40 +475,79 @@ class ControlPlane:
     def claim_authorized_order(self, order_id, authorization_id, nonce, case_id,
                                capabilities, target, plan_hash, consumer):
         """Atomically consume Pixy's grant and claim the matching Hand order."""
-        now = time.time()
         with self.uow.transaction() as repos:
-            conn = repos.decisions.conn
-            conn.execute(
-                'UPDATE pixy_authorizations SET status="expired" '
-                'WHERE status IN ("pending","approved") AND expires_at<=?',
-                (now,),
-            )
-            auth = self._authorization(repos.decisions.get(authorization_id))
-            order = repos.orders.get(order_id)
-            self.authorizations._check(auth, nonce, case_id, capabilities, target, plan_hash)
-            if not order:
-                raise PermissionError('Orden de ejecución inexistente')
-            if (order['authorization_id'] != authorization_id
-                    or order['case_id'] != case_id
-                    or order['artifact_hash'] != plan_hash):
-                raise PermissionError('La orden no corresponde a la autorización presentada')
-            expected_operation = 'recovery:' + case_id + ':' + plan_hash
-            if not secrets.compare_digest(order['operation_id'], expected_operation):
-                raise PermissionError('La identidad de operación no coincide')
-            if auth['status'] == 'consumed' and auth['consumed_by'] == consumer:
-                if order['status'] not in {'claimed', 'completed'}:
-                    raise PermissionError('Autorización consumida sin orden reconciliable')
-                return dict(order)
-            if auth['status'] != 'approved' or order['status'] != 'enabled':
-                raise PermissionError('Autorización u orden no disponible')
-            conn.execute(
-                'UPDATE pixy_authorizations SET status="consumed",consumed_at=?,consumed_by=? '
-                'WHERE authorization_id=? AND status="approved"',
-                (now, consumer, authorization_id),
-            )
-            conn.execute(
-                'UPDATE execution_orders SET status="claimed",claimed_at=? '
-                'WHERE order_id=? AND status="enabled"',
-                (now, order_id),
-            )
-            return dict(repos.orders.get(order_id))
+            return self._claim_order(repos, order_id, authorization_id, nonce, case_id,
+                                     capabilities, target, plan_hash, consumer)
+
+    def _claim_order(self, repos, order_id, authorization_id, nonce, case_id,
+                     capabilities, target, plan_hash, consumer):
+        now = time.time()
+        conn = repos.decisions.conn
+        conn.execute(
+            'UPDATE pixy_authorizations SET status="expired" '
+            'WHERE status IN ("pending","approved") AND expires_at<=?',
+            (now,),
+        )
+        auth = self._authorization(repos.decisions.get(authorization_id))
+        order = repos.orders.get(order_id)
+        resumed = auth and auth['status'] == 'consumed' and auth['consumed_by'] == consumer
+        self.authorizations._check(dict(auth, expires_at=float('inf')) if resumed else auth,
+                                   nonce, case_id, capabilities, target, plan_hash)
+        if not order:
+            raise PermissionError('Orden de ejecución inexistente')
+        if (order['authorization_id'] != authorization_id
+                or order['case_id'] != case_id
+                or order['artifact_hash'] != plan_hash):
+            raise PermissionError('La orden no corresponde a la autorización presentada')
+        expected_operation = 'recovery:' + case_id + ':' + plan_hash
+        if not secrets.compare_digest(order['operation_id'], expected_operation):
+            raise PermissionError('La identidad de operación no coincide')
+        if auth['status'] == 'consumed' and auth['consumed_by'] == consumer:
+            if order['status'] not in {'claimed', 'completed'}:
+                raise PermissionError('Autorización consumida sin orden reconciliable')
+            return dict(order)
+        if auth['status'] != 'approved' or order['status'] != 'enabled':
+            raise PermissionError('Autorización u orden no disponible')
+        conn.execute(
+            'UPDATE pixy_authorizations SET status="consumed",consumed_at=?,consumed_by=? '
+            'WHERE authorization_id=? AND status="approved"',
+            (now, consumer, authorization_id),
+        )
+        conn.execute(
+            'UPDATE execution_orders SET status="claimed",claimed_at=? '
+            'WHERE order_id=? AND status="enabled"',
+            (now, order_id),
+        )
+        return dict(repos.orders.get(order_id))
+
+    def dispatch_task_recovery(self, header, plan, transition):
+        """Spend Hand's order and schedule the new attempt in the same transaction."""
+        from app.heart.catalog import validate_plan, plan_hash
+        core = validate_plan(plan)
+        h = plan_hash(header['case_id'], core)
+        if header.get('issued_by') != 'heart' or core['target'] != 'task' or h != header['plan_hash']:
+            raise PermissionError('Orden de tarea alterada')
+        with self.uow.transaction() as repos:
+            conn = repos.tasks.conn
+            order = self._claim_order(repos, header['order_id'], header['authorization_id'],
+                                      header['nonce'], header['case_id'], core['capabilities'],
+                                      core['target'], h, 'hand:' + header['case_id'])
+            if order['status'] == 'completed':
+                return json.loads(order['receipt'])['task']
+            row = repos.tasks.get(core['task_id'])
+            task = json.loads(row['document']) if row else None
+            updated = transition(task)
+            if updated['id'] != core['task_id']:
+                raise PermissionError('La transición cambió el sujeto de la orden')
+            if row:
+                updated['revision'] += 1
+                updated['updated_at'] = time.time()
+                conn.execute('UPDATE control_tasks SET document=? WHERE id=?',
+                             (json.dumps(updated), updated['id']))
+            else:
+                conn.execute('INSERT INTO control_tasks VALUES (?,?,?)',
+                             (updated['id'], updated['source'], json.dumps(updated)))
+            self.tasks._queue_event(conn, updated, 'recovery_dispatched')
+            conn.execute('UPDATE execution_orders SET status="completed",receipt=?,completed_at=? WHERE order_id=?',
+                         (json.dumps({'task': updated}), time.time(), header['order_id']))
+            return updated

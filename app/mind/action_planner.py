@@ -117,7 +117,7 @@ class ActionPlanner:
             'missing_specs': missing_specs,
         }
 
-    def propose(self, request, compatible, correction_context=None):
+    def propose(self, request, compatible, correction_context=None, conversation_context='', task_context=None):
         active = self.catalog.active()
         records = [r for r in active if compatible(r['spec'])]
         skill_names = [{'skill_id': r['skill_id'], 'version_id': r['version_id'],
@@ -140,12 +140,18 @@ class ActionPlanner:
         }
         prompt = (
             f'Objetivo del usuario: "{request}"\n'
+            f'Conversación reciente (no acredita acciones): {conversation_context}\n'
+            f'Estado real de tareas: {json.dumps(task_context or [], ensure_ascii=False)}\n'
+            'Resuelve instrucciones breves como «hazlo» usando el objetivo del contexto. '
+            'Las consultas de datos actuales externos requieren una habilidad, aunque sean preguntas. '
+            'No consideres las promesas del historial como ejecuciones ni autorizaciones.\n'
             'Analiza si alguna de las habilidades disponibles resuelve este objetivo completo o parcial.\n'
             f'Habilidades disponibles: {json.dumps(skill_names, ensure_ascii=False)}\n'
             'Instrucciones de asignación:\n'
             '1. Si una habilidad existente resuelve el objetivo, asígnala en "use_existing_skill" con su skill_id y "new_skill": null.\n'
             '2. Si NINGUNA habilidad existente sirve o falta alguna funcionalidad, define una o varias en "new_skill" con una "description" clara de lo que hace (ej: "convierte las imágenes en 0 y 1") y declara en "capabilities" los accesos requeridos (ej: Network, BinaryIO, FileSystem, Database, etc.).\n'
-            '3. Si no es una tarea técnica sino conversación ordinaria, devuelve {"steps": []}.\n'
+            '3. El router ya confirmó este objetivo ejecutable. Construye sus acciones; '
+            'no lo reclasifiques como charla ni respondas al propietario.\n'
             f'Plantilla JSON a seguir estrictamente:\n'
             f'{json.dumps(template_example, ensure_ascii=False)}\n'
             'Correcciones obligatorias de recursos existentes: '
@@ -155,14 +161,18 @@ class ActionPlanner:
         raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
         proposal = json.loads(raw) if isinstance(raw, str) else raw
         if not isinstance(proposal, dict):
+            raise ValueError('El planificador no devolvió un objeto')
+        if proposal.get('steps') == [] and 'recipe' not in proposal:
             return None
+        if 'recipe' not in proposal and not isinstance(proposal.get('steps'), list):
+            raise ValueError('El planificador no declaró pasos ni receta')
         if 'recipe' not in proposal and isinstance(proposal.get('steps'), list):
             proposal = self._convert_template_steps(proposal, records)
         if proposal.get('recipe') is None:
-            return None
+            raise ValueError('El planificador no produjo una receta válida')
         recipe = proposal['recipe']
         if not isinstance(recipe, dict) or not isinstance(recipe.get('steps'), list):
-            return None
+            raise ValueError('Contrato de receta inválido')
         if len(recipe['steps']) < 1:
             return None
         if len(recipe['steps']) > 8:

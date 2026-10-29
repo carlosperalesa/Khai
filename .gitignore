@@ -2,6 +2,7 @@
 .env
 GEMINI_API.txt
 secrets.env
+.ssh/
 data/certs/
 
 # Base de datos activa

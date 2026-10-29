@@ -3,6 +3,7 @@ import http.client
 import hashlib
 import ipaddress
 import json
+import logging
 import socket
 import ssl
 import time
@@ -12,6 +13,11 @@ from urllib.parse import urlencode, urlsplit
 import yaml
 from app.voice.files import read_regular
 from app.kernel.database import connection, migrate
+from app.kernel.execution_authority import UnconfirmedDispatch
+
+
+class DispatchRejected(PermissionError):
+    """The reviewed operation was rejected before calling its transport."""
 
 
 def batch_effects(batch, request_items, reply):
@@ -51,13 +57,14 @@ def batch_effects(batch, request_items, reply):
 
 
 class ExternalGateway:
-    def __init__(self, policy_path, secrets, events=None, db=None, registry=None):
+    def __init__(self, policy_path, secrets, events=None, db=None, registry=None, execution_authority=None):
         path = Path(policy_path)
         self._static_services = (yaml.safe_load(path.read_text(encoding='utf-8')) or {}).get('services',{}) if path.exists() else {}
         self.registry = registry
         self.secrets, self.events = secrets, events
         self.calls = defaultdict(deque)
         self.db = db
+        self.execution_authority = execution_authority
         if db:
             migrate(db,[
                 ['CREATE TABLE IF NOT EXISTS gateway_requests(request_id TEXT PRIMARY KEY,task_id TEXT,fingerprint TEXT,status TEXT,reply TEXT)'],
@@ -92,6 +99,8 @@ class ExternalGateway:
     def _mailbox_request(self, task, request_id, request):
         if not self.db:
             raise RuntimeError('Durable Voice receipt storage is required')
+        if self.execution_authority is None:
+            raise PermissionError('Voice requires a scoped execution authority')
         fingerprint = hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest()
         parameter_hashes = {name: hashlib.sha256(json.dumps(value, sort_keys=True,
             ensure_ascii=False).encode()).hexdigest()
@@ -157,13 +166,23 @@ class ExternalGateway:
                 for index in range(len(request_items)):
                     conn.execute('INSERT INTO gateway_batch_effects VALUES (?,?,?,NULL)',
                                  (rid, index, 'unknown'))
+        admitted = False
+        rejected = False
+        uncertain = False
         try:
-            result = self.request(request['service'],request['operation'],request.get('params'))
+            self.execution_authority.authorize_dispatch(task, rid, fingerprint, service_id,
+                operation_name, operation.get('version'), effect)
+            admitted = True
+            result = self.request(request['service'],request['operation'],request.get('params'),
+                                  expected_version=operation.get('version'))
             if result['content_type']!='application/json':
                 raise PermissionError('Worker mailbox only returns JSON; downloads use AssetGateway')
             reply = {'result':json.loads(result['body'])}
         except Exception as exc:
             reply = {'error':type(exc).__name__}
+            uncertain = isinstance(exc, UnconfirmedDispatch) or (admitted and effect == 'write'
+                        and not isinstance(exc, DispatchRejected))
+            rejected = not admitted and not uncertain or isinstance(exc, DispatchRejected)
         resource_id = None
         if effect == 'write' and not batch and isinstance(reply.get('result'), dict):
             identity = contract.get('identity')
@@ -178,6 +197,7 @@ class ExternalGateway:
             status = ('completed' if effects and all(item['status'] == 'completed' for item in effects)
                       else 'partial' if effects and all(item['status'] != 'unknown' for item in effects)
                       else 'uncertain' if batch else
+                      'uncertain' if uncertain else 'denied' if rejected else
                       'failed' if 'error' in reply else 'completed')
             conn.execute('UPDATE gateway_receipts SET status=?,reply=?,resource_id=? WHERE request_id=?',
                          (status,json.dumps(reply),resource_id,rid))
@@ -185,6 +205,11 @@ class ExternalGateway:
                 conn.execute('''UPDATE gateway_batch_effects SET status=?,resource_id=?
                                 WHERE parent_request_id=? AND item_index=?''',
                              (item['status'], item['resource_id'],rid,item['item_index']))
+        if admitted:
+            try:
+                self.execution_authority.record_outcome(rid, status)
+            except Exception as exc:
+                logging.getLogger(__name__).warning('Dispatch outcome remains in Voice receipts (%s)', type(exc).__name__)
         return reply
 
     def technical_receipts(self, task_id, execution_id, approved_refs):
@@ -227,8 +252,10 @@ class ExternalGateway:
                                      'new_effect_authorization_id': None})
         return receipts
 
-    def request(self, service, operation, params=None):
+    def request(self, service, operation, params=None, *, expected_version=None):
         spec = self.services.get(service,{}).get('operations',{}).get(operation)
+        if expected_version is not None and (not spec or spec.get('version') != expected_version):
+            raise DispatchRejected('Approved service version is no longer active')
         if not spec:
             raise PermissionError('Unknown Voice service/operation')
         params = params or {}
@@ -329,6 +356,10 @@ class ExternalGateway:
                 if 'Network' not in task.get('manifest',{}).get('capabilities',[]) or task.get('authorized_hash') != task['artifact_hash']:
                     raise PermissionError('Task has no reviewed network capability')
                 request = json.loads(read_regular(path,16384))
+                if (request.get('execution_id') != task.get('execution_id')
+                        or request.get('artifact_hash') != task.get('artifact_hash')
+                        or request.get('goal_revision') != task.get('goal_revision', 0)):
+                    raise PermissionError('Worker request belongs to another execution or revision')
                 approved = {(ref['service_id'], ref['operation'], ref['version'])
                             for ref in task.get('services', [])}
                 requested = (request.get('service'), request.get('operation'))

@@ -9,6 +9,8 @@ from app.mind.mind import Mind
 from app.voice.gateway.dolphin_controller import DolphinController
 from app.voice.gateway.llm_gateway import LLMManager
 from app.voice.voice import _command, urgent_command
+from app.voice.gateway.telegram_gateway import TelegramHandler
+from app.voice.help import HELP_TEXT
 
 
 class _Memory:
@@ -32,6 +34,33 @@ class _Memory:
 
 
 class DolphinPilotTests(unittest.TestCase):
+    def test_unknown_intent_is_rejected_without_saving_a_promise(self):
+        mem = _Memory()
+        llm = MagicMock()
+        llm.dolphin = None
+        llm.generate_content.return_value = json.dumps({
+            'is_failure_analysis': False, 'normal_intent': {
+                'reasoning_summary': 'Hace falta actuar.', 'action': 'FETCH_WEATHER',
+                'reply': 'Estoy consultando el clima.'}})
+        result = Mind(llm, mem).process_message('Consulta el clima')
+        self.assertIn('error', result)
+        self.assertEqual(mem.saved, [])
+
+    def test_help_buttons_carry_complete_mode_commands(self):
+        with patch('app.voice.gateway.telegram_gateway.requests.post') as post:
+            telegram = TelegramHandler('test-token', 'owner')
+            telegram.send_message(HELP_TEXT, parse_mode=None)
+        payload = post.call_args.kwargs['json']
+        buttons = json.loads(payload['reply_markup'])['inline_keyboard']
+        self.assertEqual([row[0]['callback_data'] for row in buttons],
+                         ['/mode low', '/mode mid', '/mode high', '/mode ?'])
+        manager = SimpleNamespace(coordinator=MagicMock(), dolphin=MagicMock())
+        for row in buttons:
+            command = row[0]['callback_data']
+            self.assertIn(command, HELP_TEXT)
+            _command(manager, 'owner:button', command)
+            manager.dolphin.set_mode.assert_called_with(command.split()[1])
+
     def test_unified_routing_by_mode_and_cascade(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctrl = DolphinController(tmp, {'KHAI_DOLPHIN_CREDIT_CLP': '285000'})
@@ -50,10 +79,7 @@ class DolphinPilotTests(unittest.TestCase):
             gateway._generate_dolphin = MagicMock(return_value='{"action": "GENERAL_CHAT", "reply": "Dolphin"}')
             gateway._generate_gemini = MagicMock(side_effect=[
                 ValueError('Gemini no devolvió candidatos (SAFETY)'),
-                json.dumps({'is_failure_analysis': False, 'normal_intent': {
-                    'reasoning_summary': 'Ok', 'action': 'GENERAL_CHAT',
-                    'reply': 'Respuesta desde k2.', 'extracted_goal': '',
-                }}),
+                json.dumps({'reply': 'Respuesta desde k2.', 'tool_calls': []}),
             ])
             res_low = Mind(gateway, _Memory()).process_message('Explícame esto')
             self.assertEqual(res_low['reply'], 'Respuesta desde k2.')
@@ -64,9 +90,7 @@ class DolphinPilotTests(unittest.TestCase):
             ctrl._set_mode_state('mid', mark_notified=True)
             gateway._generate_gemini.reset_mock()
             gateway._generate_dolphin = MagicMock(return_value=json.dumps({
-                'action': 'GENERAL_CHAT',
-                'reply': 'Respuesta directa de Dolphin en mid.',
-                'reasoning_summary': 'Dolphin',
+                'reply': 'Respuesta directa de Dolphin en mid.', 'tool_calls': [],
             }))
             res_mid = Mind(gateway, _Memory()).process_message('Cuenta una historia')
             self.assertEqual(res_mid['reply'], 'Respuesta directa de Dolphin en mid.')
@@ -80,13 +104,7 @@ class DolphinPilotTests(unittest.TestCase):
         llm.generate_content = MagicMock(side_effect=[
             ValueError('Unified Fallback agotó todos los intentos y llaves.'),
             json.dumps({
-                'is_failure_analysis': False,
-                'normal_intent': {
-                    'reasoning_summary': 'Turno limpio',
-                    'action': 'GENERAL_CHAT',
-                    'reply': 'Seguimos operando normalmente.',
-                    'extracted_goal': '',
-                },
+                'reply': 'Seguimos operando normalmente.', 'tool_calls': [],
             }),
         ])
         mind = Mind(llm, mem)
@@ -181,7 +199,7 @@ class DolphinPilotTests(unittest.TestCase):
                 self.assertEqual(_command(mgr, 'telegram:1b', '/M?'), '[Mode = low]\nMotor activo: Gemini')
                 self.assertEqual(_command(mgr, 'telegram:2', '/mode ?'), '[Mode = low]\nMotor activo: Gemini')
                 self.assertTrue(urgent_command('/M?'))
-            self.assertIn('Objetivos activos detenidos: task_1', _command(mgr, 'telegram:3', '/stop'))
+            self.assertIn('Cancelación solicitada: task_1', _command(mgr, 'telegram:3', '/stop'))
             self.assertIn('Estado Heart: ok', _command(mgr, 'telegram:4', '/health'))
             self.assertIn('Reinicio de contenedores Docker (core, proxy) programado', _command(mgr, 'telegram:5', '/restart'))
             self.assertEqual(_command(mgr, 'telegram:6', '/tasks'), 'Comando no disponible. Consulta /help.')
@@ -300,8 +318,29 @@ class DolphinPilotTests(unittest.TestCase):
             )
             coord = Coordinator(mgr)
             t_no_manifest = coord.store.create('tg:1', 'Va a llover?', state='FAILED', error='Missing action')
+            from app.heart.catalog import plan_hash, task_binding
+            binding = task_binding(t_no_manifest)
+            plan = {
+                'target': 'task',
+                'steps': [{'action': 'remediate_task', 'target': 'task'}],
+                'capabilities': ['TaskRemediate'],
+                'task_id': t_no_manifest['id'],
+                'task_binding': binding,
+                'corrective_instruction': 'Usar plantilla de 1 paso',
+                'proposed_steps': [],
+            }
+            cid = 'case-1111222233334444'
+            h = plan_hash(cid, plan)
+            order = {
+                'header': {'case_id': cid, 'issued_by': 'heart', 'authorization_id': 'auth_1',
+                           'order_id': 'order_1', 'nonce': 'nonce_1', 'plan_hash': h},
+                'plan': plan
+            }
+            mgr.hand = MagicMock()
+            mgr.hand.remediate_task.side_effect = lambda ord, tr: tr(t_no_manifest)
             retried = coord.retry_task(t_no_manifest['id'], authorization_id='auth_1',
-                                       corrective_instruction='Usar plantilla de 1 paso')
+                                       corrective_instruction='Usar plantilla de 1 paso',
+                                       proposed_steps=[], order=order)
             self.assertEqual(retried['state'], 'ROUTING')
             self.assertIn('Usar plantilla de 1 paso', retried['feedback'])
             coord._llm_executor.shutdown(wait=True, cancel_futures=True)

@@ -4,6 +4,7 @@ import time
 from typing import Dict, List, Optional
 import logging
 import functools
+from app.voice.help import HELP_TEXT, HELP_BUTTONS
 utils_logger = logging.getLogger("Utils")
 
 
@@ -86,6 +87,8 @@ class TelegramHandler:
         if not parse_mode:
             payload.pop("parse_mode", None)
 
+        if buttons is None and text == HELP_TEXT:
+            buttons = HELP_BUTTONS
         if buttons:
             reply_markup = {
                 "inline_keyboard": [
@@ -129,6 +132,12 @@ class TelegramHandler:
                 return response.json()
             raise
     
+    def answer_callback_query(self, callback_id: str) -> Dict:
+        response = requests.post(self.base_url + '/answerCallbackQuery',
+                                 json={'callback_query_id': callback_id}, timeout=5)
+        response.raise_for_status()
+        return response.json()
+
     def edit_message(self, message_id: int, text: str, parse_mode: str = "HTML") -> Dict:
         """Editar un mensaje existente por su message_id."""
         payload = {

@@ -12,7 +12,7 @@ ACTIONS = {
     'restart_container': {'capability': 'DockerRestart', 'mutating': True, 'targets': {'core', 'proxy'}},
     'health_check': {'capability': 'HealthCheck', 'mutating': False, 'targets': {'core', 'proxy'}},
     'retry_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
-    'remediate_task': {'capability': 'TaskRemediate', 'mutating': False, 'targets': {'task'}},
+    'remediate_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
     'create_skill': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
 }
 CAUSE_TAXONOMY = {
@@ -84,6 +84,14 @@ def validate_case_id(case_id):
     return case_id
 
 
+def task_binding(task):
+    if task is None:
+        return {'exists': False}
+    return {'exists': True, 'goal_revision': task.get('goal_revision', 0),
+            'execution_id': task.get('execution_id'), 'artifact_hash': task.get('artifact_hash'),
+            'attempt_number': task.get('attempt_number', 1)}
+
+
 def validate_plan(plan):
     """Return the executable core of a plan or raise. Extra or unknown fields are rejected."""
     if not isinstance(plan, dict):
@@ -111,6 +119,27 @@ def validate_plan(plan):
         if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
             raise ValueError('La remediación debe identificar una task_id exacta')
         core['task_id'] = task_id
+        binding = plan.get('task_binding')
+        if not isinstance(binding, dict) or type(binding.get('exists')) is not bool:
+            raise ValueError('La orden requiere el intento observado por Heart')
+        fields = {'exists', 'goal_revision', 'execution_id', 'artifact_hash', 'attempt_number'}
+        if binding['exists']:
+            if (set(binding) != fields or type(binding['goal_revision']) is not int
+                    or binding['goal_revision'] < 0 or type(binding['attempt_number']) is not int
+                    or binding['attempt_number'] < 1
+                    or any(binding[k] is not None and not isinstance(binding[k], str)
+                           for k in ('execution_id', 'artifact_hash'))):
+                raise ValueError('Identidad del intento inválida')
+        elif set(binding) != {'exists'} or steps[0]['action'] != 'create_skill':
+            raise ValueError('Solo create_skill puede autorizar una tarea ausente')
+        core['task_binding'] = dict(binding)
+        instruction = plan.get('corrective_instruction', '')
+        proposed = plan.get('proposed_steps', [])
+        if (not isinstance(instruction, str) or len(instruction) > 1000
+                or not isinstance(proposed, list) or len(proposed) > 8
+                or len(canonical(proposed)) > 16000):
+            raise ValueError('Instrucciones de reparación fuera del contrato')
+        core.update(corrective_instruction=instruction, proposed_steps=proposed)
     elif 'task_id' in plan:
         raise ValueError('task_id solo es válido para remediar tareas')
     return core

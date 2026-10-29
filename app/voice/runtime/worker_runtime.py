@@ -35,7 +35,9 @@ def execute(config, artifact='/skill/main.py', workspace='/app/data/public'):
         base = Path(workspace)/('.voice-'+request_id)
         incoming = Path(str(base)+'.request.json')
         outgoing = Path(str(base)+'.response.json')
-        raw = json.dumps({'service':service,'operation':operation,'params':params or {}})
+        raw = json.dumps({'service':service,'operation':operation,'params':params or {},
+                          'execution_id':config['execution_id'], 'artifact_hash':config['artifact_hash'],
+                          'goal_revision':config.get('goal_revision', 0)})
         if len(raw.encode())>16384:
             raise ValueError('Gateway request too large')
         tmp = Path(str(base)+'.tmp')

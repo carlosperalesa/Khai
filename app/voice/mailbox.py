@@ -19,7 +19,11 @@ class VoiceMailbox:
                  created_at REAL NOT NULL, sent_at REAL, error_type TEXT)''',
             'CREATE INDEX IF NOT EXISTS voice_inbox_pending ON voice_inbox(status,priority,accepted_at)',
             'CREATE INDEX IF NOT EXISTS voice_outbox_pending ON voice_outbox(status,created_at)',
+        ], [
+            "ALTER TABLE voice_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE voice_outbox ADD COLUMN message_ids TEXT NOT NULL DEFAULT '[]'",
         ]], component='voice-mailbox')
+        self.on_delivered = None
         # A process may have completed a side effect before dying. Its receipt
         # cannot be inferred from a pending SQLite row alone.
         with connection(db_path) as conn:
@@ -64,34 +68,44 @@ class VoiceMailbox:
                          (time.time(), row['source']))
         return True
 
-    def enqueue(self, text):
+    def enqueue(self, text, metadata=None):
         if not isinstance(text, str) or not text or len(text) > 64000:
             raise ValueError('Invalid notification')
         delivery_id = 'delivery-' + uuid.uuid4().hex
         with connection(self.db_path) as conn:
-            conn.execute('INSERT INTO voice_outbox(delivery_id,text,status,created_at) '
-                         'VALUES (?, ?, "pending", ?)', (delivery_id, text, time.time()))
+            import json
+            conn.execute('INSERT INTO voice_outbox(delivery_id,text,status,created_at,metadata) '
+                         'VALUES (?, ?, "pending", ?, ?)',
+                         (delivery_id, text, time.time(), json.dumps(metadata or {})))
         return delivery_id
 
     def deliver_one(self, sender):
         with connection(self.db_path) as conn:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute("SELECT delivery_id,text FROM voice_outbox WHERE status='pending' "
+            row = conn.execute("SELECT delivery_id,text,metadata FROM voice_outbox WHERE status='pending' "
                                'ORDER BY created_at LIMIT 1').fetchone()
             if not row:
                 return False
             conn.execute("UPDATE voice_outbox SET status='sending' WHERE delivery_id=?", (row['delivery_id'],))
         try:
+            message_ids = []
             for offset in range(0, len(row['text']), 3900):
-                sender(row['text'][offset:offset + 3900])
+                receipt = sender(row['text'][offset:offset + 3900])
+                if isinstance(receipt, dict):
+                    mid = (receipt.get('result') or {}).get('message_id')
+                    if type(mid) is int:
+                        message_ids.append(mid)
         except Exception as exc:
             with connection(self.db_path) as conn:
                 conn.execute("UPDATE voice_outbox SET status='unknown',error_type=? WHERE delivery_id=?",
                              (type(exc).__name__, row['delivery_id']))
             raise
         with connection(self.db_path) as conn:
-            conn.execute("UPDATE voice_outbox SET status='delivered',sent_at=? WHERE delivery_id=?",
-                         (time.time(), row['delivery_id']))
+            import json
+            conn.execute("UPDATE voice_outbox SET status='delivered',sent_at=?,message_ids=? WHERE delivery_id=?",
+                         (time.time(), json.dumps(message_ids), row['delivery_id']))
+        if self.on_delivered:
+            self.on_delivered(dict(row), message_ids)
         return True
 
     def pending_counts(self):

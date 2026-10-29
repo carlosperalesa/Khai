@@ -502,11 +502,24 @@ class PixyMind:
         else:
             detail = "No se detectaron anomalías activas."
         lines = [detail]
+        task = (case.get('diagnosis') or {}).get('task')
+        if task:
+            lines.append(f"Solicitud: {task.get('request')}. Estado: {task.get('state')}. {task.get('note', '')}")
         if plan:
             lines.append(f"Propuesta de Heart: {plan.get('summary') or plan.get('action')} sobre {plan.get('target')}.")
         if auth:
             lines.append("apruebas: y/n")
         return "\n".join(lines)
+
+    def request_recovery_approval(self, case, source):
+        """Issue the exact Heart plan through Pixy's existing authorization port."""
+        plan = case['plan']
+        if not self.authorizations or case['state'] != 'SOLUTION_PROPOSED':
+            raise ValueError('No hay una propuesta de Heart disponible para aprobar')
+        auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'],
+                                         case['plan_hash'], requested_by=source)
+        self.manager.heart.recovery.await_approval(case['case_id'], auth)
+        return auth
 
     def diagnose(self, request, source='telegram'):
         if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
@@ -514,8 +527,7 @@ class PixyMind:
             plan = case.get('plan')
             auth = None
             if plan and plan.get('requires_approval') and self.authorizations:
-                auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'], case['plan_hash'], requested_by=source)
-                self.manager.heart.recovery.await_approval(case['case_id'], auth)
+                auth = self.request_recovery_approval(case, source)
             if plan:
                 prompt = (
                     "Eres Pixy. Explica al propietario este diagnóstico de Heart en máximo 3 o 4 líneas directas.\n"
@@ -535,6 +547,14 @@ class PixyMind:
                 )
             if auth:
                 prompt += 'Termina exactamente con: apruebas: y/n'
+            prompt += (
+                f'\nConsulta del propietario: {request}\n'
+                'La tarea incluida en el diagnóstico es el sujeto de esta consulta. '
+                'No la sustituyas por un error histórico ni inventes actividad. '
+                'COMPLETED sin ejecuciones no demuestra que se haya ejecutado una skill. '
+                'Solo describe como propuesta autorizable el plan concreto de Heart; '
+                'si no hay plan, no solicites aprobación ni anuncies remediaciones.'
+            )
             try:
                 raw = self.llm.generate_content(prompt, response_format=None)
                 explanation = str(raw).strip()

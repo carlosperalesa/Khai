@@ -214,7 +214,9 @@ class SkillContractTests(unittest.TestCase):
                     'manifest': {'capabilities': ['Network']}, 'artifact_hash': 'hash',
                     'authorized_hash': 'hash', 'services': []}
             request = workspace / '.voice-a.request.json'
-            request.write_text('{"service":"fx","operation":"rate","params":{}}', encoding='utf-8')
+            request.write_text(json.dumps({'service': 'fx', 'operation': 'rate', 'params': {},
+                                           'execution_id': 'run_1', 'artifact_hash': 'hash',
+                                           'goal_revision': 0}), encoding='utf-8')
             gateway.process_mailbox(task, workspace)
             self.assertEqual(json.loads((workspace / '.voice-a.response.json').read_text())['error'],
                              'PermissionError')

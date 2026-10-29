@@ -185,13 +185,10 @@ ROUTING
   `unknown` si se interrumpe el proceso o falta evidencia. Los éxitos parciales
   no se vuelven a enviar automáticamente. Mind detiene la receta y no acepta
   un `y` ni `/verify success` mientras quede algún elemento sin confirmar.
-- Ya quedaron implementados localmente la identificación de una escritura
-  cuestionada por orden, el cierre seguro ante ambigüedad persistente, las
-  preguntas progresivas, la confirmación de variables, la aprobación única
-  de primera configuración y la presentación legible de resultados de receta.
-  Las cuatro pruebas focales del corte reciente pasaron 36/36; el traceback
-  de fallo temporal de rechazo es simulado por una prueba de reintento.
-  No equivale a validación integral ni a prueba con proveedores externos.
+- Bloques 1, 2 y 3 implementados localmente:
+  - Bloque 1: conversación persistente, turnos estructurados y resolución conversacional.
+  - Bloque 2: autoridad de ejecución, cancelación atómica contra SQLite y supervisión AGENT.
+  - Bloque 3: recuperación causal por Heart con task_binding, despacho atómico por Hand vía ControlUnitOfWork, deduplicación en Dreams y gobierno atómico de reglas en Pixy.
 - Decisiones vigentes: un único `y` final acepta el objetivo completo; los
   demás efectos siguen provisionales, la corrección solo apunta al cuestionado,
   no se adivinan identidades; nombre y contexto legibles no deben incluir

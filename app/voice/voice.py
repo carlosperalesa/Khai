@@ -14,6 +14,7 @@ from app.bootstrap import ModuleManager
 from app.mind.coordinator import Coordinator
 from app.pixy.control import InstanceLock
 from app.kernel.tracing import TracingFilter, trace_scope, new_trace_id
+from app.voice.help import HELP_TEXT
 
 logger = logging.getLogger(__name__)
 
@@ -63,17 +64,6 @@ async def lifespan(app):
 
 
 app = FastAPI(title='Khai', lifespan=lifespan)
-
-HELP_TEXT = """Comandos disponibles:
-/help o /? - muestra esta ayuda.
-/mode <low|mid|high|?> o /m <low|mid|high|?> - cambia o consulta el modo LLM (low=Gemini, mid=Dolphin CPU Spot, high=Dolphin GPU L4 Spot, ?=status).
-/pixy <mensaje> o /p <mensaje> - habla directamente con Pixy (diagnóstico, reglas y servicios).
-/health - muestra el estado de salud e integridad del sistema.
-/cancel [ID] o /stop [ID] - detiene el objetivo en curso (o el ID indicado).
-/restart - reinicia el contenedor Docker de Khai.
-/us <usuario> /pas <contraseña> /api <clave> - ingresa credenciales en chat privado (puedes enviarlas juntas en un mismo mensaje o por separado).
-Las aprobaciones y confirmaciones se responden con y/n."""
-
 
 def authenticated_message(data, user_id):
     if not isinstance(data, dict):
@@ -132,63 +122,37 @@ def urgent_command(text):
 
 
 def process_ordinary(manager, source, trace_id, text):
-    with trace_scope(trace_id):
-        words = text.strip().split()
-        if not text.startswith('/'):
-            pending_questions = [task for task in manager.coordinator.store.all()
-                                 if task['state'] in {'WAITING_SCOPE', 'WAITING_INPUT_CONFIRMATION', 'UNVERIFIED',
-                                                       'WAITING_FEEDBACK', 'WAITING_CREATION_APPROVAL',
-                                                       'WAITING_EFFECT_DECISION', 'WAITING_EFFECT_DETAIL'}]
-            named = any(task['id'] in {words[0], words[-1]} for task in pending_questions) if words else False
-            if len(pending_questions) > 1 and not named and words:
-                # Sin ID: la respuesta corresponde a la pregunta pendiente más reciente.
-                latest = manager.coordinator.latest_task(pending_questions)
-                if words[0].casefold() in {'y', 'yes', 'sí', 'si', 'n', 'no'} and len(words) == 1:
-                    text = words[0] + ' ' + latest['id']
-                elif latest['state'] != 'WAITING_CREATION_APPROVAL':
-                    text = latest['id'] + ' ' + text.strip()
-                words = text.split()
-        decision = bool(words and words[0].casefold() in {'y', 'yes', 'sí', 'si', 'n', 'no'}
-                        and len(words) <= 2)
-        reply = None
-        if not text.startswith('/'):
-            reply = manager.coordinator.accept_input_confirmation(source, text)
-            if reply is None:
-                reply = manager.coordinator.accept_effect_detail(source, text)
-            if reply is None:
-                reply = manager.coordinator.accept_effect_decision(source, text)
-        if decision and reply is None:
-            reviews = [task for task in manager.coordinator.store.all()
-                       if task['state'] in {'UNVERIFIED', 'WAITING_FEEDBACK'}]
-            approvals = [task for task in manager.coordinator.store.all()
-                         if task['state'] == 'WAITING_CREATION_APPROVAL']
-            authorizations = (manager.pixy.authorizations.pending_all()
-                              if getattr(manager.pixy, 'authorizations', None) else [])
-            target = words[1] if len(words) == 2 else None
-            if any(task['id'] == target for task in reviews) or (reviews and not approvals
-                    and not authorizations and target is None):
-                reply = manager.coordinator.accept_review_reply(source, text)
-            elif reviews and (approvals or authorizations) and target is None:
-                latest = manager.coordinator.latest_task(reviews + approvals)
-                if latest in reviews:
-                    reply = manager.coordinator.accept_review_reply(source, words[0] + ' ' + latest['id'])
-        if reply is None:
+    from app.mind.conversation import current_turn
+    c = manager.coordinator
+    turn = c.conversations.turn(source)
+    if turn is None:
+        owner = str(manager.telegram.user_id)
+        turn = c.conversations.begin(source, trace_id, text, owner, owner)
+    if turn['status'] in {'completed', 'routed', 'calling'}:
+        return
+    token = current_turn.set(turn)
+    try:
+        with trace_scope(trace_id):
+            decision_text = text
+            if text.split(maxsplit=1)[0].lower() in {'/p', '/pixy'}:
+                decision_text = text.partition(' ')[2].strip()
+                if not decision_text or decision_text.split()[0].casefold() not in {'y','yes','s?','si','n','no'}:
+                    decision_text = ''
+            result = (c.handle_reply(source, decision_text, turn['conversation_id'], turn['reply_to'])
+                      if decision_text and not decision_text.startswith('/') else None)
+            if result is not None and result.handled:
+                c.conversations.complete(source, {'task_id': result.task_id, 'result': result.text})
+                if result.text:
+                    c.notify(result.text)
+                return
             reply = command(manager, source, text)
-        if reply is None:
-            reviews = [task for task in manager.coordinator.store.all()
-                       if task['state'] in {'UNVERIFIED', 'WAITING_FEEDBACK'}]
-            targets_review = bool(words and any(task['id'] in {words[0], words[-1]}
-                                                for task in reviews))
-            scope_reply = (None if targets_review else
-                           manager.coordinator.accept_scope_reply(source, text))
-            review_reply = (manager.coordinator.accept_review_reply(source, text)
-                            if scope_reply is None else None)
-            if scope_reply is None and review_reply is None:
-                manager.coordinator.intake(source, text, trace_id=trace_id)
-            else:
-                manager.coordinator.notify(scope_reply or review_reply)
-        else:
-            manager.coordinator.notify(reply)
+            if reply is not None:
+                c.conversations.complete(source, {'result': reply})
+                c.notify(reply)
+                return
+            c.intake(source, text, trace_id=trace_id)
+    finally:
+        current_turn.reset(token)
 
 
 async def run_inbox(manager, *, urgent):
@@ -249,14 +213,15 @@ def _command(manager, source, text):
     if name in {'/cancel', '/stop'}:
         if len(parts) == 2:
             c.cancel(parts[1], source)
-            return f'Objetivo {parts[1]} detenido.'
+            return f'Cancelación solicitada para {parts[1]}.'
         active = [t for t in c.store.all()
-                  if t.get('state') not in {'COMPLETED', 'FAILED', 'CANCELLED', 'EXHAUSTED', 'UNFULFILLABLE'}]
+                  if t.get('state') not in {'COMPLETED', 'FAILED', 'CANCELLED', 'EXHAUSTED', 'UNFULFILLABLE'}
+                  or c._agent_active(t)]
         if not active:
             return 'No hay objetivos en curso para detener.'
         for idx, t in enumerate(active):
             c.cancel(t['id'], f'{source}:stop:{idx}')
-        return 'Objetivos activos detenidos: ' + ', '.join(t['id'] for t in active)
+        return 'Cancelación solicitada: ' + ', '.join(t['id'] for t in active)
     if name == '/restart':
         targets = ([parts[1].lower()]
                    if len(parts) >= 2 and parts[1].lower() in {'core', 'proxy'}
@@ -300,9 +265,21 @@ async def webhook(request: Request):
                 reply = await asyncio.to_thread(secret_command, manager, text, user_id, chat_id)
                 await asyncio.to_thread(manager.coordinator.notify, reply)
             elif hasattr(manager, 'voice_mailbox') and manager.voice_mailbox:
+                msg = data.get('message') or (data.get('callback_query') or {}).get('message') or {}
+                conversation_chat = str((msg.get('chat') or {}).get('id', user_id))
+                manager.coordinator.conversations.begin(
+                    source, trace_id, text, user_id, conversation_chat,
+                    msg.get('message_id') if 'message' in data else None,
+                    (msg.get('reply_to_message') or {}).get('message_id'))
                 manager.voice_mailbox.accept(source, trace_id, text, urgent=urgent_command(text))
             elif hasattr(manager, 'coordinator') and manager.coordinator:
-                manager.coordinator.intake(source, text)
+                await asyncio.to_thread(process_ordinary, manager, source, trace_id, text)
+            callback_id = (data.get('callback_query') or {}).get('id')
+            if callback_id:
+                try:
+                    await asyncio.to_thread(manager.telegram.answer_callback_query, callback_id)
+                except Exception:
+                    logger.warning('No se pudo confirmar el botón; la entrada permanece registrada')
         return {'ok': True}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc

@@ -150,7 +150,7 @@ class RecipeExecutionTests(unittest.TestCase):
         self.assertTrue(waiting['batch_incomplete'])
         self.assertEqual(waiting['recipe_step_index'], 0)
         self.assertEqual(self.coordinator.accept_review_reply('owner:premature-yes', 'y'),
-                         task['id'] + ': hay efectos externos sin confirmar; explica qué ocurrió o cancela.')
+                         'hay efectos externos sin confirmar; explica qué ocurrió o cancela.')
         with self.assertRaises(PermissionError):
             self.coordinator.verify(task['id'], first['execution_id'], True,
                                     'owner:premature-verify')
@@ -622,6 +622,113 @@ class RecipeExecutionTests(unittest.TestCase):
         self.assertEqual(routed['id'], task['id'])
         self.assertEqual(routed['recipe']['steps'][0]['version_id'], 'rate-v1')
         self.manager.hand.generate.assert_not_called()
+
+    def test_structured_action_executes_planned_actions(self):
+        self.coordinator.notify = Mock()
+        self.manager.mind.process_message.return_value = {
+            'action': 'ACTION_REQUIRED', 'extracted_goal': 'Convierte 100 CLP con la tasa actual'}
+        self.manager.action_planner = Mock()
+        self.manager.action_planner.propose.return_value = {
+            'recipe': self.recipe, 'inputs': {'base': 'CLP', 'amount': 100},
+            'missing_specs': {}}
+        task = self.coordinator.intake('owner:misclassified', 'Convierte 100 CLP con la tasa actual')
+        self.coordinator.advance(task)
+        routed = self.coordinator.store.get(task['id'])
+        self.assertEqual(routed['state'], 'RECIPE_STEP')
+        self.assertEqual(routed['routing_action'], 'ACTION_REQUIRED')
+        self.manager.memory.append_long_term.assert_called_once_with('user_chat', task['request'])
+        first = self.advance_to_running(task['id'])
+        self.proxy.get.return_value = {'status': 'finished', 'returncode': 0,
+                                      'stdout': '{"rate": 2}'}
+        self.coordinator.advance(first)
+        second = self.advance_to_running(task['id'])
+        self.assertEqual(second['payload']['params'], {'amount': 100, 'rate': 2})
+        self.proxy.get.return_value = {'status': 'finished', 'returncode': 0,
+                                      'stdout': '{"total": 200}'}
+        self.coordinator.advance(second)
+        current = self.coordinator.store.get(task['id'])
+        self.assertEqual(current['state'], 'UNVERIFIED')
+        self.assertEqual(current['recipe_result'], 200)
+        self.assertEqual(len(current['recipe_receipts']), 2)
+        self.assertFalse(any('Voy a consultar' in call.args[0]
+                             for call in self.coordinator.notify.call_args_list))
+
+    def test_short_instruction_uses_history_and_durable_task_context(self):
+        self.manager.memory.get_chat_history.return_value = 'Usuario: Convierte 100 CLP usando la tasa actual.'
+        previous = self.coordinator.store.create('owner:previous', 'Convierte 100 CLP',
+                                                 state='COMPLETED', executions=0)
+        self.manager.mind.process_message.return_value = {
+            'action': 'ACTION_REQUIRED', 'extracted_goal': 'Convierte 100 CLP con la tasa actual'}
+        self.manager.action_planner = Mock()
+        self.manager.action_planner.propose.return_value = {
+            'recipe': self.recipe, 'inputs': {'base': 'CLP', 'amount': 100},
+            'missing_specs': {}}
+        task = self.coordinator.intake('owner:short', 'Hazlo')
+        self.coordinator.advance(task)
+        current = self.coordinator.store.get(task['id'])
+        self.assertEqual(current['state'], 'RECIPE_STEP')
+        context = self.manager.action_planner.propose.call_args.kwargs
+        self.assertIn('100 CLP', context['conversation_context'])
+        self.assertEqual(context['task_context'][0]['id'], previous['id'])
+        self.assertEqual(context['task_context'][0]['executions'], 0)
+        self.assertFalse(self.manager.mind.process_message.call_args.kwargs['persist'])
+
+    def test_weather_followup_without_skill_waits_for_real_creation_approval(self):
+        self.coordinator.notify = Mock()
+        self.manager.memory.get_chat_history.return_value = (
+            'Usuario: Quiero el clima de mañana para Santiago de Chile usando openweathermap.org.')
+        self.manager.mind.process_message.return_value = {
+            'action': 'ACTION_REQUIRED', 'extracted_goal': 'Consultar el clima de ma?ana para Santiago de Chile con openweathermap.org'}
+        self.manager.hand.catalog.active.return_value = []
+        self.manager.action_planner = ActionPlanner(self.manager.llm, self.manager.hand.catalog)
+        self.manager.llm.generate_content.return_value = json.dumps({
+            'steps': [{'id': 'weather', 'new_skill': {
+                'skill_id': 'weather',
+                'description': 'Consultar el pronóstico de mañana para Santiago de Chile.',
+                'capabilities': ['Network'], 'inputs': {'city': 'string'},
+                'outputs': {'forecast': 'string'}}}],
+            'inputs': {'city': 'Santiago de Chile'}})
+        self.coordinator._setup_service = Mock(return_value={
+            'step_id': 'weather', 'hash': 'd' * 64, 'effect': 'read',
+            'host': 'openweathermap.org', 'name': 'Consulta meteorológica',
+            'ref': {'service_id': 'weather', 'operation': 'forecast', 'version': 'v1'}})
+        task = self.coordinator.intake('owner:weather-followup', 'Hazlo')
+        self.coordinator.advance(task)
+        waiting = self.coordinator.store.get(task['id'])
+        self.assertEqual(waiting['state'], 'WAITING_CREATION_APPROVAL')
+        self.assertEqual(waiting['recipe_input'], {'city': 'Santiago de Chile'})
+        message = self.coordinator.notify.call_args.args[0]
+        self.assertIn('openweathermap.org', message)
+        self.assertIn('Santiago de Chile', message)
+        self.assertIn('Responde y/n', message)
+        self.manager.hand.generate.assert_not_called()
+        self.proxy.submit.assert_not_called()
+        self.manager.memory.append_long_term.assert_called_once_with('user_chat', 'Hazlo')
+
+    def test_greeting_does_not_select_a_skill(self):
+        self.coordinator.notify = Mock()
+        self.manager.mind.process_message.return_value = {'action': 'GENERAL_CHAT', 'reply': 'Hola.'}
+        self.manager.action_planner = Mock()
+        self.manager.action_planner.propose.return_value = None
+        self.manager.skill_selector = Mock()
+        task = self.coordinator.intake('owner:greeting', 'Hola')
+        self.coordinator.advance(task)
+        self.assertEqual(self.coordinator.store.get(task['id'])['state'], 'COMPLETED')
+        self.manager.skill_selector.select.assert_not_called()
+        self.coordinator.notify.assert_called_once_with('Hola.')
+
+    def test_invalid_plan_does_not_become_completed_chat(self):
+        self.coordinator.notify = Mock()
+        self.manager.mind.process_message.return_value = {
+            'action': 'ACTION_REQUIRED', 'extracted_goal': 'Consulta los datos actuales'}
+        self.manager.action_planner = Mock()
+        self.manager.action_planner.propose.side_effect = ValueError('Plan inválido')
+        task = self.coordinator.intake('owner:bad-plan', 'Consulta los datos actuales')
+        self.coordinator._run_task(task)
+        self.assertEqual(self.coordinator.store.get(task['id'])['state'], 'FAILED')
+        self.manager.memory.append_long_term.assert_not_called()
+        self.assertFalse(any('Ya estoy ejecutando' in call.args[0]
+                             for call in self.coordinator.notify.call_args_list))
 
     def test_missing_action_is_generated_inside_same_objective(self):
         self.manager.mind.process_message.return_value = {

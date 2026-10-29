@@ -112,6 +112,32 @@ class Phase5DreamsTests(unittest.TestCase):
         self.assertEqual(hyp['successes'], 1)
         self.assertGreater(hyp['confidence'], 0.5)
 
+    def test_contradictory_observation_rejected_and_duplicate_ignored(self):
+        task = {'id': 'task_dup', 'execution_id': 'run_dup_1'}
+        self.assertTrue(self.dreams.record(task, True, {'ok': True}))
+        # Exact duplicate returns False without error
+        self.assertFalse(self.dreams.record(task, True, {'ok': True}))
+        # Contradictory outcome raises ValueError
+        with self.assertRaises(ValueError):
+            self.dreams.record(task, False, {'ok': False})
+
+    def test_rules_atomic_approval_and_rollback(self):
+        r1 = self.rules.propose('Use UTF-8 always', 'agent')
+        self.rules.approve(r1, 'owner:1')
+        self.assertEqual(len(self.rules.active()), 1)
+        r2 = self.rules.propose('Use ASCII only', 'agent')
+        self.rules.approve(r2, 'owner:2', replaces=r1)
+        active = self.rules.active()
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]['rule_id'], r2)
+        # Rollback returns to previous version atomically
+        r3 = self.rules.rollback(r2, 'owner:3')
+        active = self.rules.active()
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]['rule_id'], r3)
+        self.assertEqual(active[0]['content'], 'Use UTF-8 always')
+        self.assertEqual(active[0]['rollback_of'], r2)
+
 
 if __name__ == '__main__':
     unittest.main()

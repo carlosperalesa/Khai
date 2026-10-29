@@ -1,246 +1,66 @@
+"""Single conversational router; tool calls are validated before Core dispatch."""
 import json
 import logging
-import re
-from typing import Dict, Optional
-from pydantic import BaseModel, Field, ValidationError
+from app.mind.turn import AssistantTurn
 from app.pixy.control import BudgetExceeded
-
-from app.mind.brain import Brain as LLMManager
-from app.mind.memory import MemoryEngine
 
 logger = logging.getLogger("Mind")
 
-class PossibleCause(BaseModel):
-    cause: str = Field(..., description="La causa raíz probable.")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Nivel de confianza estadística (0.0 a 1.0).")
-    proposed_fix: str = Field(..., description="Estrategia técnica para solucionar esta causa.")
-
-class FailureAnalysisIntent(BaseModel):
-    reasoning_summary: str = Field(..., description="Deducción lógica estructurada ante el error.")
-    action: str = Field(..., description="Debe ser: ACTION_REQUIRED o INVESTIGATE.")
-    reply: str = Field(default="", description="Respuesta a Telegram si aplica (usualmente vacía en errores).")
-    extracted_goal: str = Field(default="", description="Si es ACTION_REQUIRED, el nuevo objetivo con el [MANIFEST] rico (purpose hiper-detallado).")
-    investigate_target: str = Field(default="", description="ID del recurso a leer.")
-    investigate_reason: str = Field(default="", description="Obligatorio si action=INVESTIGATE. ¿Por qué buscas esta información?")
-    error_summary: str = Field(..., description="Resumen del síntoma visible.")
-    evidence: str = Field(..., description="Evidencia concreta (ej. log).")
-    possible_causes: list[PossibleCause] = Field(..., description="Lista de múltiples hipótesis probables con niveles de confianza y fixes.")
-
-class NormalIntent(BaseModel):
-    reasoning_summary: str = Field(..., description="Breve resumen (máx 2 líneas) de tu deducción lógica estructurada.")
-    action: str = Field(..., description="Puede ser: HEALTH_CHECK, INVESTIGATE, ACTION_REQUIRED, STATE_MACHINE_INPUT, GENERAL_CHAT")
-    reply: str = Field(..., description="La respuesta que Khai le dará al usuario en Telegram")
-    extracted_goal: str = Field(default="", description="Si la acción es ACTION_REQUIRED, detalla el objetivo y adjunta un bloque MANIFEST JSON final (purpose hiper-detallado).")
-    investigate_target: str = Field(default="", description="Si la acción es INVESTIGATE, indica el ID del recurso a observar (ej. 'core_logs').")
-    investigate_reason: str = Field(default="", description="Obligatorio si action=INVESTIGATE. ¿Por qué buscas esta información?")
-
-class MindResponse(BaseModel):
-    is_failure_analysis: bool = Field(..., description="True si reaccionas a un fallo (usar failure_analysis_intent), False para operación normal (usar normal_intent).")
-    normal_intent: Optional[NormalIntent] = Field(default=None)
-    failure_analysis_intent: Optional[FailureAnalysisIntent] = Field(default=None)
 
 class Mind:
-    """
-    Khai: el enrutador central de la mente.
-    Analiza intenciones, filtra comandos y se comunica directamente con el usuario.
-    """
-    
-    def __init__(self, llm: LLMManager, memory: MemoryEngine):
-        self.llm = llm
-        self.memory = memory
-        
-    def parse_static_commands(self, message: str) -> Optional[Dict[str, str]]:
-        """Absorbe comandos estáticos (costo cero tokens) liberando al Orchestrator."""
-        msg_lower = message.lower().strip()
-        
-        if msg_lower in ["health", "/health", "status", "/status"]:
-            return {"action": "HEALTH_CHECK", "reply": ""}
-        if msg_lower in ["fastbeat", "/fastbeat"]:
-            return {"action": "FASTBEAT", "reply": ""}
-        if msg_lower in ["slowbeat", "/slowbeat", "diagnosticar", "diagnostico"]:
-            return {"action": "SLOWBEAT", "reply": ""}
-        if msg_lower.startswith("/logs "):
-            container = message.replace("/logs ", "").strip()
-            return {"action": "LOGS", "reply": "", "target": container}
-        if msg_lower in ["/ps", "contenedores", "dockers"]:
-            return {"action": "PS", "reply": ""}
-        if msg_lower in ["limpiar", "/limpiar", "cleanup", "/cleanup"]:
-            return {"action": "CLEANUP", "reply": ""}
-            
-        return None
-        
-    def process_message(self, message: str) -> Dict[str, str]:
-        """
-        Analiza el mensaje del usuario y devuelve una acción y una respuesta.
-        """
-        # Validar si es un comando estático de costo 0
-        static_intent = self.parse_static_commands(message)
-        if static_intent:
-            return static_intent
-            
-        # Recuperar las últimas interacciones verificadas para el contexto
-        chat_history = self.memory.get_chat_history(limit=12)
+    def __init__(self, llm, memory):
+        self.llm, self.memory = llm, memory
 
-        personality_prompt = self.memory.get_system_prompt()
-        schema = MindResponse.model_json_schema()
-        
-        prompt = f"""
-{personality_prompt}
-
-Estás actuando como el Router Central de Mind.
-
-=== HISTORIAL RECIENTE DE CONVERSACIÓN ===
-{chat_history}
-==========================================
-
-Recibes el siguiente NUEVO mensaje del usuario (o un evento de sistema):
-"{message}"
-
-Debes clasificar la intención de este mensaje en una de estas 5 categorías:
-1. HEALTH_CHECK: Pide revisar el estado del servidor o sistemas.
-2. INVESTIGATE: Una skill ha fallado por un problema ambiental (ej. timeout, error de red) o necesitas evidencia externa que no posees.
-3. ACTION_REQUIRED: Pide crear/ejecutar una skill, o debes corregir un error basándote en tu Failure Analysis.
-4. STATE_MACHINE_INPUT: Está dando una respuesta corta a una pregunta anterior.
-5. GENERAL_CHAT: Preguntas teóricas, charla general, relatos o conversación abierta.
-
-Tu respuesta DEBE ser EXCLUSIVAMENTE un objeto JSON válido que respete este JSON Schema:
-{json.dumps(schema, indent=2)}
-
-REGLAS PARA EL JSON:
-- DEBES setear 'is_failure_analysis'. Si el mensaje indica que hubo un ERROR en una tarea, usa 'failure_analysis_intent'. De lo contrario, usa 'normal_intent'.
-- En 'failure_analysis_intent', OBLIGATORIAMENTE debes llenar 'possible_causes' con MÚLTIPLES hipótesis de la causa del fallo con diferentes niveles de confianza (ej. API caída 0.7, URL mal 0.2).
-- INVESTIGATE: Si decides investigar, debes proporcionar 'investigate_target' Y OBLIGATORIAMENTE 'investigate_reason' (¿qué buscas y por qué?).
-- MANIFEST RICO: Si la acción es ACTION_REQUIRED, 'extracted_goal' DEBE terminar con un bloque [MANIFEST] en formato JSON. IMPORTANTE: El campo 'purpose' del manifest DEBE SER MUY DETALLADO (ej. "Calculadora de divisas que consulta a una API externa REST"). No uses propósitos cortos o Pixy lo rechazará.
-- CONCISIÓN: Sé directo y conciso en 'reply' (1 o 2 oraciones para confirmaciones operativas; si es GENERAL_CHAT y el usuario pide un relato, historia o desarrollo extenso, cumple con la extensión solicitada sin relleno robótico ni sermones).
-- PROHIBIDO EL USO DE EMOTICONES O EMOJIS: Nunca uses emoticones ni emojis en 'reply' ni en ninguna parte del JSON.
-- ¡Devuelve el raw JSON válido directamente!
-"""
+    def process_message(self, message, task_context=None, persist=True,
+                        conversation_history=None, questions=None):
+        history = (conversation_history if conversation_history is not None
+                   else self.memory.get_chat_history(limit=12))
+        prompt = (
+            self.memory.get_system_prompt()
+            + "\nEres Mind, el unico router conversacional de Khai. "
+            "Devuelve un AssistantTurn JSON: reply para conversar o UNA tool_call para actuar. "
+            "No publiques promesas de acciones en reply. Una consulta de datos externos actuales "
+            "requiere start_task, aunque este formulada como pregunta. Recupera el objetivo "
+            "completo del contexto ante instrucciones como 'Hazlo'. "
+            "Un saludo conserva los trabajos existentes y no los reanuda ni declara su exito. "
+            "Una peticion independiente usa start_task. Un cambio al trabajo actual usa "
+            "revise_task con su task_id y goal_revision exactos. Nunca inventes IDs. "
+            "El campo change debe copiar literalmente el mensaje nuevo del propietario. "
+            "Para consultar o cancelar un objetivo usa get_task_status o cancel_task. "
+            "Si el objetivo de una referencia es ambiguo, pregunta con reply antes de actuar. "
+            "answer_question solo selecciona una pregunta realmente entregada y su respuesta "
+            "debe copiar literalmente el mensaje del propietario; no inventes aprobaciones. "
+            "Para salud interna usa get_system_status. Las credenciales solo ingresan por "
+            "los comandos privados de Voice, nunca por parametros de herramientas. "
+            "El historial no acredita ejecucion; el estado y los recibos son la fuente de verdad. "
+            "No uses emojis. Responde a saludos en una o dos oraciones."
+            + "\nEsquema: " + json.dumps(AssistantTurn.model_json_schema(), ensure_ascii=False)
+            + "\nConversacion: " + json.dumps(history, ensure_ascii=False)
+            + "\nObjetivos: " + json.dumps(task_context or [], ensure_ascii=False)
+            + "\nPreguntas entregadas pendientes: " + json.dumps(questions or [], ensure_ascii=False)
+            + "\nMensaje nuevo: " + json.dumps(message, ensure_ascii=False)
+        )
         try:
-            result_text = self.llm.generate_content(prompt, response_format={"type": "json_object"})
-            
-            if result_text.startswith("```json"):
-                result_text = result_text[7:]
-            if result_text.startswith("```"):
-                result_text = result_text[3:]
-            if result_text.endswith("```"):
-                result_text = result_text[:-3]
-                
-            response = self._validate_response(result_text.strip())
-            
-            intent = response.failure_analysis_intent if response.is_failure_analysis else response.normal_intent
-            if not intent:
-                return {
-                    "action": "GENERAL_CHAT",
-                    "reply": "Error interno: Falló la selección de intent.",
-                    "error": "Falló la selección de intent",
-                }
-
-            dolphin_ctrl = getattr(self.llm, 'dolphin', None)
-            if dolphin_ctrl is not None and intent.reply:
-                banner = dolphin_ctrl.consume_transition_banner(dolphin_ctrl.get_active_mode())
-                if banner and not intent.reply.startswith('[Mode ='):
-                    intent.reply = banner + intent.reply
-            
-            # Persistir turno en memoria únicamente tras obtener respuesta válida
-            self.memory.append_long_term("user_chat", message)
-            if intent.reasoning_summary:
-                self.memory.append_long_term("system_msg", f"[Khai Reasoning]: {intent.reasoning_summary}")
-            if intent.reply:
-                self.memory.append_long_term("khai_chat", intent.reply)
-            
-            # Formatear el dict clásico
-            out_dict = {
-                "internal_monologue": intent.reasoning_summary,
-                "action": intent.action,
-                "reply": intent.reply,
-                "extracted_goal": intent.extracted_goal,
-                "investigate_target": intent.investigate_target,
-                "investigate_reason": intent.investigate_reason,
-            }
-            
-            if response.is_failure_analysis and response.failure_analysis_intent:
-                out_dict["failure_analysis"] = {
-                    "error_summary": response.failure_analysis_intent.error_summary,
-                    "evidence": response.failure_analysis_intent.evidence,
-                    "possible_causes": [pc.model_dump() for pc in response.failure_analysis_intent.possible_causes]
-                }
-            else:
-                out_dict["failure_analysis"] = None
-                
-            return out_dict
-            
+            raw = self.llm.generate_content(prompt, response_format={"type": "json_object"})
+            turn = self._validate_response(raw)
+            intent = turn.intent()
+            if persist:
+                self.memory.append_long_term("user_chat", message)
+                if turn.reply:
+                    self.memory.append_long_term("khai_chat", turn.reply)
+            return intent
         except BudgetExceeded:
             raise
-        except ValidationError as ve:
-            logger.error("Error de validación estructurada en Mind: %s", ve)
-            return {
-                "action": "GENERAL_CHAT",
-                "reply": "No pude interpretar la respuesta del proveedor. Reformularé la solicitud antes de fallar.",
-                "error": f"Validación estructurada fallida: {ve}",
-            }
-        except Exception as e:
-            logger.error("Error procesando mensaje en Mind: %s", e)
-            return {
-                "action": "GENERAL_CHAT",
-                "reply": f"Error de IA: {str(e)}",
-                "error": str(e),
-            }
+        except Exception as exc:
+            logger.warning('No se pudo interpretar el turno (%s)', type(exc).__name__)
+            return {'action': 'ROUTING_ERROR', 'reply': 'No pude interpretar el mensaje; no ejecute ninguna accion.',
+                    'error': type(exc).__name__}
 
     @staticmethod
-    def _validate_response(raw: str) -> MindResponse:
-        cleaned = (raw or "").strip()
-        try:
-            return MindResponse.model_validate_json(cleaned)
-        except ValidationError as original:
-            repaired = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', cleaned)
-            if repaired != cleaned:
-                try:
-                    return MindResponse.model_validate_json(repaired)
-                except ValidationError:
-                    pass
-            candidate = cleaned
-            if not candidate.startswith('{') and '{' in candidate and '}' in candidate:
-                candidate = candidate[candidate.find('{'):candidate.rfind('}') + 1]
-            try:
-                data = json.loads(candidate)
-            except Exception:
-                data = None
-            if isinstance(data, dict):
-                if 'normal_intent' in data or 'failure_analysis_intent' in data:
-                    if 'is_failure_analysis' not in data:
-                        data['is_failure_analysis'] = bool(data.get('failure_analysis_intent'))
-                    return MindResponse.model_validate(data)
-                valid_actions = {'HEALTH_CHECK', 'INVESTIGATE', 'ACTION_REQUIRED', 'STATE_MACHINE_INPUT', 'GENERAL_CHAT'}
-                action = str(data.get('action') or 'GENERAL_CHAT').upper().strip()
-                if action not in valid_actions:
-                    action = 'GENERAL_CHAT'
-                reply = (data.get('reply') or data.get('response') or data.get('text')
-                         or data.get('message') or data.get('answer') or '')
-                if not reply and action == 'GENERAL_CHAT':
-                    str_vals = [v.strip() for k, v in data.items()
-                                if k not in {'action', 'reasoning_summary', 'is_failure_analysis'}
-                                and isinstance(v, str) and v.strip()]
-                    if str_vals:
-                        reply = "\n\n".join(str_vals)
-                if reply or data.get('action'):
-                    return MindResponse(
-                        is_failure_analysis=False,
-                        normal_intent=NormalIntent(
-                            reasoning_summary=str(data.get('reasoning_summary') or 'Respuesta estructurada directa.'),
-                            action=action,
-                            reply=str(reply),
-                            extracted_goal=str(data.get('extracted_goal') or ''),
-                            investigate_target=str(data.get('investigate_target') or ''),
-                            investigate_reason=str(data.get('investigate_reason') or ''),
-                        ),
-                    )
-            if cleaned and not cleaned.startswith('{'):
-                return MindResponse(
-                    is_failure_analysis=False,
-                    normal_intent=NormalIntent(
-                        reasoning_summary='Respuesta en texto directo adaptada a GENERAL_CHAT.',
-                        action='GENERAL_CHAT',
-                        reply=cleaned,
-                    ),
-                )
-            raise original
+    def _validate_response(raw):
+        cleaned = raw.strip()
+        if cleaned.startswith('```'):
+            cleaned = '\n'.join(cleaned.splitlines()[1:])
+            if cleaned.rstrip().endswith('```'):
+                cleaned = cleaned.rstrip()[:-3]
+        return AssistantTurn.model_validate_json(cleaned.strip())

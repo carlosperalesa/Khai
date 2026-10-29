@@ -16,14 +16,19 @@ class Rules:
             'CREATE TABLE IF NOT EXISTS rule_commands(source TEXT PRIMARY KEY, rule_id TEXT)',
         ]], component='pixy-rules')
 
-    def propose(self, content, source, rule_type='guidance'):
+    def propose(self, content, source, rule_type='guidance', conn=None):
         if rule_type != 'guidance' or not isinstance(content,str) or not 1 <= len(content) <= 8000:
             raise ValueError('Only bounded advisory guidance can be proposed')
         rid = uuid.uuid4().hex
-        with connection(self.path) as conn:
+        now = time.time()
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        if conn is not None:
             conn.execute('INSERT INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                (rid,rule_type,content,source,1,'proposed',time.time(),None,None,None,None,
-                 hashlib.sha256(content.encode()).hexdigest()))
+                (rid, rule_type, content, source, 1, 'proposed', now, None, None, None, None, chash))
+        else:
+            with connection(self.path) as c:
+                c.execute('INSERT INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (rid, rule_type, content, source, 1, 'proposed', now, None, None, None, None, chash))
         return rid
 
     def approve(self, rid, owner, replaces=None):
@@ -53,22 +58,31 @@ class Rules:
         if not owner:
             raise PermissionError('Explicit owner approval required')
         with connection(self.path) as conn:
-            previous_command = conn.execute('SELECT rule_id FROM rule_commands WHERE source=?',(owner,)).fetchone()
-            if previous_command:
-                return previous_command[0]
-            row = conn.execute('SELECT * FROM rules WHERE rule_id=? AND status="active"',(rid,)).fetchone()
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM rules WHERE rule_id=? AND status="active"', (rid,)).fetchone()
             if not row:
                 raise ValueError('Rule is not active')
-            previous = conn.execute('SELECT * FROM rules WHERE rule_id=?',(row['replaced_rule_id'],)).fetchone()
-        if previous:
-            new = self.propose(previous['content'],owner)
-            with connection(self.path) as conn:
-                conn.execute('UPDATE rules SET rollback_of=? WHERE rule_id=?',(rid,new))
-            self.approve(new,owner,rid)
-            return new
-        with connection(self.path) as conn:
-            conn.execute('UPDATE rules SET status="rolled_back" WHERE rule_id=?',(rid,))
-            conn.execute('INSERT INTO rule_commands VALUES (?,?)',(owner,rid))
+            now = time.time()
+            if row['replaced_rule_id']:
+                previous = conn.execute('SELECT * FROM rules WHERE rule_id=?', (row['replaced_rule_id'],)).fetchone()
+                if not previous:
+                    raise ValueError('Prior rule version not found')
+                new_id = uuid.uuid4().hex
+                content = previous['content']
+                chash = hashlib.sha256(content.encode()).hexdigest()
+                version = row['version'] + 1
+                conn.execute('UPDATE rules SET status="replaced" WHERE rule_id=?', (rid,))
+                conn.execute(
+                    'INSERT INTO rules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (new_id, 'guidance', content, owner, version, 'active',
+                     now, owner, now, rid, rid, chash)
+                )
+                conn.execute('INSERT OR REPLACE INTO rule_commands VALUES (?,?)', (owner, new_id))
+                return new_id
+            else:
+                conn.execute('UPDATE rules SET status="rolled_back" WHERE rule_id=?', (rid,))
+                conn.execute('INSERT OR REPLACE INTO rule_commands VALUES (?,?)', (owner, rid))
+                return rid
 
     def get(self, rid):
         with connection(self.path) as conn:

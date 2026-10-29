@@ -727,7 +727,7 @@ Código anterior: {str(task.get('code', ''))}
             raise PermissionError('Solo Heart emite órdenes de recuperación')
         case_id = validate_case_id(header['case_id'])
         core = validate_plan(order['plan'])
-        expected_plan = {'target','steps','capabilities'} | ({'task_id'} if core['target'] == 'task' else set())
+        expected_plan = set(core)
         if set(order['plan']) != expected_plan:
             raise ValueError('La orden contiene campos fuera del contrato')
         h = plan_hash(case_id,core)
@@ -737,6 +737,13 @@ Código anterior: {str(task.get('code', ''))}
 
     def _authorization_terms(self, header, case_id, core, h):
         return (header['authorization_id'],header['nonce'],case_id,core['capabilities'],core['target'],h)
+
+    def remediate_task(self, order, transition):
+        """Hand dispatches an exact grant; Coordinator supplies the task transition."""
+        header, case_id, core, h = self._recovery_order(order)
+        if core['target'] != 'task' or self.authorization_port is None or not header.get('order_id'):
+            raise PermissionError('La reparación requiere una orden de tarea de Pixy para Hand')
+        return self.authorization_port.dispatch_task_recovery(header, core, transition)
 
     def _recovery_row(self, case_id):
         with connection(self.db) as conn:

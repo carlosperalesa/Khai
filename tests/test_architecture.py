@@ -192,7 +192,9 @@ class PolicyTests(ArchitectureFixture):
         dreams = Dreams(self.root/'dreams.sqlite3',Rules(self.root/'rules.sqlite3'),self.events)
         task = dict(id='task',execution_id='run1',skill_name='calculate',version_id='v1',artifact_hash='a'*64)
         self.assertTrue(dreams.record(task,True,{'owner':'user'}))
-        self.assertFalse(dreams.record(task,False,{'owner':'user'}))
+        self.assertFalse(dreams.record(task,True,{'owner':'user'}))
+        with self.assertRaises(ValueError):
+            dreams.record(task,False,{'owner':'user'})
         dreams.record(dict(task,execution_id='run2',version_id='v2'),False,{})
         self.assertEqual(dreams.metrics('calculate','v1')['success_rate'],1)
         self.assertEqual(dreams.metrics('calculate','v2')['success_rate'],0)
@@ -336,7 +338,8 @@ class RuntimeAndGatewayTests(ArchitectureFixture):
         with self.assertRaises(ValueError): senses.listen('shell')
 
     def test_gateway_receipt_prevents_replaying_uncertain_side_effect(self):
-        gateway = ExternalGateway(self.root/'missing.yaml',Mock(),db=self.root/'voice.sqlite3')
+        gateway = ExternalGateway(self.root/'missing.yaml',Mock(),db=self.root/'voice.sqlite3',
+                                  execution_authority=Mock())
         gateway.request = Mock(return_value={'content_type':'application/json','body':b'{"ok":true}'})
         task = {'id':'task1','execution_id':'run1','deadline':time.time()+60}
         request = {'service':'test','operation':'post','params':{}}
@@ -371,22 +374,25 @@ class IntegrationTests(unittest.TestCase):
                 proxy.submit.return_value = {'status':'queued'}
                 proxy.get.return_value = {'status':'finished','returncode':0,'stdout':'42'}
                 c = Coordinator(manager,proxy)
-                c.requirements.questions = Mock(return_value=[])
-                manager.coordinator = c
-                task = c.intake('telegram:1','/make compute [MANIFEST] '+json.dumps(MANIFEST))
-                for _ in range(8): c.tick()
-                task = c.store.get(task['id'])
-                self.assertEqual(task['state'],'UNVERIFIED')
-                self.assertEqual(manager.hand.version(task['version_id'])['status'],'draft')
-                self.assertFalse(task['payload']['network'])
-                c.verify(task['id'],task['execution_id'],True,'telegram:2')
-                c.tick()
-                self.assertEqual(c.store.get(task['id'])['state'],'COMPLETED')
-                self.assertEqual(manager.hand.version(task['version_id'])['status'],'one_off')
-                self.assertEqual(manager.dreams.metrics(task['skill_name'],task['version_id'])['success_rate'],1)
-                with connection(manager.events.path) as conn:
-                    self.assertGreater(conn.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
-
+                try:
+                    c.requirements.questions = Mock(return_value=[])
+                    manager.coordinator = c
+                    task = c.intake('telegram:1','/make compute [MANIFEST] '+json.dumps(MANIFEST))
+                    for _ in range(8): c.tick()
+                    task = c.store.get(task['id'])
+                    self.assertEqual(task['state'],'UNVERIFIED')
+                    self.assertEqual(manager.hand.version(task['version_id'])['status'],'draft')
+                    self.assertFalse(task['payload']['network'])
+                    c.verify(task['id'],task['execution_id'],True,'telegram:2')
+                    c.tick()
+                    self.assertEqual(c.store.get(task['id'])['state'],'COMPLETED')
+                    self.assertEqual(manager.hand.version(task['version_id'])['status'],'one_off')
+                    self.assertEqual(manager.dreams.metrics(task['skill_name'],task['version_id'])['success_rate'],1)
+                    with connection(manager.events.path) as conn:
+                        self.assertGreater(conn.execute('SELECT COUNT(*) FROM events').fetchone()[0],0)
+                finally:
+                    c._llm_executor.shutdown(wait=True, cancel_futures=True)
+                    c._mailbox_executor.shutdown(wait=True, cancel_futures=True)
 
 if __name__=='__main__':
     unittest.main()

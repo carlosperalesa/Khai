@@ -72,7 +72,8 @@ class ModuleManager:
                          service_proposals=self.hand_services)
         self.hand.manager = self
         self.gateway = ExternalGateway(Path(config_dir)/'gateways.yaml',self.secrets,self.events,
-                                       self.data_dir/'voice'/'voice.sqlite3',registry=self.voice_services)
+                                       self.data_dir/'voice'/'voice.sqlite3',registry=self.voice_services,
+                                       execution_authority=self.control.voice_execution)
         encoder = None
         backend, model = os.getenv('KHAI_EMBED_BACKEND'), os.getenv('KHAI_EMBED_MODEL')
         if backend and model:

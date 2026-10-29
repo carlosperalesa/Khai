@@ -13,7 +13,8 @@ from urllib.parse import urlsplit
 import re
 import requests
 
-from app.pixy.budget import current_budget
+from app.pixy.budget import current_budget, current_goal_revision, current_question_revision, StaleGoalRevision
+from app.mind.conversation import ConversationStore, ReplyResult, current_turn
 from app.pixy.control import ControlStore, InstanceLock, BudgetExceeded, TERMINAL, INITIAL_TASK_BUDGET
 from app.voice.runtime.contract import digest, manifest_from_request, proxy_url, proxy_headers, skill_metadata
 from app.mind.verifier import verify_result
@@ -109,17 +110,62 @@ class Coordinator:
         self._notifications = queue.Queue()
         self.requirements = RequirementsPlanner(getattr(manager, 'llm', None))
         self.revision_planner = RevisionPlanner(getattr(manager, 'llm', None))
+        session_db = (getattr(manager, 'control_db', None) or getattr(self.store, 'db_path', None)
+                      or manager.state.db_path)
+        self.conversations = ConversationStore(session_db)
+        mailbox = getattr(manager, 'voice_mailbox', None)
+        if mailbox is not None:
+            mailbox.on_delivered = self._notification_delivered
 
     def notify(self, text):
         if not text or not str(text).strip():
             return
         cleaned = re.sub(r'^(task_[a-f0-9]{32}|run_[a-f0-9]{32}|auth_[a-f0-9]{32}|case-[a-f0-9]{16,32}):\s*', '', str(text).strip())
+        dolphin = getattr(self.manager, 'dolphin', None)
+        if dolphin is not None and not cleaned.startswith('[Mode ='):
+            banner = dolphin.consume_transition_banner(dolphin.get_active_mode())
+            if isinstance(banner, str):
+                cleaned = banner + cleaned
+        context = current_turn.get() or {}
+        goal = current_goal_revision.get()
+        routing_task = self.store.get(goal[0]) if goal else None
+        if goal and routing_task and routing_task.get('goal_revision', 0) != goal[1]:
+            return
+        task_id = ((routing_task.get('response_task_id') or goal[0]) if goal
+                   else context.get('task_id'))
+        task = self.store.get(task_id) if task_id else None
+        sid = (task or {}).get('conversation_id') or context.get('conversation_id')
+        metadata = {'conversation_id': sid, 'task_id': task_id}
+        if sid:
+            kinds = {'WAITING_SCOPE': 'scope', 'WAITING_INPUT_CONFIRMATION': 'inputs',
+                     'WAITING_CREATION_APPROVAL': 'creation', 'WAITING_APPROVAL': 'execution',
+                     'WAITING_SERVICE_APPROVAL': 'service', 'UNVERIFIED': 'review',
+                     'WAITING_FEEDBACK': 'review', 'WAITING_EFFECT_DETAIL': 'effect_detail',
+                     'WAITING_EFFECT_DECISION': 'effect_decision'}
+            if task and task['state'] in kinds:
+                metadata['question_id'] = self.conversations.question(
+                    sid, kinds[task['state']], task_id, task['revision'], task['state'])
+            elif task and task.get('recovery_authorization_id'):
+                auth = self.manager.pixy.authorizations.get(task['recovery_authorization_id'])
+                if auth and auth['status'] == 'pending':
+                    metadata['question_id'] = self.conversations.question(
+                        sid, 'authorization', auth['authorization_id'], auth['plan_hash'], 'pending')
+            elif context.get('source'):
+                auths = (self.manager.pixy.authorizations.pending_all()
+                         if getattr(getattr(self.manager, 'pixy', None), 'authorizations', None) else [])
+                for auth in reversed(auths):
+                    if auth.get('requested_by') == context['source']:
+                        metadata['question_id'] = self.conversations.question(
+                            sid, 'authorization', auth['authorization_id'], auth['plan_hash'], 'pending')
+                        break
         mailbox = getattr(self.manager, 'voice_mailbox', None)
         if mailbox is not None:
-            mailbox.enqueue(cleaned)
+            delivery = mailbox.enqueue(cleaned, metadata=metadata)
+            if metadata.get('question_id'):
+                self.conversations.attach(metadata['question_id'], delivery)
             self._schedule_mailbox()
             return
-        self._notifications.put(cleaned)
+        self._notifications.put((cleaned, metadata))
         self._schedule_mailbox()
 
     def _deliver_notifications(self):
@@ -133,14 +179,26 @@ class Coordinator:
             return
         while True:
             try:
-                text = self._notifications.get_nowait()
+                text, metadata = self._notifications.get_nowait()
             except queue.Empty:
                 return
             try:
+                message_ids = []
                 for offset in range(0, min(len(text), 64000), 3900):
-                    self.manager.telegram.send_message(text[offset:offset + 3900], parse_mode=None)
+                    receipt = self.manager.telegram.send_message(text[offset:offset + 3900], parse_mode=None)
+                    if isinstance(receipt, dict) and type((receipt.get('result') or {}).get('message_id')) is int:
+                        message_ids.append(receipt['result']['message_id'])
+                if metadata.get('conversation_id'):
+                    self.conversations.delivered(metadata['conversation_id'], 'delivery-' + uuid.uuid4().hex,
+                        text, metadata.get('task_id'), metadata.get('question_id'), message_ids)
             except Exception:
                 logger.warning('No se pudo notificar; el estado durable permanece disponible')
+
+    def _notification_delivered(self, row, message_ids):
+        metadata = json.loads(row['metadata'])
+        if metadata.get('conversation_id'):
+            self.conversations.delivered(metadata['conversation_id'], row['delivery_id'], row['text'],
+                metadata.get('task_id'), metadata.get('question_id'), message_ids)
 
     def _schedule_mailbox(self):
         if self._mailbox_job is None or self._mailbox_job.done():
@@ -148,6 +206,7 @@ class Coordinator:
 
     def _run_task(self, task):
         token = current_budget.set(lambda: self.store.consume(task['id'], 'llm_calls'))
+        goal_token = current_goal_revision.set((task['id'], task.get('goal_revision', 0)))
         try:
             if time.time() >= task['deadline'] and task['state'] != 'CANCELLING':
                 if task.get('execution_id'):
@@ -156,19 +215,26 @@ class Coordinator:
                     self.store.update(task['id'], state='EXHAUSTED')
                 return
             self.advance(task)
+        except StaleGoalRevision:
+            logger.info('Resultado obsoleto descartado para %s', task['id'])
         except BudgetExceeded as exc:
-            self.store.update(task['id'], state='EXHAUSTED', error=str(exc))
-            self.notify(f"{task['id']}: Presupuesto agotado ({str(exc)}). Registrado para diagnóstico y remediación de Heart.")
+            try:
+                self.store.update(task['id'], state='EXHAUSTED', error=str(exc))
+                self.notify(f"{task['id']}: Presupuesto agotado ({str(exc)}). Registrado para diagnóstico y remediación de Heart.")
+            except StaleGoalRevision:
+                pass
         except (requests.RequestException, ConnectionError) as exc:
             self.store.event(task['id'], 'transport_error', {'type': type(exc).__name__})
         except Exception as exc:
             current = self.store.get(task['id'])
-            if current['state'] not in {'CANCELLED', 'CANCELLING'}:
+            if (current['state'] not in {'CANCELLED', 'CANCELLING'}
+                    and current.get('goal_revision', 0) == task.get('goal_revision', 0)):
                 self.store.update(task['id'], state='FAILED', error=str(exc)[:1000])
                 self.notify(f"{task['id']}: detenido: {str(exc)[:700]}")
                 logger.exception('Error de coordinación')
         finally:
             current_budget.reset(token)
+            current_goal_revision.reset(goal_token)
 
     def _collect_llm_jobs(self):
         for task_id, future in list(self._llm_jobs.items()):
@@ -183,8 +249,197 @@ class Coordinator:
     def intake(self, source, text, trace_id=None):
         tid = trace_id or get_trace_id() or new_trace_id()
         direct = str(text).lstrip().startswith(('/make ', '/do '))
-        return self.store.create(source, text, trace_id=tid,
+        context = current_turn.get() or self.conversations.turn(source) or {}
+        task = self.store.create(source, text, trace_id=tid,
+                                 conversation_id=context.get('conversation_id'),
+                                 kind='objective' if direct else 'turn',
                                  input_confirmation_required=not direct)
+        self.conversations.bind(source, task['id'])
+        return task
+
+    def handle_reply(self, source, text, conversation_id, reply_to=None):
+        """Resolve one delivered question, never run successive reply handlers."""
+        words = text.strip().split()
+        decision_words = {'y', 'yes', 'sí', 'si', 'n', 'no', 'confirmo', 'confirmar'}
+        pending = self.conversations.pending(conversation_id)
+        explicit = next((q for q in pending if q['id'] in words or q['subject_id'] in words), None)
+        if reply_to is not None:
+            by_message = next((q for q in pending if reply_to in json.loads(q['message_ids'])), None)
+            if explicit and by_message and explicit['id'] != by_message['id']:
+                return ReplyResult(True, 'El mensaje señala dos preguntas distintas. Responde a la que quieres resolver.')
+            explicit = by_message
+            if explicit is None:
+                if self.conversations.question_for_message(conversation_id, reply_to):
+                    return ReplyResult(True, 'Esa pregunta ya no está pendiente; no apliqué la respuesta.')
+                if words and words[0].casefold().strip('.!') in decision_words:
+                    return ReplyResult(True, 'El mensaje al que respondes no tiene una decisión pendiente registrada.')
+                return ReplyResult(False)
+        decision = bool(words and len(words) <= 2 and words[0].casefold().strip('.!') in decision_words)
+        bare = decision and len(words) == 1
+        if decision and len(words) == 2 and explicit is None:
+            return ReplyResult(True, 'No encontré una pregunta enviada pendiente con esa referencia.')
+        if bare and explicit is None and self.conversations.uncertain_question(conversation_id):
+            return ReplyResult(True, 'Hay una pregunta cuya entrega no pude confirmar. Responde al mensaje concreto o consulta /p antes de aprobar.')
+        if not explicit and not bare:
+            return ReplyResult(False)
+        if not pending:
+            return ReplyResult(True, 'No hay una pregunta enviada pendiente de respuesta.')
+        question = explicit or pending[0]
+        answer = ' '.join(word for word in words if word not in {question['id'], question['subject_id']})
+        return self.answer_question(source, question, answer, conversation_id)
+
+    def answer_question(self, source, question, answer, conversation_id):
+        if (question['conversation_id'] != conversation_id or question['status'] != 'open'):
+            return ReplyResult(True, 'La pregunta ya no está pendiente.')
+        if self.store.has_command(source):
+            return ReplyResult(True, 'La decisión ya quedó registrada.')
+        kind, subject = question['kind'], question['subject_id']
+        if kind == 'authorization':
+            auth = self.manager.pixy.authorizations.get(subject)
+            if not auth or auth['status'] != 'pending' or auth['plan_hash'] != question['revision']:
+                self.conversations.stale(question['id'])
+                return ReplyResult(True, 'La autorización cambió o venció; no apliqué la respuesta.')
+            if answer.casefold().strip(' .!') not in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
+                return ReplyResult(True, 'Responde sí o no a la propuesta de Pixy.')
+            reply = self.manager.pixy.direct_response(answer.strip(' .!') + ' ' + subject, source=source)
+            self.conversations.answered(question['id'], source)
+            self.conversations.complete(source, {'question_id': question['id'], 'result': reply})
+            return ReplyResult(True, reply)
+        task = self.store.get(subject)
+        if (not task or task.get('conversation_id') != conversation_id
+                or task['state'] != question['state'] or str(task['revision']) != question['revision']
+                or time.time() >= task['deadline']):
+            self.conversations.stale(question['id'])
+            return ReplyResult(True, 'El objetivo o sus datos cambiaron; no apliqué una respuesta obsoleta.')
+        self.conversations.bind(source, subject)
+        context = current_turn.get()
+        if context is not None:
+            context['task_id'] = subject
+        token = current_question_revision.set((subject, task['revision'], question['id']))
+        try:
+            if kind in {'creation', 'execution', 'service'}:
+                normalized = answer.casefold().strip(' .!')
+                if normalized not in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
+                    return ReplyResult(True, 'Responde sí o no; para cambiar el objetivo describe el cambio.', subject)
+                approve = normalized in {'y', 'yes', 'sí', 'si'}
+                if kind == 'creation':
+                    reply = self.manager.pixy.direct_response(('y ' if approve else 'n ') + subject, source=source)
+                elif kind == 'execution':
+                    operation = (task.get('approval') or {}).get('operation')
+                    if operation and set(operation) != {'action', 'details'}:
+                        return ReplyResult(True, 'Esta operación necesita la orden de recuperación de Pixy; consulta /p.', subject)
+                    self.approval(subject, task['approval']['token'], approve, source)
+                    reply = 'Ejecución autorizada.' if approve else 'Ejecución cancelada.'
+                else:
+                    self.manager.pixy_services.decide(task['service_proposal'], approve, decided_by=source)
+                    reply = 'Servicio autorizado.' if approve else 'Servicio rechazado.'
+            else:
+                handler = {'scope': self.accept_scope_reply, 'inputs': self.accept_input_confirmation,
+                           'review': self.accept_review_reply, 'effect_detail': self.accept_effect_detail,
+                           'effect_decision': self.accept_effect_decision}[kind]
+                reply = handler(source, subject + ' ' + answer)
+            after = self.store.get(subject)
+            if after['revision'] != task['revision'] or kind == 'service':
+                self.conversations.answered(question['id'], source)
+                self.conversations.complete(source, {'question_id': question['id'], 'task_id': subject,
+                                                       'state': after['state'], 'result': reply})
+            return ReplyResult(True, reply, subject)
+        except StaleGoalRevision:
+            return ReplyResult(True, 'La pregunta cambió antes de aplicar tu respuesta.', subject)
+        finally:
+            current_question_revision.reset(token)
+
+    def dispatch_tool(self, task, call):
+        """Validated model calls use the same transitions as deterministic replies."""
+        source, sid = task['source'], task.get('conversation_id')
+        previous = self.conversations.turn(source)
+        if previous and previous['status'] == 'completed':
+            return json.loads(previous['receipt']).get('result')
+        call_id = self.conversations.record_call(source, call)
+        def finish(reply, status='completed'):
+            self.conversations.complete(source, {'call_id': call_id, 'tool_call': call,
+                                                   'status': status, 'result': reply})
+            return reply
+        name, args = call['name'], call['arguments']
+        if name == 'answer_question':
+            if args['answer'].strip() != task['request'].strip():
+                return finish('Necesito tu respuesta literal a la pregunta; no inferiré una aprobación.', 'rejected')
+            question = self.conversations.get_question(args['question_id'], sid)
+            if not question:
+                return finish('No encontré esa pregunta en esta conversación.', 'rejected')
+            if previous and previous.get('reply_to') is not None and previous['reply_to'] not in json.loads(question['message_ids']):
+                return finish('La respuesta no corresponde al mensaje al que contestaste.', 'rejected')
+            result = self.answer_question(source, question, args['answer'], sid)
+            reply = result.text
+        elif name == 'get_system_status':
+            reply = json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False)
+        else:
+            target = self.store.get(args['task_id'])
+            if not target or target.get('conversation_id') != sid or target.get('kind') == 'turn':
+                return finish('Ese objetivo no pertenece a esta conversación.', 'rejected')
+            if name == 'get_task_status':
+                services = (self.manager.voice_services.active_services()
+                            if getattr(self.manager, 'voice_services', None) else {})
+                hosts = []
+                for ref in target.get('services', []):
+                    spec = services.get(ref['service_id'], {}).get('operations', {}).get(ref['operation'])
+                    if spec and spec['version'] == ref['version']:
+                        hosts.append(urlsplit(spec['url']).hostname or ref['service_id'])
+                reply = (f"Solicitud: {target['request']}. "
+                         f"Estado: {target['state']}. Ejecuciones registradas: {target['executions']}. "
+                         f"Servicios aprobados: {', '.join(sorted(set(hosts))) or 'ninguno todavía'}.")
+                if target.get('mode') == 'AGENT' and target.get('execution_id'):
+                    reply += ' Estado observado del servicio: ' + str(target.get(
+                        'runtime_status', (target.get('result') or {}).get('status', 'desconocido'))) + '.'
+            elif name == 'cancel_task':
+                self.cancel(target['id'], source)
+                reply = 'Cancelación solicitada; los efectos ya enviados conservan sus recibos.'
+            elif name == 'revise_task':
+                if args['change'].strip() != task['request'].strip():
+                    return finish('Necesito el cambio literal que pediste; no añadí una modificación inferida.', 'rejected')
+                reply = self.revise_goal(target, args, source)
+            else:
+                raise ValueError('Operación conversacional no disponible')
+        return finish(reply)
+
+    def revise_goal(self, selected, args, source):
+        if selected.get('goal_revision', 0) != args['goal_revision']:
+            return 'El objetivo cambió mientras respondías; revisa su estado antes de corregirlo.'
+        if selected['state'] in {'UNVERIFIED', 'WAITING_FEEDBACK'}:
+            return self.accept_review_reply(source, selected['id'] + ' ' + args['change'])
+        allowed = {'ROUTING', 'WAITING_CREATION_APPROVAL', 'SCOPE_PLANNING', 'WAITING_SCOPE',
+                   'RESOLVING_SCOPE', 'RECIPE_STEP', 'GENERATING', 'REVIEWING', 'READY',
+                   'WAITING_INPUT_CONFIRMATION', 'WAITING_APPROVAL', 'WAITING_SERVICE_APPROVAL'}
+        if selected['state'] not in allowed or selected.get('execution_id'):
+            return 'Ese trabajo ya se ejecutó o está en ejecución; consulta su estado antes de aplicar otro cambio.'
+        def apply(current):
+            if (current.get('goal_revision', 0) != args['goal_revision']
+                    or current['state'] not in allowed or current.get('execution_id')):
+                raise StaleGoalRevision('El objetivo avanzó antes de aplicar el cambio')
+            current['goal_revision'] = current.get('goal_revision', 0) + 1
+            extension = {'kind': 'owner_revision', 'source': source, 'created_at': time.time(),
+                         **INITIAL_TASK_BUDGET}
+            current.setdefault('budget_extensions', []).append(extension)
+            for counter in INITIAL_TASK_BUDGET:
+                current['max_' + counter] += extension[counter]
+            current['deadline'] = max(current['deadline'], time.time() + 1800)
+            current['revision_needs_creation_approval'] = (
+                current['state'] == 'WAITING_CREATION_APPROVAL' or
+                current.get('revision_needs_creation_approval', False))
+            current.setdefault('scope_answers', []).append({
+                'questions': ['¿Qué cambia en el objetivo?'], 'answer': args['change'],
+                'source': source, 'revision': current['revision']})
+            current['state'] = 'RESOLVING_SCOPE'
+            current['manifest'] = current.get('manifest') or {'purpose': current['request'], 'capabilities': []}
+            current['approval'] = None
+            current['authorized_hash'] = None
+            current['confirmed_input_signature'] = None
+            current['selected_version_id'] = None
+        try:
+            self.store.command(source, selected['id'], apply)
+        except StaleGoalRevision:
+            return 'El objetivo avanzó mientras llegaba el cambio; no modifiqué una revisión distinta.'
+        return 'Cambio registrado en el mismo objetivo; revisaré los datos antes de continuar.'
 
     def intake_recipe(self, source, recipe, inputs, trace_id=None):
         """Start a pinned composition; every execution remains under one task ID."""
@@ -507,8 +762,8 @@ class Coordinator:
             selected = self.latest_task(pending)
         answer = text.replace(selected['id'], '', 1).strip()
         if answer.casefold().strip(' .!') in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}:
-            self.store.command(source, selected['id'], lambda task: task.update(state='CANCELLED'))
-            return selected['id'] + ': objetivo cancelado.'
+            self.cancel(selected['id'], source)
+            return selected['id'] + ': cancelación solicitada.'
         target_step = selected.get('effect_target_step')
         writes = self._target_writes(selected, target_step) if target_step else []
         if ((len(answer) < 5 and not selected.get('effect_disambiguation_round')
@@ -639,15 +894,15 @@ class Coordinator:
             selected = self.latest_task(pending)
         if selected['state'] == 'WAITING_FEEDBACK':
             if answer.casefold().strip(' .!') in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}:
-                self.store.command(source, selected['id'], lambda task: task.update(state='CANCELLED'))
-                return selected['id'] + ': objetivo cancelado.'
+                self.cancel(selected['id'], source)
+                return selected['id'] + ': cancelación solicitada.'
             if len(answer) < 3:
                 return 'Explica qué falta en el resultado para ' + selected['id']
             return self._record_scope_refinement(source, selected, answer)
         normalized = answer.casefold().lstrip()
         if normalized.strip(' .!') in {'cancelar', 'abortar', 'olvidalo', 'olvídalo'}:
-            self.store.command(source, selected['id'], lambda task: task.update(state='CANCELLED'))
-            return selected['id'] + ': objetivo cancelado.'
+            self.cancel(selected['id'], source)
+            return selected['id'] + ': cancelación solicitada.'
         accepted = normalized in {'y', 'yes', 'sí', 'si', 'sí.', 'si.'}
         ask_feedback = normalized in {'n', 'no', 'n.', 'no.'}
         rejected = normalized.startswith('no,') or normalized.startswith('no ') or normalized.startswith('no:')
@@ -670,9 +925,29 @@ class Coordinator:
         return self._record_scope_refinement(source, selected, feedback)
 
     def _record_scope_refinement(self, source, selected, feedback):
+        if (selected.get('mode') == 'AGENT' and selected.get('execution_id')
+                and selected.get('runtime_status') == 'unknown'):
+            return 'No pude confirmar la parada del servicio. Conservo su ejecución y no iniciaré otra.'
+        if self._agent_active(selected):
+            def stop_for_change(task):
+                if (task['state'] not in {'UNVERIFIED', 'WAITING_FEEDBACK'}
+                        or task.get('execution_id') != selected['execution_id']):
+                    raise ValueError('La ejecución cambió antes de recibir la corrección')
+                task.update(state='WAITING_FEEDBACK', runtime_status='cancelling',
+                            pending_runtime_feedback={'source': source, 'feedback': feedback,
+                                                      'execution_id': task['execution_id']})
+            stopping = self.store.command(source, selected['id'], stop_for_change)
+            if stopping:
+                try:
+                    self._poll_stop(stopping)
+                except requests.RequestException:
+                    pass
+            return ('Corrección registrada en el mismo objetivo. '
+                    'Revisaré las acciones cuando se confirme la parada del servicio actual.')
         def apply(task):
             if task['state'] not in {'UNVERIFIED', 'WAITING_FEEDBACK'} or task.get('execution_id') != selected['execution_id']:
                 raise ValueError('El resultado cambió antes de recibir la corrección')
+            task.pop('pending_runtime_feedback', None)
             task.setdefault('scope_answers', []).append({
                 'questions': [], 'answer': feedback, 'source': source,
                 'revision': task['revision'], 'previous_execution_id': task['execution_id']})
@@ -939,7 +1214,7 @@ class Coordinator:
                           recipe_outputs=outputs, recipe_receipts=prefix_receipts,
                           recipe_step_index=index, recipe_result=None,
                           reused_step_receipt=by_id.get(target),
-                          scope_revisions=revisions, goal_revision=len(revisions),
+                          scope_revisions=revisions, goal_revision=max(task.get('goal_revision', 0), len(revisions)),
                           scope_questions=[], effect_constraints=[])
         self.notify(f"{task['id']}: revisaré desde la acción {target}; "
                     "las anteriores conservan sus recibos y esperan tu aceptación final.")
@@ -947,84 +1222,84 @@ class Coordinator:
 
     def cancel(self, task_id, source):
         def apply(task):
-            if task['state'] in {'FAILED', 'CANCELLED'} or (task['state'] == 'COMPLETED' and task.get('mode') != 'AGENT'):
+            if (task['state'] in {'FAILED', 'CANCELLED'} and not self._agent_active(task)
+                    or task['state'] == 'COMPLETED' and task.get('mode') != 'AGENT'):
                 return
-            task['state'] = 'CANCELLING' if task.get('execution_id') else 'CANCELLED'
+            if task.get('execution_id'):
+                task['runtime_status'] = 'cancelling'
+                if task['state'] != 'COMPLETED':
+                    task['state'] = 'CANCELLING'
+            else:
+                task['state'] = 'CANCELLED'
         task = self.store.command(source, task_id, apply)
-        if task and task['state'] == 'CANCELLING':
+        if task and task.get('runtime_status') == 'cancelling':
             try:
-                self.proxy.cancel(task['execution_id'])
+                self._poll_stop(task)
             except requests.RequestException:
                 pass  # Durable cancellation is retried by tick.
-        return task
+        return self.store.get(task_id) if task else None
 
-    def retry_task(self, task_id, authorization_id=None, corrective_instruction=None, proposed_steps=None):
-        if not authorization_id:
-            raise PermissionError('El reintento requiere la autorización concreta de Pixy')
-        existing = self.store.get(task_id)
-        if existing is None:
-            goal = corrective_instruction or 'Remediación autorizada por Heart'
-            created = self.store.create(
-                'heart:' + str(authorization_id),
-                goal,
-                id=task_id,
-                state='ROUTING',
-                feedback=corrective_instruction,
-                creation_consent={
-                    'source': 'heart:' + str(authorization_id),
-                    'task_revision': 0,
-                    'allowed_services': [],
-                    'allowed_capabilities': ['Network', 'FileSystem', 'Database'],
-                    'allowed_skill_ids': [],
-                },
-            )
-            self.notify(f"Tarea de remediación {task_id} creada en Hand por orden autorizada de Heart.")
-            return created
+    @staticmethod
+    def _agent_active(task):
+        return (task.get('mode') == 'AGENT' and task.get('execution_id')
+                and task.get('runtime_status', (task.get('result') or {}).get('status'))
+                in {'running', 'started', 'cancelling'})
 
-        def apply(task):
-            if task['state'] in {'UNKNOWN', 'CANCELLED', 'COMPLETED', 'UNVERIFIED'}:
-                raise ValueError('La tarea no puede reintentarse sin reconciliar su estado')
-            if task['state'] not in {'FAILED', 'EXHAUSTED', 'DIAGNOSING'}:
-                raise ValueError('La tarea no está en un estado remediable')
-            extension = {
-                'authorization_id': authorization_id,
-                'created_at': time.time(),
-                'generations': task['max_generations'],
-                'executions': task['max_executions'],
-                'llm_calls': task['max_llm_calls'],
-            }
-            task.setdefault('budget_extensions', []).append(extension)
-            task['max_generations'] += extension['generations']
-            task['max_executions'] += extension['executions']
-            task['max_llm_calls'] += extension['llm_calls']
-            task['attempt_number'] = task.get('attempt_number', 1) + 1
-            if corrective_instruction:
-                prev_fb = str(task.get('feedback') or '').strip()
-                task['feedback'] = (f"{prev_fb}\n[Heart]: {corrective_instruction}".strip()
-                                    if prev_fb else f"[Heart]: {corrective_instruction}")
-            needs_reroute = (
-                not task.get('manifest')
-                or bool(proposed_steps)
-                or (bool(corrective_instruction) and any(
-                    k in str(corrective_instruction).lower()
-                    for k in ('habilidad', 'skill', 'servicio', 'service', 'crear', 'receta', 'paso', 'plantilla')
-                ))
-            )
-            if needs_reroute:
-                task['state'] = 'ROUTING'
-                task['manifest'] = None
-                task['recipe'] = None
-                task['execution_id'] = None
-                consent = task.get('creation_consent') or {}
-                consent['allowed_capabilities'] = ['Network', 'FileSystem', 'Database']
-                task['creation_consent'] = consent
-            elif task.get('recipe') and task.get('execution_id') is None:
-                task['state'] = 'RECIPE_STEP'
-            else:
-                task['state'] = 'GENERATING'
-            task['deadline'] = time.time() + 1800
-        retried = self.store.mutate(task_id, apply)
-        self.notify("Tarea reanudada por orden autorizada de Heart; generando solución...")
+    def _poll_stop(self, task):
+        result = self.proxy.cancel(task['execution_id'])
+        if result.get('status') not in {'cancelled', 'unknown', 'finished', 'failed', 'timeout'}:
+            return
+        current = self.store.observe_execution(task, result)
+        if current and current['state'] == 'CANCELLING':
+            self.store.update(task['id'], expected={'CANCELLING'},
+                              state='UNKNOWN' if result['status'] == 'unknown' else 'CANCELLED')
+        if current:
+            self.store.event(task['id'], 'service_stop_result', result)
+            pending = current.get('pending_runtime_feedback')
+            if pending and result['status'] != 'unknown' and current['state'] == 'WAITING_FEEDBACK':
+                token = current_question_revision.set(None)
+                try:
+                    self._record_scope_refinement(pending['source'] + ':stopped', current, pending['feedback'])
+                finally:
+                    current_question_revision.reset(token)
+            self.notify('No pude confirmar la parada; las nuevas peticiones siguen bloqueadas.'
+                        if result['status'] == 'unknown' else 'Parada del servicio confirmada.')
+
+    def _supervise_agent(self, task):
+        if not self._agent_active(task) or task['state'] in {'RUNNING', 'CANCELLING'}:
+            return
+        if task.get('runtime_status') == 'cancelling':
+            self._poll_stop(task)
+            return
+        if time.time() >= task['deadline'] or task['state'] not in {
+                'UNVERIFIED', 'WAITING_FEEDBACK', 'VERIFYING', 'COMPLETED'}:
+            self.cancel(task['id'], 'runtime-stop:' + task['execution_id'])
+            return
+        result = self.proxy.get(task['execution_id'])
+        current = self.store.observe_execution(task, result)
+        if not current:
+            return
+        if result.get('status') in {'running', 'started'}:
+            gateway = getattr(self.manager, 'gateway', None)
+            if gateway:
+                gateway.process_mailbox(current, self.root/'workspaces'/task['id']/task['artifact_hash'])
+        else:
+            self.store.event(task['id'], 'service_stopped', result)
+            self.notify(f"{task['id']}: estado del servicio: {result.get('status')}. "
+                        'La aceptación conserva la evidencia observada en su momento.')
+
+    def retry_task(self, task_id, authorization_id=None, corrective_instruction=None,
+                   proposed_steps=None, order=None):
+        from app.mind.recovery_attempt import build_attempt
+        if (not order or order.get('plan', {}).get('task_id') != task_id
+                or order.get('header', {}).get('authorization_id') != authorization_id):
+            raise PermissionError('An exact Heart order is required; an authorization ID alone is insufficient')
+        plan = order['plan']
+        if (corrective_instruction is not None and corrective_instruction != plan['corrective_instruction']
+                or proposed_steps is not None and proposed_steps != plan['proposed_steps']):
+            raise PermissionError('Remediation instructions differ from the approved plan')
+        retried = self.manager.hand.remediate_task(order, lambda task: build_attempt(task, order))
+        self.notify('Reparacion autorizada programada; su resultado sigue pendiente de verificacion.')
         return retried
 
     def approval(self, task_id, token, approve, source):
@@ -1060,10 +1335,16 @@ class Coordinator:
         return decided
 
     def verify(self, task_id, execution_id, success, source):
+        gateway = getattr(self.manager, 'gateway', None)
+        snapshot = self.store.get(task_id)
+        receipts = (gateway.technical_receipts(task_id, execution_id, snapshot.get('services', []))
+                    if gateway and hasattr(gateway, 'technical_receipts') else [])
+        unresolved = any(item.get('effect') == 'write' and item.get('status') != 'completed'
+                         for item in receipts)
         def apply(task):
             if task['state'] != 'UNVERIFIED' or task.get('execution_id') != execution_id:
                 raise ValueError('La verificaciÃ³n no corresponde al resultado pendiente')
-            if success and task.get('batch_incomplete'):
+            if success and (task.get('batch_incomplete') or unresolved):
                 raise PermissionError('hay efectos externos sin confirmar')
             task['verification'] = {'success': success, 'evidence': {'owner': source, 'execution_id': execution_id}}
             task['state'] = 'VERIFYING'
@@ -1090,30 +1371,26 @@ class Coordinator:
                         version_id=version_id, skill_hash=skill_hash,
                         expires=min(task['deadline'], time.time() + 900), reason=reason, operation=operation)
         self.store.update(task['id'], expected={task['state']}, state='WAITING_APPROVAL', approval=approval)
-        self.notify(f"Permiso requerido: {task['id']}\n{reason}\nSHA256: {task['artifact_hash']}\n"
-                    f"Alcance reutilizable de esta versión: {json.dumps(scope, ensure_ascii=False)}\n"
-                    f"Versión: {version_id or 'tarea única'}; hash de skill: {skill_hash or 'no aplica'}\n"
-                    f"Revisar: /artifact {task['id']}\n/approve {task['id']} {approval['token']}\n"
-                    f"/deny {task['id']} {approval['token']}")
+        self.notify(f"Permiso requerido para ejecutar: {task.get('original_request') or task['request']}.\n"
+                    f"{reason}\n¿Autorizas esta ejecución? Responde sí o no.")
 
     def tick(self, background=False):
         self._collect_llm_jobs()
         self._schedule_mailbox()
         self.store.flush_events()
         for task in self.store.all():
+            goal_token = current_goal_revision.set((task['id'], task.get('goal_revision', 0)))
+            try:
+                self._supervise_agent(task)
+            except requests.RequestException:
+                pass  # Dispatch requires a current runtime observation.
+            finally:
+                current_goal_revision.reset(goal_token)
+            task = self.store.get(task['id'])
             if task['state'] in TERMINAL:
                 if (task['state'] == 'UNFULFILLABLE'
                         and task.get('candidate_rejection_pending')):
                     self._reject_unverified_recipe_versions(task)
-                if task.get('mode') == 'AGENT' and (task.get('result') or {}).get('status') == 'started':
-                    try:
-                        result = self.proxy.get(task['execution_id'])
-                        if result.get('status') not in {'started', 'running'}:
-                            self.store.event(task['id'], 'service_stopped', result)
-                            self.store.update(task['id'], result=result)
-                            self.notify(f"{task['id']}: el servicio cambiÃ³ a {result.get('status')}. La verificaciÃ³n previa describe el resultado observado en su momento.")
-                    except requests.RequestException:
-                        pass
                 continue
             if task['state'] == 'WAITING_APPROVAL' and time.time() < task['deadline']:
                 if time.time() > task['approval']['expires']:
@@ -1150,8 +1427,12 @@ class Coordinator:
     def advance(self, task):
         tid, state = task['id'], task['state']
         trace = task.get('trace_id') or tid
-        with trace_scope(trace):
-            self._advance_scoped(task)
+        token = current_goal_revision.set((tid, task.get('goal_revision', 0)))
+        try:
+            with trace_scope(trace):
+                self._advance_scoped(task)
+        finally:
+            current_goal_revision.reset(token)
 
     def _services_available(self, refs):
         port = getattr(self.manager, 'voice_services', None)
@@ -1226,7 +1507,7 @@ class Coordinator:
 
     def _advance_scoped(self, task):
         tid, state = task['id'], task['state']
-        if self.store.get(tid)['state'] != state:
+        if (self.store.get(tid)['state'] != state or self.store.get(tid).get('goal_revision', 0) != task.get('goal_revision', 0)):
             return
         if state == 'RECIPE_STEP':
             self._recipe_step(task)
@@ -1251,7 +1532,7 @@ class Coordinator:
                                   'owner_source': (task.get('creation_consent') or {}).get('source')})
                 self.store.update(tid, expected={'SCOPE_PLANNING'},
                                   state='RECIPE_STEP' if task.get('recipe') else 'GENERATING',
-                                  scope_revisions=revisions, goal_revision=len(revisions))
+                                  scope_revisions=revisions, goal_revision=max(task.get('goal_revision', 0), len(revisions)))
         elif state == 'RESOLVING_SCOPE':
             latest = task['scope_answers'][-1]
             answer_history = '\n'.join(entry['answer'] for entry in task['scope_answers'])
@@ -1288,7 +1569,8 @@ class Coordinator:
                                   'params': resolved['params'], 'owner_source': latest['source']})
                 self.store.update(tid, expected={'RESOLVING_SCOPE'}, state='ROUTING',
                                   request=resolved['purpose'], recipe=None,
-                                  scope_revisions=revisions, goal_revision=len(revisions),
+                                  routing_intent={'action': 'ACTION_REQUIRED', 'extracted_goal': resolved['purpose']},
+                                  scope_revisions=revisions, goal_revision=max(task.get('goal_revision', 0), len(revisions)),
                                    scope_questions=[], missing_input_schema=None,
                                    effect_constraints=constraints)
                 # intermediate progress suppressed
@@ -1322,15 +1604,17 @@ class Coordinator:
                                       request=resolved['purpose'], manifest=manifest,
                                       recipe_input=resolved['params'],
                                       recipe_outputs={'input': resolved['params']},
-                                      scope_revisions=revisions, goal_revision=len(revisions),
+                                      scope_revisions=revisions, goal_revision=max(task.get('goal_revision', 0), len(revisions)),
                                       scope_questions=[])
                     # intermediate progress suppressed
                 else:
-                    next_state = 'ROUTING' if constraints else 'GENERATING'
+                    needs_setup = task.get('revision_needs_creation_approval', False)
+                    next_state = 'ROUTING' if constraints or needs_setup else 'GENERATING'
                     self.store.update(tid, expected={'RESOLVING_SCOPE'}, state=next_state,
                                       request=resolved['purpose'], manifest=manifest,
+                                      routing_intent={'action': 'ACTION_REQUIRED', 'extracted_goal': resolved['purpose']},
                                       params=resolved['params'], scope_revisions=revisions,
-                                       goal_revision=len(revisions), scope_questions=[],
+                                       goal_revision=max(task.get('goal_revision', 0), len(revisions)), scope_questions=[],
                                        effect_constraints=constraints)
                     # intermediate progress suppressed
         elif state == 'ROUTING':
@@ -1338,21 +1622,59 @@ class Coordinator:
             direct = request.startswith(('/make ', '/do '))
             if direct:
                 request = request.split(' ', 1)[1]
-            intent = ({'action': 'ACTION_REQUIRED', 'extracted_goal': request} if direct else
-                      self.manager.mind.process_message(request))
-            if intent.get('action') == 'ACTION_REQUIRED' and not direct:
+            recent = [item for item in self.store.all() if item['id'] != tid
+                      and item.get('kind') != 'turn'
+                      and item.get('conversation_id') == task.get('conversation_id')][-8:]
+            task_context = [{key: item.get(key, 0 if key == 'goal_revision' else None) for key in (
+                'id', 'request', 'state', 'goal_revision', 'routing_action', 'executions', 'execution_id')}
+                for item in recent]
+            for item in task_context:
+                item['request'] = str(item['request'])[:1000]
+            sid = task.get('conversation_id')
+            history = self.conversations.history(sid, task['source']) if sid else None
+            questions = [{key: question[key] for key in ('id', 'kind', 'subject_id', 'revision', 'state')}
+                         for question in self.conversations.pending(sid)[:8]] if sid else []
+            intent = task.get('routing_intent')
+            if intent is None:
+                intent = ({'action': 'ACTION_REQUIRED', 'extracted_goal': request} if direct else
+                          self.manager.mind.process_message(request, task_context=task_context, persist=False,
+                                                           conversation_history=history, questions=questions))
+            if intent.get('error'):
+                self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']))
+                self.notify(intent.get('reply') or 'No pude interpretar la solicitud; no ejecuté ninguna acción.')
+                return
+            action = intent.get('action')
+            if action not in {'GENERAL_CHAT', 'ACTION_REQUIRED', 'TOOL_CALL'}:
+                raise ValueError('Operaci?n de enrutamiento desconocida')
+            if not task.get('routing_intent'):
+                self.store.update(tid, expected={'ROUTING'}, routing_intent=intent)
+            if action == 'TOOL_CALL':
+                reply = self.dispatch_tool(task, intent['tool_call'])
+                bound = self.conversations.turn(task['source'])
+                response_task_id = (bound['task_id'] if bound and bound['task_id'] != tid
+                                    and intent['tool_call']['name'] == 'answer_question' else None)
+                self.store.update(tid, expected={'ROUTING'}, state='COMPLETED',
+                                  routing_action='TOOL_CALL', tool_result=reply, response_task_id=response_task_id)
+                if reply:
+                    self.notify(reply)
+                return
+            if action == 'ACTION_REQUIRED':
+                request = intent.get('extracted_goal') or request
+                self.store.update(tid, expected={'ROUTING'}, kind='objective', request=request,
+                                  original_request=request, source_request=task.get('source_request') or task['request'])
+                if intent.get('tool_call'):
+                    call_id = self.conversations.record_call(task['source'], intent['tool_call'])
+                    self.conversations.complete(task['source'], {'call_id': call_id,
+                        'tool_call': intent['tool_call'], 'status': 'started', 'task_id': tid})
+            if action == 'ACTION_REQUIRED' and not direct:
                 planner = getattr(self.manager, 'action_planner', None)
                 if planner is not None:
-                    try:
-                        proposal = planner.propose(request, lambda spec:
-                            spec['runtime'] != 'AGENT' and not spec['dependencies']
-                            and self._services_available(spec['services']),
-                            correction_context=task.get('effect_constraints'))
-                    except (ValueError, TypeError, KeyError) as exc:
-                        if task.get('effect_constraints'):
-                            raise
-                        logger.warning('ActionPlanner descartó composición multi-paso (%s); continuando con skill individual', exc)
-                        proposal = None
+                    proposal = planner.propose(intent.get('extracted_goal') or request, lambda spec:
+                        spec['runtime'] != 'AGENT' and not spec['dependencies']
+                        and self._services_available(spec['services']),
+                        correction_context=task.get('effect_constraints'),
+                        conversation_context=(history if history is not None else self.manager.memory.get_chat_history(limit=12)),
+                        task_context=task_context)
                     if proposal:
                         recipe = proposal['recipe']
                         missing = proposal['missing_specs']
@@ -1387,16 +1709,18 @@ class Coordinator:
                                              'capabilities': action['capabilities']}, step_id))
                         next_state = ('WAITING_CREATION_APPROVAL' if consent_needed else
                                       'SCOPE_PLANNING' if missing_values else 'RECIPE_STEP')
-                        self.store.update(tid, expected={'ROUTING'}, state=next_state,
+                        routed = self.store.update(tid, expected={'ROUTING'}, state=next_state,
                             request=request, original_request=task.get('original_request') or request,
                             recipe=recipe, recipe_input=inputs,
                             recipe_outputs={'input': inputs},
                             recipe_missing_specs=missing, recipe_receipts=[], recipe_step_index=0,
                             setup_proposals=setup if consent_needed else task.get('setup_proposals', []),
                             missing_input_schema=recipe['input_schema'] if missing_values else None,
-                            manifest={'purpose': request, 'capabilities': []})
+                            manifest={'purpose': request, 'capabilities': []},
+                            routing_action='ACTION_REQUIRED')
+                        self.manager.memory.append_long_term('user_chat', task.get('source_request') or task['request'])
                         if consent_needed:
-                            self.notify(self._setup_message(task, setup))
+                            self.notify(self._setup_message(routed, setup))
                         return
                 if task.get('effect_constraints'):
                     options = self._effect_decision_options(task)
@@ -1410,7 +1734,7 @@ class Coordinator:
                                 self._effect_options_message(options))
                     return
             selector = getattr(self.manager, 'skill_selector', None)
-            if selector is not None and hasattr(self.manager, 'hand'):
+            if action == 'ACTION_REQUIRED' and selector is not None and hasattr(self.manager, 'hand'):
                 selected = selector.select(request, lambda spec:
                     spec['runtime'] in {'SAFE', 'AGENT', 'GOD'}
                     and not spec['dependencies'] and self._services_available(spec['services']))
@@ -1431,9 +1755,13 @@ class Coordinator:
                             selected_version_id=version['version_id'], params=params,
                             missing_input_schema=spec['input_schema'] if needs_values else None,
                             selection=selected['selection'], skill_name=version['skill_name'],
-                            services=spec['services'])
+                            services=spec['services'], routing_action='ACTION_REQUIRED')
+                        if not direct:
+                            self.manager.memory.append_long_term('user_chat', task.get('source_request') or task['request'])
                         return
-            action = intent.get('action')
+            self.store.update(tid, expected={'ROUTING'}, routing_action=action)
+            if not direct:
+                self.manager.memory.append_long_term('user_chat', task.get('source_request') or task['request'])
             if action == 'ACTION_REQUIRED':
                 goal = intent.get('extracted_goal') or request
                 manifest = manifest_from_request(goal)
@@ -1474,25 +1802,12 @@ class Coordinator:
                                   hypothesis_id=hypotheses[0]['id'] if hypotheses else None,
                                   alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
                 # intermediate progress suppressed
-            elif action == 'INVESTIGATE':
-                output = self.manager.senses.observe(intent.get('investigate_target', 'core_logs'), intent.get('investigate_reason', 'Consulta'))
-                self.store.event(tid, 'observation', {'output': output})
-                self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
-                self.notify(output)
-            elif action in {'PS', 'LOGS'}:
-                resource = 'running_containers' if action == 'PS' else intent.get('target', 'core_logs')
-                output = self.manager.senses.observe(resource, 'Consulta explícita del usuario')
-                self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
-                self.notify(output)
-            elif action in {'HEALTH_CHECK', 'FASTBEAT', 'SLOWBEAT', 'CLEANUP'}:
-                self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
-                self.notify(json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False))
-            elif intent.get('error'):
-                self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']))
-                self.notify(intent.get('reply') or f"Error de IA: {intent['error']}")
             else:
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED')
-                self.notify(intent.get('reply') or 'No se ejecutó ninguna acción.')
+                reply = intent.get('reply') or 'No se ejecutó ninguna acción.'
+                self.conversations.complete(task['source'], {'result': reply})
+                self.manager.memory.append_long_term('khai_chat', reply)
+                self.notify(reply)
         elif state == 'GENERATING':
             selected_version_id = task.get('selected_version_id')
             if ('Network' in task['manifest'].get('capabilities', [])
@@ -1544,6 +1859,9 @@ class Coordinator:
             except (ValueError, SyntaxError) as exc:
                 self.store.update(tid, expected={'GENERATING'}, feedback=str(exc))
                 return
+            current = self.store.get(tid)
+            if current['state'] != 'GENERATING' or current.get('goal_revision', 0) != task.get('goal_revision', 0):
+                raise StaleGoalRevision('La generación terminó para una revisión obsoleta')
             artifact, sha = crafter.snapshot(code)
             skill_spec_hash = None
             if hasattr(self.manager, 'hand'):
@@ -1705,21 +2023,27 @@ class Coordinator:
                 self.manager.hand.prepare_execution(task['version_id'],execution_id,task['artifact_hash'],
                                                     user_approved=user_approved)
             payload = dict(execution_id=execution_id, task_id=tid, artifact_hash=task['artifact_hash'],
+                           goal_revision=task.get('goal_revision', 0),
                            mode=task['mode'], dependencies=task['dependencies'], request=task['request'],
                            params=task.get('params', {}),
                            network=False, skill_name=task.get('skill_name'), version_id=task.get('version_id'),
                            grants=task.get('grants', []), deadline=task['deadline'])
             if hasattr(self.manager, 'hand') and task.get('version_id'):
                 payload['skill_artifact_hash'] = self.manager.hand.version(task['version_id'])['artifact_hash']
-            self.store.update(tid, expected={'READY'}, state='SUBMITTED', execution_id=execution_id, payload=payload)
+            self.store.update(tid, expected={'READY'}, state='SUBMITTED', execution_id=execution_id,
+                              runtime_status='queued', payload=payload)
         elif state == 'SUBMITTED':
             result = self.proxy.submit(task['payload'])
-            self.store.update(tid, expected={'SUBMITTED'}, state='RUNNING', result=result)
+            self.store.update(tid, expected={'SUBMITTED'}, state='RUNNING', result=result,
+                              runtime_status=result.get('status'))
         elif state == 'RUNNING':
-            if hasattr(self.manager, 'gateway'):
-                self.manager.gateway.process_mailbox(task, self.root/'workspaces'/tid/task['artifact_hash'])
             result = self.proxy.get(task['execution_id'])
             status = result.get('status')
+            current = self.store.observe_execution(task, result)
+            if not current or current['state'] != 'RUNNING':
+                return
+            if status in {'running', 'started'} and hasattr(self.manager, 'gateway'):
+                self.manager.gateway.process_mailbox(current, self.root/'workspaces'/tid/task['artifact_hash'])
             if status in {'queued', 'starting', 'running'}:
                 return
             if status == 'approval_required':
@@ -1821,7 +2145,11 @@ class Coordinator:
             if v['success']:
                 stdout = (task.get('result') or {}).get('stdout', '')
                 out_msg = f"\nResultado:\n{stdout.strip()[:2000]}" if stdout and stdout.strip() else ""
-                self.notify(f"Ejecución completada con éxito.{out_msg}")
+                if task.get('mode') == 'AGENT':
+                    self.notify('Resultado aceptado. Estado actual del servicio: '
+                                + str(self.store.get(tid).get('runtime_status', 'desconocido')) + '.' + out_msg)
+                else:
+                    self.notify(f"Ejecución completada con éxito.{out_msg}")
         elif state == 'DIAGNOSING':
             # Heart es la única autoridad médica del sistema
             case = None
@@ -1841,7 +2169,15 @@ class Coordinator:
             # Si Heart formuló un plan de autoreparación de tarea
             if plan and plan.get('target') == 'task':
                 if plan.get('requires_approval'):
-                    self._wait_approval(task, f"Heart propone remediación: {plan.get('summary', '')}", plan)
+                    if case['state'] == 'SOLUTION_PROPOSED':
+                        auth = self.manager.pixy.request_recovery_approval(case, task['source'])
+                        self.store.update(tid, expected={'DIAGNOSING'},
+                                          recovery_case_id=case['case_id'],
+                                          recovery_authorization_id=auth['authorization_id'])
+                        self.notify(f"Heart propone: {plan.get('summary', '')}. ¿Apruebas? Responde sí o no.")
+                    elif case['state'] in {'DENIED', 'FAILED', 'UNKNOWN'}:
+                        self.store.update(tid, expected={'DIAGNOSING'}, state='FAILED',
+                                          error='La recuperación no fue autorizada o no pudo confirmarse')
                 else:
                     feedback_msg = plan.get('reason') or 'Error diagnosticado por Heart'
                     if diagnosis and diagnosis.get('findings'):
@@ -1855,11 +2191,7 @@ class Coordinator:
                     err_detail = f": {diagnosis['findings'][0].get('detail', '')[:200]}"
                 self.notify(f"{tid}: Fallo diagnosticado por Heart sin plan de autoreparación automático{err_detail}.")
         elif state == 'CANCELLING':
-            result = self.proxy.cancel(task['execution_id'])
-            if result.get('status') == 'cancelled':
-                self.store.update(tid, expected={'CANCELLING'}, state='CANCELLED', result=result)
-            elif result.get('status') == 'unknown':
-                self.store.update(tid, expected={'CANCELLING'}, state='UNKNOWN', result=result)
+            self._poll_stop(task)
 
     async def run(self):
         if self.lock.file is None:

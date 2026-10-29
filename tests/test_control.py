@@ -51,6 +51,8 @@ class Fixture(unittest.TestCase):
         self.manager.coordinator = self.c
 
     def tearDown(self):
+        self.c._llm_executor.shutdown(wait=True)
+        self.c._mailbox_executor.shutdown(wait=True)
         self.env.stop()
         self.tmp.cleanup()
 
@@ -64,6 +66,15 @@ class Fixture(unittest.TestCase):
                         artifact_hash=sha, authorized_hash=sha, manifest={'purpose':'compute','capabilities':[]})
         defaults.update(kwargs)
         return self.task(**defaults)
+
+    def delivered_question(self, task, kind, message_id=800):
+        self.manager.telegram.user_id = 'owner'
+        sid = self.c.conversations.session('owner', 'owner')
+        task = self.store.update(task['id'], conversation_id=sid, kind='objective')
+        qid = self.c.conversations.question(sid, kind, task['id'], task['revision'], task['state'])
+        self.c.conversations.delivered(sid, 'fixture:' + task['id'], 'Pregunta enviada',
+                                       task['id'], qid, [message_id])
+        return sid, qid
 
 
 class StoreTests(Fixture):
@@ -177,6 +188,9 @@ class CoordinatorTests(Fixture):
         task = self.store.create('telegram:direct-feedback', 'respuesta parcial',
             state='UNVERIFIED', execution_id='run_' + 'd' * 32,
             manifest={'purpose': 'respuesta parcial', 'capabilities': []})
+        sid, _ = self.delivered_question(task, 'review')
+        self.c.conversations.begin('telegram:correction', 'trace-correction',
+            'El resumen está incorrecto, corrige la fuente', 'owner', 'owner', reply_to=800)
         process_ordinary(self.manager, 'telegram:correction', 'trace-correction',
                          'El resumen está incorrecto, corrige la fuente')
         current = self.store.get(task['id'])
@@ -188,10 +202,12 @@ class CoordinatorTests(Fixture):
         scope = self.store.create('telegram:scope', 'consulta', state='WAITING_SCOPE')
         review = self.store.create('telegram:review', 'resultado', state='UNVERIFIED',
                                    execution_id='run_' + 'e' * 32)
+        self.delivered_question(scope, 'scope', 801)
+        self.delivered_question(review, 'review', 802)
         with patch.object(self.c, 'notify'):
             process_ordinary(self.manager, 'telegram:natural', 'trace-natural',
-                             'El resumen está incorrecto')
-        self.assertEqual(self.store.get(review['id'])['state'], 'RESOLVING_SCOPE')
+                             'n')
+        self.assertEqual(self.store.get(review['id'])['state'], 'WAITING_FEEDBACK')
         self.assertEqual(self.store.get(scope['id'])['state'], 'WAITING_SCOPE')
         with patch.object(self.c, 'notify'):
             process_ordinary(self.manager, 'telegram:scope-specific', 'trace-specific',
@@ -321,7 +337,8 @@ class CoordinatorTests(Fixture):
                              result={'status':'started'})
         self.proxy.cancel.return_value = {'status':'cancelling'}
         self.c.cancel(task['id'], 'cancel:verified-service')
-        self.assertEqual(self.store.get(task['id'])['state'], 'CANCELLING')
+        self.assertEqual(self.store.get(task['id'])['state'], 'COMPLETED')
+        self.assertEqual(self.store.get(task['id'])['runtime_status'], 'cancelling')
 
 
     def test_dependencies_require_approval_before_build(self):
@@ -442,6 +459,33 @@ class ContractTests(Fixture):
     def test_callback_identity_checked(self):
         with self.assertRaises(PermissionError):
             authenticated_message({'update_id':1, 'callback_query':{'from':{'id':'attacker'},'data':'/approve x y'}}, 'owner')
+
+    def test_mode_button_is_authenticated_persisted_and_executed_once(self):
+        from app.voice.mailbox import VoiceMailbox
+        app.state.manager = self.manager
+        self.manager.telegram.user_id = 'owner'
+        self.manager.voice_mailbox = VoiceMailbox(self.state.db_path)
+        self.manager.dolphin = Mock()
+        self.manager.dolphin.set_mode.return_value = '[Mode = mid]'
+        self.c.notify = Mock()
+        async def check():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                with patch.dict(os.environ, {'TELEGRAM_WEBHOOK_SECRET': 's' * 32}):
+                    headers = {'X-Telegram-Bot-Api-Secret-Token': 's' * 32}
+                    data = {'update_id': 43, 'callback_query': {
+                        'id': 'callback-mode', 'from': {'id': 'attacker'}, 'data': '/mode mid'}}
+                    self.assertEqual((await client.post('/webhook', json=data, headers=headers)).status_code, 403)
+                    self.manager.telegram.answer_callback_query.assert_not_called()
+                    data['callback_query']['from']['id'] = 'owner'
+                    for _ in range(2):
+                        self.assertEqual((await client.post('/webhook', json=data, headers=headers)).status_code, 200)
+        asyncio.run(check())
+        mailbox = self.manager.voice_mailbox
+        self.assertTrue(mailbox.process_one(
+            lambda source, trace, text: process_ordinary(self.manager, source, trace, text), urgent=True))
+        self.assertFalse(mailbox.process_one(lambda *_: self.fail('Botón repetido'), urgent=True))
+        self.manager.dolphin.set_mode.assert_called_once_with('mid')
+        self.c.notify.assert_called_once_with('[Mode = mid]')
 
     def test_webhook_secret_and_duplicate(self):
         app.state.manager = self.manager

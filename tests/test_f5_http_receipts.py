@@ -19,7 +19,7 @@ class HttpReceiptTests(unittest.TestCase):
             registry.active_services.return_value = {'mail': {'operations': {
                 'send': {'version': 'v1', 'effect': 'write', 'effect_contract': contract}}}}
             gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
-                                      db=Path(folder) / 'voice.sqlite3', registry=registry)
+                                      db=Path(folder) / 'voice.sqlite3', registry=registry, execution_authority=Mock())
             gateway.request = Mock(side_effect=RuntimeError('provider unavailable'))
             task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
                     'deadline': time.time() + 60}
@@ -28,7 +28,7 @@ class HttpReceiptTests(unittest.TestCase):
             receipt = gateway.technical_receipts(task['id'], task['execution_id'], [
                 {'service_id': 'mail', 'operation': 'send', 'version': 'v1'}])[0]
             self.assertEqual(reply, {'error': 'RuntimeError'})
-            self.assertEqual(receipt['status'], 'failed')
+            self.assertEqual(receipt['status'], 'uncertain')
 
     def test_declared_write_identity_and_correction_guard(self):
         contract = {'kind': 'create', 'identity': {'source': 'response', 'field': 'id'},
@@ -65,7 +65,7 @@ class HttpReceiptTests(unittest.TestCase):
                                                'summary': {'name': 'Nota', 'context': 'Nota actualizada en Notes'},
                                                'correction': contract['correction']}}}}}
             gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
-                                      db=Path(folder) / 'voice.sqlite3', registry=registry)
+                                      db=Path(folder) / 'voice.sqlite3', registry=registry, execution_authority=Mock())
             gateway.request = Mock(return_value={
                 'content_type': 'application/json', 'body': b'{"id":"note-1"}'})
             task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
@@ -90,7 +90,7 @@ class HttpReceiptTests(unittest.TestCase):
                 'service': 'notes', 'operation': 'update',
                 'params': {'id': 'note-1', 'body': 'fixed'}})
             gateway.request.assert_called_with('notes', 'update',
-                                               {'id': 'note-1', 'body': 'fixed'})
+                                               {'id': 'note-1', 'body': 'fixed'}, expected_version='v1')
 
     def test_receipt_is_bound_to_execution_operation_and_schema(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -98,7 +98,7 @@ class HttpReceiptTests(unittest.TestCase):
             registry.active_services.return_value = {'weather': {'operations': {
                 'forecast': {'version': 'v1', 'effect': 'read'}}}}
             gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
-                                      db=Path(folder) / 'voice.sqlite3', registry=registry)
+                                      db=Path(folder) / 'voice.sqlite3', registry=registry, execution_authority=Mock())
             gateway.request = Mock(return_value={
                 'content_type': 'application/json',
                 'body': b'{"temperature": 20, "rain": true}'})
@@ -138,7 +138,7 @@ class HttpReceiptTests(unittest.TestCase):
                 'create': {'version': 'v1', 'effect': 'write', 'effect_contract': contract},
                 'other': {'version': 'v1', 'effect': 'write', 'effect_contract': contract}}}}
             gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
-                                      db=Path(folder) / 'voice.sqlite3', registry=registry)
+                                      db=Path(folder) / 'voice.sqlite3', registry=registry, execution_authority=Mock())
             gateway.request = Mock(return_value={
                 'content_type': 'application/json', 'body': b'{"id":"note-2"}'})
             task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
@@ -187,7 +187,7 @@ class HttpReceiptTests(unittest.TestCase):
                 'create_batch': {'version': 'v1', 'effect': 'write',
                                  'effect_contract': contract}}}}
             gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
-                                      db=Path(folder) / 'voice.sqlite3', registry=registry)
+                                      db=Path(folder) / 'voice.sqlite3', registry=registry, execution_authority=Mock())
             task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
                     'deadline': time.time() + 60, 'state': 'RUNNING'}
             request = {'service': 'notes', 'operation': 'create_batch',

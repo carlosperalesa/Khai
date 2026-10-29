@@ -62,6 +62,32 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
         c8, _ = Recovery.classify_cause({'verification': {'success': False}, 'error': 'Oracle mismatch'})
         self.assertEqual(c8, 'invalid_result')
 
+    def test_status_query_does_not_retry_an_older_failed_task(self):
+        self.senses.evidence.return_value['pixy']['recent_tasks'] = [
+            {'id': 'task_old', 'request': 'hola', 'state': 'FAILED',
+             'created_at': 1, 'updated_at': 100, 'error': 'LLM unavailable'},
+            {'id': 'task_current', 'request': 'Hazlo', 'state': 'COMPLETED',
+             'created_at': 2, 'updated_at': 2, 'executions': 0, 'trace_id': 'current'}]
+        self.senses.evidence.return_value['core_logs']['text'] = '\n'.join(
+            'ERROR [old] LLM unavailable' for _ in range(6))
+        case = self.recovery.open_case('cual es el estado de la tarea?', 'owner:status')
+        self.assertIsNone(case['plan'])
+        self.assertEqual(case['diagnosis']['task']['id'], 'task_current')
+        self.assertIn('No hay ejecución', case['diagnosis']['task']['note'])
+        self.assertFalse(any(f['code'] in {'task_failure', 'core_error_burst'}
+                             for f in case['diagnosis']['findings']))
+
+    def test_explicit_last_error_query_selects_failed_task(self):
+        failed_id = 'task_' + '1' * 32
+        self.senses.evidence.return_value['pixy']['recent_tasks'] = [
+            {'id': failed_id, 'request': 'hola', 'state': 'FAILED',
+             'created_at': 1, 'error': 'LLM unavailable'},
+            {'id': 'task_chat', 'request': 'Hola', 'state': 'COMPLETED', 'created_at': 2}]
+        self.recovery._llm_analyze_incident = Mock(return_value=None)
+        case = self.recovery.open_case('revisa el último error', 'owner:error')
+        self.assertEqual(case['diagnosis']['task']['id'], failed_id)
+        self.assertEqual(case['plan']['task_id'], failed_id)
+
     def test_incident_key_deduplication(self):
         task = {'id': 'task_00000000000000000000000000000001', 'execution_id': 'run_111'}
         failure = {'stderr': 'SyntaxError: unexpected EOF while parsing', 'returncode': 1}
@@ -142,12 +168,11 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
         self.assertEqual(heart_case['task_id'], tid)
         self.assertIn('ZeroDivisionError', heart_case['diagnosis']['findings'][0]['detail'])
 
-        # Now Coordinator advances DIAGNOSING -> GENERATING using Heart's plan
+        manager.pixy.request_recovery_approval.return_value = {'authorization_id': 'auth_diag_123', 'status': 'pending'}
         coordinator.advance(t_diagnosing)
-        t_generating = store.get(tid)
-        self.assertEqual(t_generating['state'], 'GENERATING')
-        self.assertTrue(t_generating['diagnosed'])
-        self.assertIn('syntax_or_code', str(t_generating.get('feedback')))
+        t_after = store.get(tid)
+        self.assertEqual(t_after['state'], 'DIAGNOSING')
+        self.assertEqual(t_after.get('recovery_authorization_id'), 'auth_diag_123')
         # Mind process_message was NEVER called (zero parallel diagnosis)
         manager.mind.process_message.assert_not_called()
 
@@ -200,7 +225,10 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
         self.recovery.advance(cid)
         case_exec = self.recovery.get(cid)
         self.assertEqual(case_exec['state'], 'HAND_EXECUTING')
-        coord_mock.retry_task.assert_called_once_with(tid, authorization_id='auth_123')
+        coord_mock.retry_task.assert_called_once()
+        self.assertEqual(coord_mock.retry_task.call_args[0][0], tid)
+        self.assertEqual(coord_mock.retry_task.call_args[1]['authorization_id'], 'auth_123')
+        self.assertEqual(coord_mock.retry_task.call_args[1]['order']['plan']['task_id'], tid)
 
         # While task is in GENERATING, advance() remains in HAND_EXECUTING
         store.update(tid, expected={'FAILED'}, state='GENERATING')

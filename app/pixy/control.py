@@ -49,7 +49,8 @@ class ControlStore:
         finally:
             conn.close()
 
-    def create(self, source, request, **extra):
+    @staticmethod
+    def document(source, request, **extra):
         now = time.time()
         task = dict(id="task_" + uuid.uuid4().hex, source=source, request=request,
                     state="ROUTING", created_at=now, updated_at=now, deadline=now + 1800,
@@ -62,6 +63,10 @@ class ControlStore:
         if not task.get('trace_id'):
             from app.kernel.tracing import get_trace_id, new_trace_id
             task['trace_id'] = get_trace_id() or new_trace_id()
+        return task
+
+    def create(self, source, request, **extra):
+        task = self.document(source, request, **extra)
         with self.connection() as conn:
             conn.execute("INSERT OR IGNORE INTO control_tasks VALUES (?, ?, ?)",
                          (task["id"], source, json.dumps(task)))
@@ -83,6 +88,11 @@ class ControlStore:
             if not row:
                 raise KeyError(task_id)
             task = json.loads(row[0])
+            from app.pixy.budget import current_goal_revision, StaleGoalRevision
+            expected_goal = current_goal_revision.get()
+            if (expected_goal and expected_goal[0] == task_id
+                    and expected_goal[1] != task.get('goal_revision', 0)):
+                raise StaleGoalRevision('El objetivo cambió durante el trabajo')
             fn(task)
             task["revision"] += 1
             task["updated_at"] = time.time()
@@ -125,6 +135,26 @@ class ControlStore:
             task[counter] += 1
         return self.mutate(task_id, apply)
 
+    def observe_execution(self, snapshot, result):
+        """Runtime facts do not invalidate an owner's pending question revision."""
+        with self.connection() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT document FROM control_tasks WHERE id=?', (snapshot['id'],)).fetchone()
+            if not row:
+                return None
+            task = json.loads(row[0])
+            if (task.get('execution_id') != snapshot.get('execution_id')
+                    or task.get('goal_revision', 0) != snapshot.get('goal_revision', 0)):
+                return None
+            status = result.get('status')
+            if ((task.get('runtime_status') in {'cancelling', 'cancelled', 'finished', 'failed', 'timeout', 'unknown'}
+                 or task['state'] in {'CANCELLING', 'CANCELLED'})
+                    and status in {'queued', 'starting', 'running', 'started'}):
+                return task
+            task.update(runtime_status=status, runtime_result=result, runtime_observed_at=time.time())
+            conn.execute('UPDATE control_tasks SET document=? WHERE id=?', (json.dumps(task), task['id']))
+            return task
+
     def event(self, task_id, kind, data):
         with self.connection() as conn:
             conn.execute("INSERT INTO control_events(task_id,kind,data,created_at) VALUES (?,?,?,?)",
@@ -147,11 +177,28 @@ class ControlStore:
             if not row:
                 raise ValueError("Tarea desconocida")
             task = json.loads(row[0])
+            from app.pixy.budget import current_question_revision, StaleGoalRevision
+            expected_question = current_question_revision.get()
+            if (expected_question and expected_question[0] == task_id
+                    and expected_question[1] != task['revision']):
+                raise StaleGoalRevision('La pregunta cambió antes de recibir la respuesta')
+            if expected_question and expected_question[0] == task_id:
+                question = conn.execute('SELECT status,subject_id,revision FROM conversation_questions WHERE id=?',
+                                        (expected_question[2],)).fetchone()
+                if (not question or question['status'] != 'open' or question['subject_id'] != task_id
+                        or question['revision'] != str(task['revision']) or time.time() >= task['deadline']):
+                    raise StaleGoalRevision('La pregunta dejó de estar vigente')
             fn(task)
             task["revision"] += 1
             task["updated_at"] = time.time()
             conn.execute("UPDATE control_tasks SET document=? WHERE id=?", (json.dumps(task), task_id))
             conn.execute("INSERT INTO control_commands VALUES (?)", (source,))
+            if expected_question and expected_question[0] == task_id:
+                conn.execute("UPDATE conversation_questions SET status='answered',answered_by=? WHERE id=?",
+                             (source, expected_question[2]))
+                conn.execute("UPDATE conversation_turns SET status='completed',task_id=?,receipt=? WHERE source=?",
+                             (task_id, json.dumps({'question_id': expected_question[2],
+                                                  'task_id': task_id, 'state': task['state']}), source))
             self._queue_event(conn,task,'owner_command')
             return task
 

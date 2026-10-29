@@ -311,6 +311,7 @@ class ResultPresenterTests(unittest.TestCase):
                         'content_type': 'application/json',
                         'body': json.dumps({'noticias': news_items}).encode('utf-8'),
                     })
+                    running_step1 = coordinator.store.observe_execution(running_step1, {'status': 'running'})
                     manager.gateway._mailbox_request(running_step1, 'req-news-1', {
                         'service': 'news', 'operation': 'latest',
                         'params': {'topic': 'energía solar'},
@@ -340,6 +341,7 @@ class ResultPresenterTests(unittest.TestCase):
                         'content_type': 'application/json',
                         'body': b'{"message_id":"msg-001"}',
                     })
+                    running_step2 = coordinator.store.observe_execution(running_step2, {'status': 'running'})
                     manager.gateway._mailbox_request(running_step2, 'req-mail-1', {
                         'service': 'mail', 'operation': 'send',
                         'params': {'to': 'carlos@ejemplo.com', 'noticias': news_items},
@@ -415,6 +417,7 @@ class ResultPresenterTests(unittest.TestCase):
                         'body': b'{"results":[{"index":0,"status":"sent","id":"msg-101"},'
                                 b'{"index":1,"status":"failed"}]}',
                     })
+                    running_batch = coordinator.store.observe_execution(running_batch, {'status': 'running'})
                     manager.gateway._mailbox_request(running_batch, 'req-batch-1', {
                         'service': 'mail', 'operation': 'send_batch',
                         'params': {'items': [{'to': 'a@ejemplo.com'}, {'to': 'b@ejemplo.com'}]},
