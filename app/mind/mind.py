@@ -72,4 +72,19 @@ class Mind:
             cleaned = '\n'.join(cleaned.splitlines()[1:])
             if cleaned.rstrip().endswith('```'):
                 cleaned = cleaned.rstrip()[:-3]
-        return AssistantTurn.model_validate_json(cleaned.strip())
+        try:
+            data = json.loads(cleaned.strip())
+            if isinstance(data, dict):
+                if data.get('tool_calls') and data.get('reply'):
+                    data['reply'] = ''
+                if isinstance(data.get('tool_calls'), list):
+                    for tc in data['tool_calls']:
+                        if isinstance(tc, dict) and isinstance(tc.get('arguments'), dict):
+                            args = tc['arguments']
+                            for field in ('capability', 'provider'):
+                                if isinstance(args.get(field), str):
+                                    args[field] = args[field].strip().lower()
+            return AssistantTurn.model_validate(data)
+        except Exception:
+            return AssistantTurn.model_validate_json(cleaned.strip())
+
