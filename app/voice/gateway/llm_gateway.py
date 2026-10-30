@@ -554,57 +554,64 @@ class LLMManager:
         except Exception:
             pass
 
+        # Progressive candidate queries for Wikipedia and GitHub
+        clean_q = re.sub(r'\bsite:\S+', '', query).strip()
+        site_match = re.search(r'\bsite:([a-zA-Z0-9.-]+)', query)
+        site_terms = []
+        if site_match:
+            domain = site_match.group(1)
+            site_terms = [p for p in domain.split('.') if p not in {'com', 'org', 'net', 'io', 'gov', 'www'}]
+        candidates = []
+        if clean_q:
+            candidates.append(clean_q)
+        words = [w for w in (clean_q.split() if clean_q else []) if len(w) > 2]
+        if len(words) > 3:
+            candidates.append(' '.join(words[:3]))
+        if site_terms:
+            candidates.append(' '.join(site_terms + words[:2]))
+            candidates.append(' '.join(site_terms))
+        if words and words[0] not in candidates:
+            candidates.append(words[0])
+
         # 2. Wikipedia Fulltext Search
-        if len(results) < limit:
-            clean_q = re.sub(r'\bsite:\S+', '', query).strip() or query
-            queries_to_try = [clean_q]
-            words = [w for w in clean_q.split() if len(w) > 1]
-            if len(words) > 4:
-                queries_to_try.append(' '.join(words[:4]))
-            for q_term in queries_to_try:
-                try:
-                    wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(q_term)}&utf8=&format=json"
-                    req_w = urllib.request.Request(wiki_url, headers={'User-Agent': 'Khai/1.0 (https://github.com/carlosperalesa/Khai)'})
-                    with urllib.request.urlopen(req_w, timeout=6) as r_w:
-                        data = json.loads(r_w.read().decode('utf-8'))
-                        for item in data.get('query', {}).get('search', []):
-                            title = item.get('title')
-                            snippet = html.unescape(re.sub(r'<[^>]+>', '', item.get('snippet', ''))).strip()
-                            url = 'https://en.wikipedia.org/wiki/' + urllib.parse.quote(title.replace(' ', '_'))
-                            if title and url and not any(r['url'] == url for r in results):
-                                results.append({'title': title, 'url': url, 'description': snippet})
-                                if len(results) >= limit:
-                                    break
-                except Exception:
-                    pass
-                if len(results) >= limit:
-                    break
+        for q_term in candidates:
+            if len(results) >= limit:
+                break
+            try:
+                wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(q_term)}&utf8=&format=json"
+                req_w = urllib.request.Request(wiki_url, headers={'User-Agent': 'Khai/1.0 (https://github.com/carlosperalesa/Khai)'})
+                with urllib.request.urlopen(req_w, timeout=6) as r_w:
+                    data = json.loads(r_w.read().decode('utf-8'))
+                    for item in data.get('query', {}).get('search', []):
+                        title = item.get('title')
+                        snippet = html.unescape(re.sub(r'<[^>]+>', '', item.get('snippet', ''))).strip()
+                        url = 'https://en.wikipedia.org/wiki/' + urllib.parse.quote(title.replace(' ', '_'))
+                        if title and url and not any(r['url'] == url for r in results):
+                            results.append({'title': title, 'url': url, 'description': snippet})
+                            if len(results) >= limit:
+                                break
+            except Exception:
+                pass
 
         # 3. GitHub Search API
-        if len(results) < limit:
-            clean_q = re.sub(r'\bsite:\S+', '', query).strip() or query
-            gh_queries = [clean_q]
-            words = [w for w in clean_q.split() if len(w) > 1]
-            if len(words) > 4:
-                gh_queries.append(' '.join(words[:4]))
-            for q_term in gh_queries:
-                try:
-                    gh_url = f"https://api.github.com/search/repositories?q={urllib.parse.quote_plus(q_term)}&per_page={limit}"
-                    req_gh = urllib.request.Request(gh_url, headers={'User-Agent': 'Khai/1.0', 'Accept': 'application/vnd.github.v3+json'})
-                    with urllib.request.urlopen(req_gh, timeout=6) as r_gh:
-                        data = json.loads(r_gh.read().decode('utf-8'))
-                        for item in data.get('items', []):
-                            name = item.get('full_name') or item.get('name')
-                            url = item.get('html_url')
-                            desc = item.get('description') or ''
-                            if name and url and not any(r['url'] == url for r in results):
-                                results.append({'title': name, 'url': url, 'description': desc})
-                                if len(results) >= limit:
-                                    break
-                except Exception:
-                    pass
-                if len(results) >= limit:
-                    break
+        for q_term in candidates:
+            if len(results) >= limit:
+                break
+            try:
+                gh_url = f"https://api.github.com/search/repositories?q={urllib.parse.quote_plus(q_term)}&per_page={limit}"
+                req_gh = urllib.request.Request(gh_url, headers={'User-Agent': 'Khai/1.0', 'Accept': 'application/vnd.github.v3+json'})
+                with urllib.request.urlopen(req_gh, timeout=6) as r_gh:
+                    data = json.loads(r_gh.read().decode('utf-8'))
+                    for item in data.get('items', []):
+                        name = item.get('full_name') or item.get('name')
+                        url = item.get('html_url')
+                        desc = item.get('description') or ''
+                        if name and url and not any(r['url'] == url for r in results):
+                            results.append({'title': name, 'url': url, 'description': desc})
+                            if len(results) >= limit:
+                                break
+            except Exception:
+                pass
 
         return results[:limit]
 
