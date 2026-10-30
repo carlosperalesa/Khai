@@ -22,6 +22,7 @@ from app.mind.verifier import verify_result
 from app.mind.recipe import RevisionPlanner, step_params, step_output
 from app.mind.result_presenter import present_recipe
 from app.hand.skill_spec import validate_recipe
+from app.hand.agent_loop import AgentExhausted
 from app.dreams.dreams import Dreams
 from app.mind.requirements import RequirementsPlanner
 from app.mind.skill_selector import validate_params
@@ -449,6 +450,16 @@ class Coordinator:
                 return finish('La respuesta no corresponde al mensaje al que contestaste.', 'rejected')
             result = self.answer_question(source, question, args['answer'], sid)
             reply = result.text
+        elif name == 'set_default_provider':
+            capability, provider = args['capability'], args['provider']
+            catalog = getattr(getattr(self.manager, 'hand', None), 'catalog', None)
+            available = catalog.providers(capability) if catalog else []
+            if provider not in available:
+                return finish('Ese proveedor no estÃ¡ disponible para la capacidad indicada.', 'rejected')
+            receipt = {'provider': provider, 'source': source, 'approved_at': time.time()}
+            self.manager.memory.set_preference('default_provider_' + capability, receipt)
+            reply = (f'{provider} quedÃ³ como proveedor predeterminado para {capability}. '
+                     'Esta preferencia es auditable y puede cambiarse.')
         elif name == 'get_system_status':
             reply = json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False)
         else:
@@ -1759,7 +1770,10 @@ class Coordinator:
             if action == 'ACTION_REQUIRED':
                 request = intent.get('extracted_goal') or request
                 self.store.update(tid, expected={'ROUTING'}, kind='objective', request=request,
-                                  original_request=request, source_request=task.get('source_request') or task['request'])
+                                  original_request=request, source_request=task.get('source_request') or task['request'],
+                                  requested_capability=intent.get('capability'),
+                                  requested_provider=intent.get('provider'),
+                                  explicit_creation=bool(intent.get('creation_requested')))
                 if intent.get('tool_call'):
                     call_id = self.conversations.record_call(task['source'], intent['tool_call'])
                     self.conversations.complete(task['source'], {'call_id': call_id,
@@ -1833,9 +1847,24 @@ class Coordinator:
                     return
             selector = getattr(self.manager, 'skill_selector', None)
             if action == 'ACTION_REQUIRED' and selector is not None and hasattr(self.manager, 'hand'):
+                capability = intent.get('capability') or task.get('requested_capability')
+                provider = intent.get('provider') or task.get('requested_provider')
+                if capability and not provider:
+                    preference = self.manager.memory.get_preference('default_provider_' + capability)
+                    provider = preference.get('provider') if isinstance(preference, dict) else preference
+                    available = self.manager.hand.catalog.providers(capability)
+                    if not provider and available:
+                        self.store.update(tid, expected={'ROUTING'}, state='COMPLETED',
+                                          routing_action='GENERAL_CHAT')
+                        reply = ('Â¿QuÃ© proveedor quieres usar para ' + capability + '? Opciones disponibles: '
+                                 + ', '.join(available) + '. TambiÃ©n puedes aprobar uno como predeterminado.')
+                        self.manager.memory.append_long_term('khai_chat', reply)
+                        self.notify(reply)
+                        return
                 selected = selector.select(request, lambda spec:
                     spec['runtime'] in {'SAFE', 'AGENT', 'GOD'}
-                    and not spec['dependencies'] and self._services_available(spec['services']))
+                    and not spec['dependencies'] and self._services_available(spec['services']),
+                    capability=capability, provider=provider)
                 if selected is not None:
                     version = self.manager.hand.version(selected['version_id'])
                     if version['status'] == 'active':
@@ -1882,7 +1911,7 @@ class Coordinator:
                 hypotheses = [h for h in self.manager.memory.get_active_hypotheses() if h['topic'] == context]
                 hypotheses.sort(key=lambda h: h['confidence'], reverse=True)
 
-                if not direct and not task.get('creation_consent'):
+                if not direct and not task.get('creation_consent') and not intent.get('creation_requested'):
                     setup = ([self._setup_service(goal, manifest)]
                              if 'Network' in manifest['capabilities'] else [])
                     self.store.update(tid, expected={'ROUTING'}, state='WAITING_CREATION_APPROVAL', request=goal,
@@ -1896,6 +1925,14 @@ class Coordinator:
 
                 self.store.update(tid, expected={'ROUTING'}, state='SCOPE_PLANNING', request=goal,
                                   original_request=request,
+                                  requested_capability=intent.get('capability'),
+                                  requested_provider=intent.get('provider'),
+                                  explicit_creation=bool(intent.get('creation_requested')),
+                                  creation_consent=(
+                                      {'source': task['source'] + ':explicit-create',
+                                       'allowed_capabilities': list(manifest.get('capabilities', [])),
+                                       'allowed_services': []}
+                                      if intent.get('creation_requested') else task.get('creation_consent')),
                                   manifest=manifest, context=context,
                                   hypothesis_id=hypotheses[0]['id'] if hypotheses else None,
                                   alternatives=[h['id'] for h in hypotheses[1:3]], diagnosed=bool(hypotheses))
@@ -1910,12 +1947,34 @@ class Coordinator:
             selected_version_id = task.get('selected_version_id')
             if ('Network' in task['manifest'].get('capabilities', [])
                     and not task.get('services') and not selected_version_id):
-                descriptor, descriptor_hash = self.manager.hand.describe_service(task)
+                try:
+                    descriptor, descriptor_hash = self.manager.hand.describe_service(task)
+                except AgentExhausted as exc:
+                    run_id = (self.manager.hand.last_agent_run_id
+                              or getattr(self.manager.hand.agent, 'last_run_id', None))
+                    self.manager.memory.record_episode(tid, run_id, task['request'], 'failure',
+                                                       'service_research', str(exc),
+                                                       {'feedback': task.get('feedback')})
+                    failures = task.get('hand_failures', 0) + 1
+                    self.store.update(tid, expected={'GENERATING'},
+                                      state='DIAGNOSING' if failures >= 2 else 'GENERATING',
+                                      feedback={'error': str(exc), 'stage': 'service_research',
+                                                'agent_run_id': run_id},
+                                      agent_run_id=run_id, hand_failures=failures)
+                    return
+                self.store.update(tid, expected={'GENERATING'},
+                                  agent_run_id=self.manager.hand.last_agent_run_id)
                 if descriptor.get('effect') == 'read':
                     self.manager.pixy_services.decide(descriptor_hash, True, 'system:auto-read-policy')
                     ref = {'service_id': descriptor['service_id'], 'operation': descriptor['operation'],
                            'version': descriptor['version']}
-                    self.store.update(tid, expected={'GENERATING'}, services=[ref])
+                    changes = {'services': [ref]}
+                    if task.get('creation_consent'):
+                        consent = dict(task['creation_consent'])
+                        consent['allowed_services'] = [ref]
+                        changes['creation_consent'] = consent
+                        task['creation_consent'] = consent
+                    self.store.update(tid, expected={'GENERATING'}, **changes)
                     task['services'] = [ref]
                 else:
                     self.store.update(tid, expected={'GENERATING'}, state='WAITING_SERVICE_APPROVAL',
@@ -1954,9 +2013,22 @@ class Coordinator:
                     mode, deps = skill_metadata(code)
                 else:
                     code, mode, deps = crafter.generate(task, rules, hypothesis)
-            except (ValueError, SyntaxError) as exc:
-                self.store.update(tid, expected={'GENERATING'}, feedback=str(exc))
+            except (ValueError, SyntaxError, AgentExhausted) as exc:
+                run_id = (self.manager.hand.last_agent_run_id
+                          or getattr(self.manager.hand.agent, 'last_run_id', None))
+                self.manager.memory.record_episode(tid, run_id, task['request'], 'failure',
+                                                   'skill_generation', str(exc),
+                                                   {'feedback': task.get('feedback')})
+                failures = task.get('hand_failures', 0) + 1
+                self.store.update(tid, expected={'GENERATING'},
+                                  state='DIAGNOSING' if failures >= 2 else 'GENERATING',
+                                  feedback={'error': str(exc), 'stage': 'skill_generation',
+                                            'agent_run_id': run_id},
+                                  agent_run_id=run_id, hand_failures=failures)
                 return
+            if not selected_version_id:
+                self.store.update(tid, expected={'GENERATING'},
+                                  agent_run_id=self.manager.hand.last_agent_run_id)
             current = self.store.get(tid)
             if current['state'] != 'GENERATING' or current.get('goal_revision', 0) != task.get('goal_revision', 0):
                 raise StaleGoalRevision('La generación terminó para una revisión obsoleta')
@@ -1973,7 +2045,11 @@ class Coordinator:
                         prior = self.manager.hand.version(task['version_id'])
                         if prior['status'] in {'draft', 'approved'}:
                             self.manager.hand.reject(prior['version_id'], 'Replaced after diagnosis')
-                    version = self.manager.hand.create(name, code, task['manifest'], correlation_id=tid)
+                    version = self.manager.hand.create(
+                        name, code, task['manifest'], correlation_id=tid,
+                        skill_metadata={'capability': task.get('requested_capability'),
+                                        'provider': task.get('requested_provider'),
+                                        'aliases': task.get('provider_aliases', [])})
                 if task.get('recipe') and task.get('planned_skill_spec'):
                     recipe = json.loads(json.dumps(task['recipe']))
                     recipe['steps'][task['recipe_step_index']]['version_id'] = version['version_id']

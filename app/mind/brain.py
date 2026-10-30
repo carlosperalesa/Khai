@@ -8,5 +8,11 @@ class Brain:
     def generate_content(self, prompt, **kwargs):
         return self._gateway.generate_content(prompt, **kwargs)
 
+    def complete(self, messages, tools=None, **kwargs):
+        return self._gateway.complete(messages, tools or [], **kwargs)
+
+    def web_search(self, query, **kwargs):
+        return self._gateway.web_search(query, **kwargs)
+
     def test_all_connections(self):
         return self._gateway.test_all_connections()

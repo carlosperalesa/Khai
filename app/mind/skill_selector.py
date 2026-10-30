@@ -63,8 +63,13 @@ class SkillSelector:
         # Never infer automatic acceptance from an uncalibrated model score.
         self.threshold, self.min_margin = threshold, min_margin
 
-    def select(self, query, compatible):
+    def select(self, query, compatible, capability=None, provider=None):
         records = [record for record in self.catalog.active() if compatible(record['spec'])]
+        if capability:
+            records = [record for record in records if record['spec'].get('capability') == capability]
+        if provider:
+            records = [record for record in records if record['spec'].get('provider') == provider
+                       or provider in record['spec'].get('aliases', [])]
         if not records:
             return None
         ranked = records
@@ -93,6 +98,8 @@ class SkillSelector:
         if self.llm is None:
             return None
         options = [{'skill_id': record['skill_id'], 'description': record['spec']['description'],
+                    'capability': record['spec'].get('capability'),
+                    'provider': record['spec'].get('provider'),
                     'use_cases': record['spec']['use_cases'],
                     'input_schema': record['spec']['input_schema']} for record in ranked[:20]]
         prompt = ('Selecciona una capacidad que resuelva la solicitud COMPLETA y extrae los parámetros presentes. '

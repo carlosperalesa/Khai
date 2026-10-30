@@ -29,7 +29,7 @@ def validate_write_summary(summary):
 def validate_descriptor(spec):
     fields = {'service_id', 'operation', 'version', 'url', 'method', 'parameters',
               'content_types', 'max_bytes', 'timeout', 'per_minute', 'effect',
-              'credential_ref', 'effect_contract'}
+              'credential_ref', 'credential_header', 'credential_prefix', 'effect_contract'}
     if not isinstance(spec, dict) or set(spec) != fields:
         raise ValueError('ServiceDescriptor fields do not match the contract')
     for key in ('service_id', 'operation', 'version'):
@@ -58,6 +58,12 @@ def validate_descriptor(spec):
     if spec['credential_ref'] is not None and (
             not isinstance(spec['credential_ref'], str) or not SECRET_REF.fullmatch(spec['credential_ref'])):
         raise ValueError('Credential must be a reference, never a value')
+    if (not isinstance(spec['credential_header'], str)
+            or not re.fullmatch(r'[A-Za-z][A-Za-z0-9-]{0,63}', spec['credential_header'])
+            or spec['credential_header'].lower() in {'host', 'content-length', 'transfer-encoding'}):
+        raise ValueError('Invalid credential header')
+    if not isinstance(spec['credential_prefix'], str) or len(spec['credential_prefix']) > 32:
+        raise ValueError('Invalid credential prefix')
     contract = spec.get('effect_contract')
     if spec['effect'] == 'read':
         if contract is not None:
@@ -194,6 +200,8 @@ class ServiceRegistry:
                 'max_bytes': spec['max_bytes'], 'timeout': spec['timeout'],
                 'per_minute': spec['per_minute'], 'effect': spec['effect'],
                 'credential': spec['credential_ref'],
+                'credential_header': spec['credential_header'],
+                'credential_prefix': spec['credential_prefix'],
                 'effect_contract': spec.get('effect_contract')}
         return services
 

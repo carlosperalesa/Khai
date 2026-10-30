@@ -96,9 +96,19 @@ def validate_skill_spec(spec):
     """The catalog describes capability, never a particular request's arguments."""
     required = {'skill_id', 'description', 'use_cases', 'input_schema', 'output_schema',
                 'runtime', 'dependencies', 'services', 'verifier'}
-    if not isinstance(spec, dict) or set(spec) - (required | {'extraction_templates'}) or not required <= set(spec):
+    optional = {'extraction_templates', 'capability', 'provider', 'aliases'}
+    if not isinstance(spec, dict) or set(spec) - (required | optional) or not required <= set(spec):
         raise ValueError('SkillSpec fields do not match the contract')
     _name(spec['skill_id'], 'skill ID')
+    if spec.get('capability') is not None:
+        _name(spec['capability'], 'capability')
+    if spec.get('provider') is not None:
+        _name(spec['provider'], 'provider')
+    aliases = spec.get('aliases', [])
+    if not isinstance(aliases, list) or len(aliases) > 32:
+        raise ValueError('Invalid aliases')
+    for alias in aliases:
+        _name(alias, 'alias')
     if not isinstance(spec['description'], str) or not 10 <= len(spec['description'].strip()) <= 1000:
         raise ValueError('Invalid skill description')
     if not isinstance(spec['use_cases'], list) or not spec['use_cases'] or any(

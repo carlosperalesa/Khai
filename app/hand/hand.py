@@ -1,4 +1,3 @@
-from urllib.parse import urlsplit
 import ast
 import hashlib
 import json
@@ -17,6 +16,7 @@ from app.pixy.control import BudgetExceeded
 from app.voice.runtime.contract import digest, skill_metadata, default_runtime_capabilities
 from app.hand.catalog import SkillCatalog
 from app.hand.skill_spec import normalize_schema, validate_skill_spec
+from app.hand.agent_loop import AgentLoop, AgentExhausted
 from app.voice.gateway.service_registry import validate_descriptor
 
 RECOVERY_STEP_TIMEOUT = 300
@@ -67,6 +67,8 @@ class Hand:
                BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
         ]], component='hand-recovery')
         self.catalog = SkillCatalog(self.db)
+        self.agent = AgentLoop(self.db, self.llm) if self.llm is not None else None
+        self.last_agent_run_id = None
         self.recover()
 
     def recover(self):
@@ -137,8 +139,10 @@ class Hand:
             else "No declares dependencias externas # PIP (no permitidas en este runtime)."
         )
         public_dir = caps.filesystem.get("public_output", "/app/data/public")
-        prompt = f'''Escribe Python autónomo para el objetivo: {task['request']}
-Devuelve SOLO un bloque de código Python. Primera línea: una de {modes_str}.
+        prompt = f'''Eres Hand, constructor autónomo de capacidades. Investiga cuando falte información,
+usa los errores de herramientas para corregir el artefacto y termina únicamente llamando finish_code.
+Escribe Python autónomo para el objetivo: {task['request']}
+La primera línea debe ser una de {modes_str}.
 {deps_instruction} No uses shell ni instrucciones Docker.
 El entorno está aislado en contenedor; no uses subprocess, ctypes, multiprocessing ni librerías de escape del sistema.
 El worker no tiene red directa (network_mode: {caps.gateway_api.get('network_mode', 'none')}). Si el manifiesto declara 'Network', usa exclusivamente
@@ -165,17 +169,38 @@ Resultado/rechazo anterior: {str(task.get('feedback', ''))}
 Alcance confirmado por el propietario: {json.dumps((task.get('scope_revisions') or [{}])[-1], ensure_ascii=False)}
 Contrato de acción planificada: {json.dumps(task.get('planned_skill_spec') or {}, ensure_ascii=False)}
 Código anterior: {str(task.get('code', ''))}
+Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']), ensure_ascii=False)}
 '''
-        code = self.llm.generate_content(prompt)
-        if '```python' in code:
-            code = code.split('```python', 1)[1].split('```', 1)[0]
-        elif '```' in code:
-            code = code.split('```', 1)[1].split('```', 1)[0]
-        code = code.strip()
+        result, run_id = self.agent.run(task.get('id'), 'Construye la skill solicitada.', prompt, [
+            {'name': 'web_search', 'description': 'Investiga documentación pública y devuelve fuentes.',
+             'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}},
+                            'required': ['query'], 'additionalProperties': False},
+             'handler': lambda args: self.llm.web_search(args['query'])},
+            {'name': 'finish_code', 'description': 'Entrega el código Python final para validación.',
+             'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
+                            'required': ['code'], 'additionalProperties': False},
+             'handler': lambda args: self._finish_code(args, caps)},
+        ])
+        self.last_agent_run_id = run_id
+        return result['code'], result['mode'], result['dependencies']
+
+    def _episode_context(self, query):
+        memory = getattr(getattr(self, 'manager', None), 'memory', None)
+        if memory is not None and hasattr(memory, 'search_episode_notes'):
+            return memory.search_episode_notes(query, limit=5)
+        return []
+
+    @staticmethod
+    def _finish_code(args, caps):
+        code = str(args.get('code') or '').strip()
+        if code.startswith('```'):
+            code = '\n'.join(code.splitlines()[1:])
+            if code.rstrip().endswith('```'):
+                code = code.rstrip()[:-3]
         ast.parse(code)
         mode, deps = skill_metadata(code)
         caps.validate_code(mode, deps)
-        return code, mode, deps
+        return {'finished': True, 'value': {'code': code, 'mode': mode, 'dependencies': deps}}
 
 
     def snapshot(self, code):
@@ -242,6 +267,11 @@ Código anterior: {str(task.get('code', ''))}
                     'output_schema': out_s, 'runtime': mode,
                     'dependencies': dependencies, 'services': services,
                     'verifier': {'kind': (task.get('criterion') or {}).get('kind', 'owner_criterion')}}
+            if task.get('requested_capability'):
+                spec['capability'] = task['requested_capability']
+            if task.get('requested_provider'):
+                spec['provider'] = task['requested_provider']
+            spec['aliases'] = list(task.get('provider_aliases') or [])
             if 'extraction_templates' in proposed:
                 spec['extraction_templates'] = proposed['extraction_templates']
             return validate_skill_spec(spec)
@@ -255,85 +285,8 @@ Código anterior: {str(task.get('code', ''))}
             raise RuntimeError('Hand has no service proposal port')
         return self.service_proposals.propose(descriptor)
 
-    @staticmethod
-    def _normalize_service_descriptor(spec):
-        if not isinstance(spec, dict) or not spec.get('url'):
-            return spec
-
-        def _clean_ident(val, fallback):
-            s = re.sub(r'[^a-z0-9_-]', '_', str(val or '').strip().lower()).strip('_')
-            s = re.sub(r'_+', '_', s)
-            if not s or not s[0].isalpha():
-                s = fallback + ('_' + s if s else '')
-            return s[:64]
-
-        url = str(spec.get('url') or '').strip()
-        if url.startswith('http://'):
-            url = 'https://' + url[7:]
-        elif not url.startswith('https://'):
-            url = 'https://' + url
-
-        sid_raw = spec.get('service_id')
-        if not sid_raw or sid_raw in {'service', 'svc', 'api'} or '.' in str(sid_raw):
-            try:
-                host = urlsplit(url).hostname or ''
-                parts = [p for p in host.split('.') if p not in {'api', 'www', 'com', 'org', 'net', 'io', 'dev'}]
-                if parts:
-                    sid_raw = parts[0]
-            except Exception:
-                pass
-
-        method = str(spec.get('method') or 'GET').upper().strip()
-        if method not in {'GET', 'POST'}:
-            method = 'GET'
-        effect = str(spec.get('effect') or ('read' if method == 'GET' else 'write')).lower().strip()
-        if method == 'GET':
-            effect = 'read'
-        raw_params = spec.get('parameters') if isinstance(spec.get('parameters'), list) else []
-        params = []
-        for p in raw_params[:32]:
-            cp = _clean_ident(p, 'param')
-            if cp not in params:
-                params.append(cp)
-        raw_ct = spec.get('content_types') if isinstance(spec.get('content_types'), list) else []
-        ctypes = [c for c in raw_ct if c in {'application/json', 'text/plain'}] or ['application/json']
-        try:
-            max_b = max(1, min(2 * 1024 * 1024, int(spec.get('max_bytes') or 65536)))
-        except Exception:
-            max_b = 65536
-        try:
-            timeout = max(1, min(30, int(float(spec.get('timeout') or 15))))
-        except Exception:
-            timeout = 15
-        try:
-            per_min = max(1, min(60, int(spec.get('per_minute') or 30)))
-        except Exception:
-            per_min = 30
-        cred = spec.get('credential_ref')
-        if isinstance(cred, str):
-            cred = cred.strip().upper()
-            if not re.fullmatch(r'^[A-Z][A-Z0-9_]{2,127}$', cred):
-                cred = None
-        else:
-            cred = None
-        return {
-            'service_id': _clean_ident(sid_raw, 'svc'),
-            'operation': _clean_ident(spec.get('operation'), 'op'),
-            'version': _clean_ident(spec.get('version') or 'v1', 'v1'),
-            'url': url,
-            'method': method,
-            'parameters': params,
-            'content_types': ctypes,
-            'max_bytes': max_b,
-            'timeout': timeout,
-            'per_minute': per_min,
-            'effect': effect,
-            'credential_ref': cred,
-            'effect_contract': None if effect == 'read' else spec.get('effect_contract'),
-        }
-
     def describe_service(self, task):
-        """Propose a fixed Voice operation; only Pixy can activate it."""
+        """Research and propose one Voice operation; validation errors feed the loop."""
         if self.llm is None:
             raise RuntimeError('No hay LLM para proponer el servicio externo')
         template = {
@@ -349,24 +302,45 @@ Código anterior: {str(task.get('code', ''))}
             "per_minute": 30,
             "effect": "read",
             "credential_ref": None,
+            "credential_header": "Authorization",
+            "credential_prefix": "Bearer ",
             "effect_contract": None
         }
-        prompt = ("Propón un descriptor JSON de UNA operación HTTPS pública para este objetivo "
-                  "siguiendo exactamente esta plantilla:\n"
-                  + json.dumps(template, ensure_ascii=False) + "\n"
-                  "La URL debe ser HTTPS fija; parámetros van en query GET o cuerpo JSON POST. "
-                  "No inventes credenciales ni incluyas sus valores; usa credential_ref=null si es pública "
-                  "o el nombre de la variable de entorno en MAYÚSCULAS. "
-                  "Para lectura (GET) usa effect=\"read\" y effect_contract=null. "
-                  "Si desconoces un endpoint real, responde {}. Objetivo: " + str(task['request']))
-        try:
-            raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
-            spec = json.loads(raw) if isinstance(raw, str) else raw
-            spec = self._normalize_service_descriptor(spec)
-            validate_descriptor(spec)
-        except (ValueError, TypeError, KeyError) as exc:
-            raise ValueError('Hand no pudo declarar un servicio externo válido') from exc
-        return spec, self.propose_service(spec)
+        prompt = ("Eres Hand. Investiga documentación oficial antes de declarar una operación HTTPS. "
+                  "No adivines campos ni cambies de proveedor silenciosamente. Usa web_search tantas veces "
+                  "como aporte información; cada error de validate_descriptor debe corregirse. Termina solo "
+                  "con finish_descriptor. Contrato exacto: " + json.dumps(template, ensure_ascii=False) +
+                  "\nObjetivo: " + str(task['request']) +
+                  "\nError o evidencia anterior: " + str(task.get('feedback') or 'ninguno') +
+                  "\nNotas relevantes: " + json.dumps(self._episode_context(task['request']), ensure_ascii=False))
+        result, run_id = self.agent.run(task.get('id'), 'Investiga y declara el servicio necesario.', prompt, [
+            {'name': 'web_search', 'description': 'Busca documentación pública con fuentes verificables.',
+             'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}},
+                            'required': ['query'], 'additionalProperties': False},
+             'handler': lambda args: self.llm.web_search(args['query'])},
+            {'name': 'validate_descriptor', 'description': 'Valida un descriptor y devuelve el error exacto.',
+             'parameters': {'type': 'object', 'properties': {'descriptor': {'type': 'object'}},
+                            'required': ['descriptor'], 'additionalProperties': False},
+             'handler': lambda args: self._validate_descriptor_tool(args)},
+            {'name': 'finish_descriptor', 'description': 'Entrega el descriptor final; vuelve a validarlo.',
+             'parameters': {'type': 'object', 'properties': {'descriptor': {'type': 'object'}},
+                            'required': ['descriptor'], 'additionalProperties': False},
+             'handler': lambda args: self._finish_descriptor(args)},
+        ])
+        self.last_agent_run_id = run_id
+        return result, self.propose_service(result)
+
+    @staticmethod
+    def _validate_descriptor_tool(args):
+        spec = args.get('descriptor')
+        validate_descriptor(spec)
+        return {'valid': True, 'descriptor': spec}
+
+    @staticmethod
+    def _finish_descriptor(args):
+        spec = args.get('descriptor')
+        validate_descriptor(spec)
+        return {'finished': True, 'value': spec}
 
     def _name(self, name):
         if not isinstance(name,str) or not re.fullmatch('[a-z][a-z0-9-]{0,63}',name):
@@ -400,8 +374,8 @@ Código anterior: {str(task.get('code', ''))}
                          ('failed' if error else 'completed',time.time(),error,op))
 
     def _files(self, folder):
-        if folder.is_symlink() or {p.name for p in folder.iterdir()} != {'app','data','other'}:
-            raise ValueError('A skill must contain exactly app/, data/ and other/')
+        if folder.is_symlink() or {p.name for p in folder.iterdir()} != {'SKILL.md','app','data','other'}:
+            raise ValueError('A skill must contain SKILL.md and exactly app/, data/ and other/')
         files = []
         for p in sorted(folder.rglob('*')):
             if p.is_symlink() or not p.resolve().is_relative_to(folder.resolve()):
@@ -420,7 +394,8 @@ Código anterior: {str(task.get('code', ''))}
         return sha(json.dumps([(p.relative_to(folder).as_posix(),sha(p.read_bytes()))
                                for p in self._files(folder)],separators=(',',':')).encode())
 
-    def create(self, name, code, manifest, *, correlation_id=None, restored_from=None, version_number=None):
+    def create(self, name, code, manifest, *, correlation_id=None, restored_from=None, version_number=None,
+               skill_metadata=None):
         name = self._name(name)
         with self.locked():
             draft = self.root/('.'+name)
@@ -436,6 +411,19 @@ Código anterior: {str(task.get('code', ''))}
                 draft.mkdir()
                 for part in ('app','data','other'):
                     (draft/part).mkdir()
+                metadata = skill_metadata or {}
+                frontmatter = {
+                    'name': name,
+                    'capability': metadata.get('capability'),
+                    'provider': metadata.get('provider'),
+                    'aliases': metadata.get('aliases', []),
+                }
+                lines = ['---'] + [f'{key}: {json.dumps(value, ensure_ascii=False)}'
+                                    for key, value in frontmatter.items() if value not in (None, [], '')]
+                lines += ['---', '', '# ' + name, '', str(manifest.get('purpose') or name).strip(), '',
+                          'Use this skill only for the declared capability and provider. Return evidence '
+                          'from the real execution and never substitute a provider silently.', '']
+                (draft/'SKILL.md').write_text('\n'.join(lines), encoding='utf-8')
                 (draft/'app'/'main.py').write_bytes(code.encode('utf-8'))
                 with connection(self.db) as conn:
                     conn.execute('''INSERT INTO versions(version_id,skill_name,version_number,status,artifact_hash,
@@ -504,15 +492,17 @@ Código anterior: {str(task.get('code', ''))}
             for item in z.infolist():
                 p = PurePosixPath(item.filename)
                 if ('\\' in item.filename or ':' in item.filename or p.is_absolute() or '..' in p.parts
-                        or len(p.parts)<2 or p.parts[0] != name or p.parts[1] not in {'app','data','other'}
+                        or len(p.parts)<2 or p.parts[0] != name
+                        or (p.parts[1] not in {'app','data','other','SKILL.md'})
+                        or (p.parts[1] == 'SKILL.md' and len(p.parts) != 2)
                         or (item.external_attr >> 16) & 0o170000 == 0o120000 or item.filename in names):
                     raise ValueError('Invalid archive structure')
                 names.add(item.filename)
                 total += item.file_size
                 if total > 256*1024*1024:
                     raise ValueError('Archive too large')
-            if name+'/app/main.py' not in names:
-                raise ValueError('Archive has no entry point')
+            if name+'/app/main.py' not in names or name+'/SKILL.md' not in names:
+                raise ValueError('Archive has no entry point or SKILL.md')
             if z.testzip() is not None:
                 raise ValueError('Corrupt archive')
         return sha(path.read_bytes()),path.stat().st_size

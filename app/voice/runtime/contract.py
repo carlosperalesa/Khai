@@ -12,7 +12,7 @@ def digest(data):
 
 def bundle_hash(folder):
     folder = Path(folder)
-    if folder.is_symlink() or {p.name for p in folder.iterdir()} != {'app','data','other'}:
+    if folder.is_symlink() or {p.name for p in folder.iterdir()} != {'SKILL.md','app','data','other'}:
         raise ValueError('Invalid skill bundle')
     values,total = [],0
     for path in sorted(folder.rglob('*')):

@@ -9,6 +9,14 @@ class Arguments(BaseModel):
 
 class StartArguments(Arguments):
     goal: str = Field(min_length=3, max_length=8000)
+    capability: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,63}$')
+    provider: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,63}$')
+    creation_requested: bool = False
+
+
+class DefaultProviderArguments(Arguments):
+    capability: str = Field(pattern=r'^[a-z][a-z0-9_-]{0,63}$')
+    provider: str = Field(pattern=r'^[a-z][a-z0-9_-]{0,63}$')
 
 
 class TargetArguments(Arguments):
@@ -55,7 +63,13 @@ class HealthCall(Arguments):
     arguments: Arguments
 
 
-ToolCall = Annotated[Union[StartCall, ReviseCall, StatusCall, CancelCall, AnswerCall, HealthCall],
+class DefaultProviderCall(Arguments):
+    name: Literal['set_default_provider']
+    arguments: DefaultProviderArguments
+
+
+ToolCall = Annotated[Union[StartCall, ReviseCall, StatusCall, CancelCall, AnswerCall, HealthCall,
+                           DefaultProviderCall],
                      Field(discriminator='name')]
 
 
@@ -76,5 +90,7 @@ class AssistantTurn(Arguments):
         args = call.arguments.model_dump()
         if call.name == 'start_task':
             return {'action': 'ACTION_REQUIRED', 'extracted_goal': args['goal'], 'reply': '',
+                    'capability': args.get('capability'), 'provider': args.get('provider'),
+                    'creation_requested': args.get('creation_requested', False),
                     'tool_call': call.model_dump()}
         return {'action': 'TOOL_CALL', 'reply': '', 'tool_call': call.model_dump()}

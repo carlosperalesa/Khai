@@ -24,6 +24,12 @@ class Dreams:
     def record(self, task, success, evidence):
         run = task.get('execution_id')
         tid = task.get('id')
+        if run and isinstance(success, bool) and self.memory and hasattr(self.memory, 'record_episode'):
+            self.memory.record_episode(
+                tid, task.get('agent_run_id'), task.get('request', ''),
+                'success' if success else 'failure', 'execution',
+                ('Ejecucion verificada correctamente' if success
+                 else 'Ejecucion verificada con fallo'), evidence)
         if not run or not isinstance(success, bool):
             raise ValueError('La evidencia debe identificar una ejecución verificada y un resultado booleano')
 

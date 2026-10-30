@@ -2,6 +2,8 @@ import os
 import time
 import logging
 import requests
+import json
+import uuid
 from typing import Dict
 from app.pixy.budget import current_budget
 
@@ -253,6 +255,183 @@ class LLMManager:
 
         self._notify("Todos los LLM están ocupados, por favor espere.")
         raise ValueError("Todos los LLM están ocupados, por favor espere.")
+
+    @staticmethod
+    def _tool_schema(tools):
+        normalized = []
+        for tool in tools or []:
+            fn = tool.get('function', tool)
+            normalized.append({'type': 'function', 'function': {
+                'name': fn['name'], 'description': fn.get('description', ''),
+                'parameters': fn.get('parameters', {'type': 'object', 'properties': {}})}})
+        return normalized
+
+    def complete(self, messages, tools=None, **kwargs):
+        """Execute one logical native function-calling turn with failover."""
+        if not isinstance(messages, list) or not messages:
+            raise ValueError('Agent messages are required')
+        budget = current_budget.get()
+        if budget is not None:
+            task = budget()
+            kwargs['_timeout'] = max(1, min(60, task['deadline'] - time.time()))
+        else:
+            kwargs['_timeout'] = min(60, kwargs.get('_timeout', 60))
+        tools = self._tool_schema(tools)
+        status, now = self._load_status(), time.time()
+        pool = [item for item in self.api_keys_pool if now > status.get(item['id'], 0)]
+        last_error = None
+        for current in pool:
+            try:
+                turn = getattr(self, '_complete_' + current['type'])(
+                    messages, tools, current['key'], kwargs)
+                turn.setdefault('provider', current['type'])
+                return turn
+            except Exception as exc:
+                last_error = exc
+                logger.warning('Tool-calling provider %s failed (%s)', current['id'], type(exc).__name__)
+                code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                self._mark_key_failed(current['id'], cooldown=300 if code in {401, 403, 429} else None)
+        endpoint = self._dolphin_endpoint()
+        if endpoint:
+            try:
+                return self._complete_dolphin(messages, tools, endpoint, kwargs)
+            except Exception as exc:
+                last_error = exc
+                logger.warning('Dolphin tool-calling unavailable (%s)', type(exc).__name__)
+        raise ValueError('Ningún LLM disponible soportó el turno con herramientas') from last_error
+
+    @staticmethod
+    def _openai_messages(messages):
+        converted = []
+        for message in messages:
+            item = {'role': message['role'], 'content': message.get('content') or ''}
+            if message['role'] == 'assistant' and message.get('tool_calls'):
+                item['tool_calls'] = [{'id': call.get('id') or ('call_' + uuid.uuid4().hex),
+                                       'type': 'function', 'function': {
+                                           'name': call['name'],
+                                           'arguments': json.dumps(call.get('arguments', {}), ensure_ascii=False)}}
+                                      for call in message['tool_calls']]
+            if message['role'] == 'tool':
+                item['tool_call_id'] = message['tool_call_id']
+            converted.append(item)
+        return converted
+
+    @staticmethod
+    def _openai_turn(message):
+        calls = []
+        for call in message.tool_calls or []:
+            try:
+                arguments = json.loads(call.function.arguments or '{}')
+            except json.JSONDecodeError:
+                arguments = {'_invalid_json': call.function.arguments}
+            calls.append({'id': call.id, 'name': call.function.name, 'arguments': arguments})
+        return {'content': message.content or '', 'tool_calls': calls}
+
+    def _complete_openai(self, messages, tools, key, kwargs):
+        from openai import OpenAI
+        client = OpenAI(api_key=key, timeout=kwargs.get('_timeout', 60), max_retries=0)
+        response = client.chat.completions.create(
+            model=kwargs.get('model', 'gpt-4o-mini'), messages=self._openai_messages(messages),
+            tools=tools or None, temperature=kwargs.get('temperature', 0.2), max_tokens=8192)
+        return self._openai_turn(response.choices[0].message)
+
+    def _complete_azure(self, messages, tools, key, kwargs):
+        from openai import AzureOpenAI
+        endpoint = self.secrets.get('AZURE_OPENAI_ENDPOINT') if self.secrets else os.getenv('AZURE_OPENAI_ENDPOINT')
+        deployment = self.secrets.get('AZURE_OPENAI_DEPLOYMENT') if self.secrets else os.getenv('AZURE_OPENAI_DEPLOYMENT')
+        if not endpoint or not deployment:
+            raise ValueError('Azure tool calling is not configured')
+        client = AzureOpenAI(api_key=key, api_version='2024-02-15-preview',
+                             azure_endpoint=endpoint, timeout=kwargs.get('_timeout', 60), max_retries=0)
+        response = client.chat.completions.create(
+            model=deployment, messages=self._openai_messages(messages), tools=tools or None,
+            temperature=kwargs.get('temperature', 0.2), max_tokens=8192)
+        return self._openai_turn(response.choices[0].message)
+
+    @staticmethod
+    def _gemini_contents(messages):
+        contents, system = [], []
+        for message in messages:
+            role = message['role']
+            if role == 'system':
+                system.append(message.get('content', ''))
+                continue
+            if role == 'tool':
+                parts = [{'functionResponse': {'name': message.get('name', 'tool'),
+                                               'response': {'result': message.get('content', '')}}}]
+                contents.append({'role': 'user', 'parts': parts})
+                continue
+            parts = ([{'text': message['content']}] if message.get('content') else [])
+            for call in message.get('tool_calls', []):
+                parts.append({'functionCall': {'name': call['name'], 'args': call.get('arguments', {})}})
+            contents.append({'role': 'model' if role == 'assistant' else 'user',
+                             'parts': parts or [{'text': ''}]})
+        return contents, '\n'.join(system)
+
+    def _complete_gemini(self, messages, tools, key, kwargs):
+        model = kwargs.get('model', 'gemini-2.5-flash')
+        contents, system = self._gemini_contents(messages)
+        payload = {'contents': contents,
+                   'generationConfig': {'maxOutputTokens': 8192, 'temperature': 0.2}}
+        if system:
+            payload['systemInstruction'] = {'parts': [{'text': system}]}
+        if tools:
+            payload['tools'] = [{'functionDeclarations': [tool['function'] for tool in tools]}]
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
+        response = requests.post(url, json=payload, timeout=kwargs.get('_timeout', 60))
+        response.raise_for_status()
+        candidates = response.json().get('candidates') or []
+        if not candidates:
+            raise ValueError('Gemini no devolvió un turno agente')
+        parts = ((candidates[0].get('content') or {}).get('parts')) or []
+        text, calls = [], []
+        for part in parts:
+            if isinstance(part.get('text'), str):
+                text.append(part['text'])
+            if isinstance(part.get('functionCall'), dict):
+                call = part['functionCall']
+                calls.append({'id': 'call_' + uuid.uuid4().hex, 'name': call.get('name'),
+                              'arguments': call.get('args') or {}})
+        return {'content': '\n'.join(text).strip(), 'tool_calls': calls, 'model': model}
+
+    def _complete_dolphin(self, messages, tools, endpoint, kwargs):
+        payload = {'model': os.getenv('KHAI_DOLPHIN_MODEL', 'dolphin3:8b'),
+                   'messages': self._openai_messages(messages), 'tools': tools,
+                   'stream': False, 'options': {'num_predict': 4096, 'temperature': 0.2}}
+        response = requests.post(endpoint + '/api/chat', json=payload,
+                                 timeout=min(180, kwargs.get('_timeout', 60)), allow_redirects=False)
+        response.raise_for_status()
+        message = response.json().get('message') or {}
+        calls = [{'id': 'call_' + uuid.uuid4().hex,
+                  'name': call.get('function', {}).get('name'),
+                  'arguments': call.get('function', {}).get('arguments') or {}}
+                 for call in message.get('tool_calls') or []]
+        return {'content': message.get('content') or '', 'tool_calls': calls,
+                'provider': 'dolphin', 'model': payload['model']}
+
+    def web_search(self, query, *, limit=8):
+        """Platform research. Responses without sources are failures."""
+        if not isinstance(query, str) or not query.strip() or len(query) > 500:
+            raise ValueError('Invalid research query')
+        key = next((item['key'] for item in self.api_keys_pool if item['type'] == 'gemini'), None)
+        if not key:
+            raise ValueError('No research provider is configured')
+        model = os.getenv('KHAI_RESEARCH_MODEL', 'gemini-2.5-flash')
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
+        payload = {'contents': [{'parts': [{'text': query}]}], 'tools': [{'googleSearch': {}}],
+                   'generationConfig': {'maxOutputTokens': 2048, 'temperature': 0.1}}
+        response = requests.post(url, json=payload, timeout=60)
+        response.raise_for_status()
+        candidate = (response.json().get('candidates') or [{}])[0]
+        results = []
+        for chunk in (candidate.get('groundingMetadata') or {}).get('groundingChunks') or []:
+            web = chunk.get('web') or {}
+            if web.get('uri') and web.get('title'):
+                results.append({'title': web['title'], 'url': web['uri'], 'description': ''})
+        if not results:
+            raise ValueError('El proveedor de investigación no entregó fuentes verificables')
+        return {'provider': 'google', 'query': query,
+                'results': results[:max(1, min(10, int(limit)))]}
 
     def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
         """Ejecuta inferencia en el nodo privado Dolphin (Ollama) con soporte texto y JSON."""

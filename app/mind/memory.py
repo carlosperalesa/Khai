@@ -122,7 +122,40 @@ class MemoryEngine:
                     cooldown_until REAL
                 )
             ''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS episode_notes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, run_id TEXT, objective TEXT NOT NULL,
+                outcome TEXT NOT NULL, stage TEXT NOT NULL, summary TEXT NOT NULL,
+                evidence_json TEXT NOT NULL, created_at TEXT NOT NULL)''')
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS episode_notes_fts USING fts5(objective,summary,content='episode_notes',content_rowid='id')")
+            conn.execute('''CREATE TRIGGER IF NOT EXISTS episode_notes_ai AFTER INSERT ON episode_notes BEGIN
+                INSERT INTO episode_notes_fts(rowid,objective,summary) VALUES(new.id,new.objective,new.summary); END''')
+            conn.execute('''CREATE TRIGGER IF NOT EXISTS episode_notes_ad AFTER DELETE ON episode_notes BEGIN
+                INSERT INTO episode_notes_fts(episode_notes_fts,rowid,objective,summary)
+                VALUES('delete',old.id,old.objective,old.summary); END''')
             conn.commit()
+
+    def record_episode(self, task_id, run_id, objective, outcome, stage, summary, evidence=None):
+        """Persist one useful technical episode; callers exclude denied/cancelled work."""
+        if outcome not in {'success', 'failure'}:
+            raise ValueError('Episode outcome must be success or failure')
+        with self._get_conn() as conn:
+            conn.execute('''INSERT INTO episode_notes(task_id,run_id,objective,outcome,stage,summary,
+                            evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?)''',
+                         (task_id, run_id, str(objective)[:8000], outcome, str(stage)[:80],
+                          str(summary)[:8000], json.dumps(evidence or {}, ensure_ascii=False), _utc_now()))
+
+    def search_episode_notes(self, query, limit=5):
+        tokens = [token for token in ''.join(c if c.isalnum() else ' ' for c in str(query)).split()
+                  if len(token) > 2][:12]
+        if not tokens:
+            return []
+        expression = ' OR '.join('"' + token.replace('"', '') + '"' for token in tokens)
+        with self._get_conn() as conn:
+            rows = conn.execute('''SELECT e.task_id,e.run_id,e.objective,e.outcome,e.stage,e.summary,e.created_at
+                FROM episode_notes_fts f JOIN episode_notes e ON e.id=f.rowid
+                WHERE episode_notes_fts MATCH ? ORDER BY bm25(episode_notes_fts),e.id DESC LIMIT ?''',
+                                (expression, int(limit))).fetchall()
+        return [dict(row) for row in rows]
 
     def _ensure_files(self):
         if not os.path.exists(self.agent_md_path):

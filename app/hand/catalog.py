@@ -82,6 +82,10 @@ class SkillCatalog:
                                    ORDER BY s.skill_id''').fetchall()
         return [{**dict(row), 'spec': json.loads(row['spec_json'])} for row in rows]
 
+    def providers(self, capability):
+        return sorted({row['spec'].get('provider') for row in self.active()
+                       if row['spec'].get('capability') == capability and row['spec'].get('provider')})
+
     def get(self, version_id):
         with connection(self.db_path) as conn:
             row = conn.execute('SELECT * FROM skill_specs WHERE version_id=?', (version_id,)).fetchone()
