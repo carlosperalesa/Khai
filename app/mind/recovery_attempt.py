@@ -45,7 +45,7 @@ def build_attempt(task, order):
                 execution_id=None, result=None, runtime_status=None, runtime_result=None,
                 artifact=None, artifact_hash=None, authorized_hash=None, approval=None,
                 selected_version_id=None, version_id=None, verification=None, machine_verification=None,
-                diagnosed=False, alternatives=[], hypothesis_id=None, guidelines=[],
+                diagnosed=False, recovery_case_id=None, recovery_authorization_id=None, alternatives=[], hypothesis_id=None, guidelines=[],
                 routing_intent=None, error=None,
                 deadline=max(task['deadline'], time.time() + 1800))
     if reroute:

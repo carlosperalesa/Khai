@@ -641,7 +641,7 @@ class Recovery:
                 if not current_task:
                     return self._move(case_id, 'UNKNOWN', expected={'HAND_EXECUTING'}, error=f'Tarea {tid} no encontrada.')
                 t_state = current_task.get('state')
-                if t_state in {'COMPLETED', 'FAILED', 'EXHAUSTED', 'CANCELLED'}:
+                if t_state in {'COMPLETED', 'FAILED', 'EXHAUSTED', 'CANCELLED', 'DIAGNOSING'}:
                     execution = case.get('execution') or {}
                     execution['status'] = 'completed' if t_state == 'COMPLETED' else 'failed'
                     execution['final_task_state'] = t_state
