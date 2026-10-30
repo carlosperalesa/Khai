@@ -11,8 +11,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$DolphinDir = Split-Path -Parent $PSScriptRoot
-$KhaiRoot = Split-Path -Parent $DolphinDir
+$BrainDir = $PSScriptRoot
+$KhaiRoot = (Get-Item $BrainDir).Parent.Parent.Parent.FullName
 $env:CLOUDSDK_PYTHON = Join-Path $KhaiRoot '.venv\Scripts\python.exe'
 $env:CLOUDSDK_CONFIG = Join-Path $DolphinDir '.gcloud'
 $GcloudCmd = Join-Path $DolphinDir '.tools\google-cloud-sdk\bin\gcloud.cmd'

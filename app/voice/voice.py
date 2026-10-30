@@ -261,14 +261,15 @@ def _command(manager, source, text):
     if name in {'/help', '/?'}:
         return {'text': HELP_TEXT, 'buttons': HELP_BUTTONS}
     if name in {'/mode', '/m', '/mode?', '/m?'}:
-        if not hasattr(manager, 'dolphin') or manager.dolphin is None:
-            raise ValueError('Controlador Dolphin no configurado')
+        ctrl = getattr(manager, 'dolphin', None) or getattr(manager, 'brain', None) or getattr(manager, 'llm', None)
+        if ctrl is None or not hasattr(ctrl, 'set_mode'):
+            raise ValueError('Controlador de inferencia no configurado')
         arg = '?' if name.endswith('?') else (parts[1].lower() if len(parts) >= 2 else '?')
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
         target_mode = aliases.get(arg, arg)
         if target_mode in {'low', 'mid', 'high'} and hasattr(c, 'notify') and c.notify:
             c.notify(f"[Conectando con Modo {target_mode}]")
-        return manager.dolphin.set_mode(arg, notifier=getattr(c, 'notify', None))
+        return ctrl.set_mode(arg, notifier=getattr(c, 'notify', None))
     if name in {'/pixy', '/p', '/pixy?', '/p?'}:
         payload = '?' if name.endswith('?') and len(parts) == 1 else text.partition(' ')[2]
         return manager.pixy.direct_response(payload, source=source)

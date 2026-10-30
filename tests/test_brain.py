@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.mind.mind import Mind
-from app.voice.gateway.dolphin_controller import DolphinController
+from app.mind.brain import Brain, ModelController, DolphinController
 from app.voice.gateway.llm_gateway import LLMManager
 from app.voice.voice import _command, urgent_command
 from app.voice.gateway.telegram_gateway import TelegramHandler
@@ -34,7 +34,7 @@ class _Memory:
         return 'Habla de forma concisa.'
 
 
-class DolphinPilotTests(unittest.TestCase):
+class BrainTests(unittest.TestCase):
     def test_unknown_intent_is_rejected_without_saving_a_promise(self):
         mem = _Memory()
         llm = MagicMock()
@@ -147,7 +147,7 @@ class DolphinPilotTests(unittest.TestCase):
             post_resp.json.return_value = {'name': 'op-insert-1'}
 
             with patch.object(ctrl, 'get_instance', return_value=None), \
-                 patch('app.voice.gateway.dolphin_controller.requests.post', return_value=post_resp) as post_mock:
+                 patch('app.mind.brain.controller.requests.post', return_value=post_resp) as post_mock:
                 msg_mid = ctrl.set_mode('mid')
                 self.assertEqual(msg_mid, '[Modo mid conectado]')
                 self.assertTrue(post_mock.call_args.kwargs['json']['disks'][0]['boot'])
@@ -159,7 +159,7 @@ class DolphinPilotTests(unittest.TestCase):
             del_resp = MagicMock(status_code=200)
             del_resp.json.return_value = {'name': 'op-del-1'}
             with patch.object(ctrl, 'get_instance', return_value={'machineType': 'zones/us-west1-a/machineTypes/g2-standard-4', 'status': 'RUNNING'}), \
-                 patch('app.voice.gateway.dolphin_controller.requests.delete', return_value=del_resp):
+                 patch('app.mind.brain.controller.requests.delete', return_value=del_resp):
                 msg_nano = ctrl.set_mode('nano')
                 self.assertEqual(msg_nano, '[Modo nano conectado]')
                 status_text = ctrl.status()
@@ -233,7 +233,7 @@ class DolphinPilotTests(unittest.TestCase):
             create.json.return_value = {'name': 'op-create'}
 
             with patch.object(ctrl, 'get_instance', return_value=None), \
-                 patch('app.voice.gateway.dolphin_controller.requests.post', return_value=create):
+                 patch('app.mind.brain.controller.requests.post', return_value=create):
                 with self.assertRaises(ValueError) as raised:
                     ctrl.set_mode('mid')
 
@@ -250,7 +250,7 @@ class DolphinPilotTests(unittest.TestCase):
             })
             response = MagicMock()
             response.json.return_value = {'response': 'OK'}
-            with patch('app.voice.gateway.dolphin_controller.requests.post', return_value=response) as post:
+            with patch('app.mind.brain.controller.requests.post', return_value=response) as post:
                 ctrl._warmup_model()
             payload = post.call_args.kwargs['json']
             self.assertEqual(payload['model'], 'dolphin3:8b')
@@ -520,6 +520,23 @@ class DolphinPilotTests(unittest.TestCase):
             gateway.generate_content('hola')
 
         gateway._generate_gemini.assert_not_called()
+
+
+
+    def test_brain_mode_aliases(self):
+        ctrl = ModelController(data_dir=tempfile.gettempdir())
+        ctrl.stop = MagicMock(return_value='[Modo nano conectado]')
+        ctrl.start = MagicMock(side_effect=lambda mode: f"[Modo {mode} conectado]")
+
+        self.assertEqual(ctrl.set_mode('l'), '[Modo low conectado]')
+        self.assertEqual(ctrl.set_mode('m'), '[Modo mid conectado]')
+        self.assertEqual(ctrl.set_mode('h'), '[Modo high conectado]')
+
+    def test_brain_invalid_mode_handling(self):
+        ctrl = ModelController(data_dir=tempfile.gettempdir())
+        mgr = SimpleNamespace(brain=ctrl, coordinator=MagicMock())
+        with self.assertRaises(ValueError):
+            _command(mgr, 'telegram:1', '/mode invalid_foo')
 
 
 if __name__ == '__main__':

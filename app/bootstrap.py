@@ -24,7 +24,7 @@ from app.voice.runtime.recovery_runtime import ProxyRecoveryExecutor
 from app.voice.secrets import Secrets, SecretCaptureService, CredentialStatusPort
 from app.voice.mailbox import VoiceMailbox
 from app.voice.gateway.llm_gateway import LLMManager
-from app.voice.gateway.dolphin_controller import DolphinController
+from app.mind.brain import Brain, ModelController, DolphinController
 from app.voice.gateway.telegram_gateway import TelegramHandler
 from app.voice.gateway.external_gateway import ExternalGateway
 from app.voice.gateway.service_registry import ServiceRegistry, HandServicePort, PixyServicePort, VoiceServicePort
@@ -57,10 +57,12 @@ class ModuleManager:
         self.secret_port = self.control.voice_secrets
         self.secret_capture = SecretCaptureService(self.secrets, self.secret_port)
         self.telegram = TelegramHandler(self.secrets.get('TELEGRAM_BOT_TOKEN'),self.secrets.get('TELEGRAM_USER_ID'))
-        self.dolphin = DolphinController(str(self.data_dir),self.secrets)
-        provider = LLMManager(config_dir,str(self.data_dir/'voice'),self.memory,self.secrets,self.data_dir/'voice'/'voice.sqlite3',dolphin=self.dolphin)
-        self.llm = Brain(provider)
-        self.mind = Mind(self.llm,self.memory)
+        self.model_controller = ModelController(str(self.data_dir), self.secrets)
+        self.dolphin = self.model_controller  # Backward compatibility alias
+        provider = LLMManager(config_dir, str(self.data_dir/'voice'), self.memory, self.secrets, self.data_dir/'voice'/'voice.sqlite3', dolphin=self.model_controller)
+        self.brain = Brain(provider, controller=self.model_controller)
+        self.llm = self.brain
+        self.mind = Mind(self.brain, self.memory)
         self.pixy = PixyMind(self)
         self.rules = Rules(self.control_db)
         service_registry = ServiceRegistry(self.control_db)

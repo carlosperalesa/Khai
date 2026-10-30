@@ -16,6 +16,7 @@ data/agent_logs/
 # Python y caché
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 .tools/
 .gemini/
@@ -37,4 +38,6 @@ data/voice/
 data/mind/identity.yaml
 data/architecture-v1.json
 other/
+scratch/
+other/scratch/
 .test-temp/
