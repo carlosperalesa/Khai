@@ -66,6 +66,21 @@ async def lifespan(app):
 
 app = FastAPI(title='Khai', lifespan=lifespan)
 
+
+def actionable_update(data):
+    """Return whether an authenticated Telegram update contains user input."""
+    if not isinstance(data, dict):
+        raise ValueError("Se requiere un objeto JSON")
+    if type(data.get('update_id')) is not int:
+        raise ValueError('update_id requerido')
+    if isinstance(data.get('callback_query'), dict):
+        return True
+    message = data.get('message')
+    return (isinstance(message, dict)
+            and isinstance(message.get('text'), str)
+            and bool(message['text'].strip()))
+
+
 def authenticated_message(data, user_id):
     if not isinstance(data, dict):
         raise ValueError("Se requiere un objeto JSON")
@@ -337,6 +352,8 @@ async def webhook(request: Request):
     try:
         import json
         data = json.loads(body)
+        if not actionable_update(data):
+            return {'ok': True}
         manager = request.app.state.manager
         update_id = data.get('update_id', 'msg')
         trace_id = new_trace_id(prefix=f"req_{update_id}")

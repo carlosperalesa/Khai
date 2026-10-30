@@ -501,6 +501,44 @@ class ContractTests(Fixture):
         asyncio.run(check())
         self.assertEqual(len(self.store.all()), 1)
 
+    def test_webhook_acknowledges_service_update_and_accepts_group_topic_text(self):
+        from app.voice.mailbox import VoiceMailbox
+        app.state.manager = self.manager
+        self.manager.telegram.user_id = 'owner'
+        self.manager.voice_mailbox = VoiceMailbox(self.state.db_path)
+
+        async def check():
+            async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                with patch.dict(os.environ, {'TELEGRAM_WEBHOOK_SECRET': 's' * 32}):
+                    headers = {'X-Telegram-Bot-Api-Secret-Token': 's' * 32}
+                    service = {
+                        'update_id': 50,
+                        'my_chat_member': {'chat': {'id': -100123, 'type': 'supergroup'}},
+                    }
+                    response = await client.post('/webhook', json=service, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+
+                    message = {
+                        'update_id': 51,
+                        'message': {
+                            'message_id': 70,
+                            'message_thread_id': 100,
+                            'from': {'id': 'owner'},
+                            'chat': {'id': -100123, 'type': 'supergroup'},
+                            'text': 'hola desde el grupo',
+                        },
+                    }
+                    response = await client.post('/webhook', json=message, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+
+        asyncio.run(check())
+        self.assertIsNone(self.c.conversations.turn('telegram:50'))
+        turn = self.c.conversations.turn('telegram:51')
+        self.assertIsNotNone(turn)
+        self.assertEqual(turn['chat_id'], '-100123')
+        self.assertEqual(turn['thread_id'], 100)
+
 
 class ProxyTests(unittest.TestCase):
     def setUp(self):
