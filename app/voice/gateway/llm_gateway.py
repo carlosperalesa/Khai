@@ -116,7 +116,8 @@ class LLMManager:
                 if dolphin_ctrl is not None:
                     dolphin_ctrl.mark_fallback_to_low()
                     if not is_json:
-                        conv_banner = dolphin_ctrl.consume_transition_banner('low')
+                        conv_banner = (dolphin_ctrl.consume_transition_banner('low')
+                                       + 'Dolphin no respondió; continué con Gemini.\n')
         elif dolphin_ctrl is not None and not is_json:
             conv_banner = dolphin_ctrl.consume_transition_banner('low')
 

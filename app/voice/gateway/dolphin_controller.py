@@ -134,6 +134,10 @@ class DolphinController:
         """Registra que Dolphin se apagó/no está disponible y vuelve a modo low (Gemini)."""
         self._record_stop()
         self._set_mode_state('low', mark_notified=False)
+        try:
+            self._delete_instance(wait=False)
+        except Exception as exc:
+            logger.warning('No se pudo apagar Dolphin tras el fallback (%s)', type(exc).__name__)
 
     def consume_transition_banner(self, effective_mode: str) -> str:
         """Devuelve '[Mode = x]\\n' solo cuando el modo efectivo cambió respecto al último notificado."""
@@ -297,6 +301,70 @@ class DolphinController:
             time.sleep(2)
         return False
 
+    def _warmup_model(self) -> None:
+        """Carga el modelo y exige una inferencia mínima antes de declarar el modo activo."""
+        timeout = max(30, min(300, int(self._cfg('KHAI_DOLPHIN_WARMUP_TIMEOUT', '180'))))
+        model = self._cfg('KHAI_DOLPHIN_MODEL', 'dolphin3:8b')
+        response = requests.post(
+            f'{self.endpoint}/api/generate',
+            json={
+                'model': model,
+                'prompt': 'Responde solamente OK.',
+                'stream': False,
+                'keep_alive': '5m',
+                'options': {'num_predict': 2, 'temperature': 0},
+            },
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        response.raise_for_status()
+        answer = response.json().get('response')
+        if not isinstance(answer, str) or not answer.strip():
+            raise RuntimeError('Ollama no devolvió respuesta durante la precarga')
+
+    def _confirm_ready(self) -> None:
+        if not self._wait_ollama_ready(timeout_sec=60):
+            raise TimeoutError('Ollama no abrió su API dentro del plazo de arranque')
+        self._warmup_model()
+
+    def _delete_instance(self, *, wait: bool = True) -> None:
+        current = self.get_instance()
+        if current is None:
+            return
+        response = requests.delete(
+            self._gce_url(f'instances/{quote(self.instance)}'),
+            headers=self._headers(),
+            timeout=20,
+        )
+        if response.status_code == 404:
+            return
+        response.raise_for_status()
+        if wait:
+            self._wait_operation(response.json()['name'])
+
+    def _activation_error(self, profile: str, exc: Exception) -> ValueError:
+        if isinstance(exc, (requests.Timeout, TimeoutError)):
+            detail = 'El arranque o la precarga excedieron el tiempo permitido.'
+        elif isinstance(exc, requests.HTTPError):
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            detail = f'El proveedor respondió HTTP {status}.' if status else 'El proveedor rechazó la solicitud.'
+        elif isinstance(exc, RuntimeError):
+            detail = str(exc).strip()[:180] or 'La activación fue rechazada.'
+        else:
+            detail = f'Fallo interno de activación ({type(exc).__name__}).'
+        return ValueError(
+            f'[Mode = low]\nNo se pudo activar Dolphin {profile}. '
+            f'Khai continúa con Gemini. {detail}'
+        )
+
+    def _rollback_activation(self) -> None:
+        self._record_stop()
+        self._set_mode_state('low', mark_notified=True)
+        try:
+            self._delete_instance(wait=True)
+        except Exception as exc:
+            logger.warning('No se pudo limpiar la VM tras una activacion fallida (%s)', type(exc).__name__)
+
     def set_mode(self, mode: str) -> str:
         mode = (mode or '?').strip().lower()
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low'}
@@ -307,7 +375,12 @@ class DolphinController:
             return self.stop()
         if mode not in PROFILES:
             raise ValueError("Modo inválido. Usa '/m low' (Gemini), '/m mid' (Dolphin CPU), '/m high' (Dolphin GPU) o '/m ?'.")
-        return self.start(mode)
+        try:
+            return self.start(mode)
+        except (requests.RequestException, RuntimeError, TimeoutError, KeyError, ValueError) as exc:
+            logger.warning('Activacion Dolphin %s fallida (%s)', mode, type(exc).__name__)
+            self._rollback_activation()
+            raise self._activation_error(mode, exc) from None
 
     def start(self, profile: str = 'mid') -> str:
         profile = (profile or 'mid').strip().lower()
@@ -324,9 +397,8 @@ class DolphinController:
             curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
             curr_status = current.get('status', '')
             if curr_mt == target_mt and curr_status == 'RUNNING':
+                self._confirm_ready()
                 self._set_mode_state(profile, mark_notified=True)
-                ready = self._wait_ollama_ready(timeout_sec=10)
-                estado_red = 'conectado por túnel WireGuard' if ready else 'arrancando servicio Ollama'
                 return f"[Mode = {profile}]"
             if curr_mt == target_mt and curr_status == 'TERMINATED':
                 resp = requests.post(
@@ -337,8 +409,8 @@ class DolphinController:
                 resp.raise_for_status()
                 self._wait_operation(resp.json()['name'])
                 self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
+                self._confirm_ready()
                 self._set_mode_state(profile, mark_notified=True)
-                self._wait_ollama_ready(timeout_sec=45)
                 return f"[Mode = {profile}]"
             del_resp = requests.delete(
                 self._gce_url(f'instances/{quote(self.instance)}'),
@@ -382,8 +454,8 @@ class DolphinController:
             raise RuntimeError(f'No se pudo crear instancia Spot ({target_mt}): {ins_resp.text[:300]}')
         self._wait_operation(ins_resp.json()['name'])
         self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
+        self._confirm_ready()
         self._set_mode_state(profile, mark_notified=True)
-        self._wait_ollama_ready(timeout_sec=45)
         return f"[Mode = {profile}]"
 
     def stop(self) -> str:
@@ -392,14 +464,7 @@ class DolphinController:
         self._set_mode_state('low', mark_notified=True)
         if current is None:
             return "[Mode = low]"
-        resp = requests.delete(
-            self._gce_url(f'instances/{quote(self.instance)}'),
-            headers=self._headers(),
-            timeout=20,
-        )
-        if resp.status_code != 404:
-            resp.raise_for_status()
-            self._wait_operation(resp.json()['name'])
+        self._delete_instance(wait=True)
         return "[Mode = low]"
 
     def status(self) -> str:

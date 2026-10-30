@@ -140,6 +140,7 @@ class DolphinPilotTests(unittest.TestCase):
             ctrl._access_token = MagicMock(return_value='fake-token')
             ctrl._wait_operation = MagicMock()
             ctrl._wait_ollama_ready = MagicMock(return_value=True)
+            ctrl._warmup_model = MagicMock()
 
             post_resp = MagicMock(ok=True, status_code=200)
             post_resp.json.return_value = {'name': 'op-insert-1'}
@@ -166,6 +167,7 @@ class DolphinPilotTests(unittest.TestCase):
 
             # Fallback automático de mid/high -> low cuando Dolphin se apaga por inactividad
             ctrl._set_mode_state('high', mark_notified=True)
+            ctrl._delete_instance = MagicMock()
             gateway = LLMManager.__new__(LLMManager)
             gateway.dolphin = ctrl
             gateway.secrets = {}
@@ -176,8 +178,12 @@ class DolphinPilotTests(unittest.TestCase):
 
             with patch.dict('os.environ', {'KHAI_DOLPHIN_URL': 'http://10.200.0.2:11434'}):
                 first_reply = gateway.generate_content('Hola')
-                self.assertEqual(first_reply, '[Mode = low]\nRespuesta desde Gemini.')
+                self.assertEqual(
+                    first_reply,
+                    '[Mode = low]\nDolphin no respondió; continué con Gemini.\nRespuesta desde Gemini.',
+                )
                 self.assertEqual(ctrl.get_active_mode(), 'low')
+                ctrl._delete_instance.assert_called_once_with(wait=False)
 
                 # El siguiente turno ya está en low: no repite el banner ni intenta contactar a Dolphin
                 gateway._generate_dolphin.reset_mock()
@@ -212,6 +218,42 @@ class DolphinPilotTests(unittest.TestCase):
                           PixyMind.secret_instruction(['username', 'password']).lower())
             sec_reply = secret_command(mgr, '/us carlos /pas clave123', 'owner', 'chat1')
             self.assertEqual(sec_reply, 'Credenciales guardadas. Recibos: secret_u1, secret_p1')
+
+    def test_dolphin_activation_requires_successful_warmup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctrl = DolphinController(tmp, {'KHAI_DOLPHIN_CREDIT_CLP': '285000'})
+            ctrl._access_token = MagicMock(return_value='fake-token')
+            ctrl._wait_operation = MagicMock()
+            ctrl._confirm_ready = MagicMock(side_effect=TimeoutError('cold start'))
+            ctrl._delete_instance = MagicMock()
+            create = MagicMock(ok=True, status_code=200)
+            create.json.return_value = {'name': 'op-create'}
+
+            with patch.object(ctrl, 'get_instance', return_value=None), \
+                 patch('app.voice.gateway.dolphin_controller.requests.post', return_value=create):
+                with self.assertRaises(ValueError) as raised:
+                    ctrl.set_mode('mid')
+
+            self.assertIn('[Mode = low]', str(raised.exception))
+            self.assertIn('continúa con Gemini', str(raised.exception))
+            self.assertEqual(ctrl.get_active_mode(), 'low')
+            ctrl._delete_instance.assert_called_once_with(wait=True)
+
+    def test_dolphin_warmup_uses_minimal_inference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctrl = DolphinController(tmp, {
+                'KHAI_DOLPHIN_WARMUP_TIMEOUT': '120',
+                'KHAI_DOLPHIN_MODEL': 'dolphin3:8b',
+            })
+            response = MagicMock()
+            response.json.return_value = {'response': 'OK'}
+            with patch('app.voice.gateway.dolphin_controller.requests.post', return_value=response) as post:
+                ctrl._warmup_model()
+            payload = post.call_args.kwargs['json']
+            self.assertEqual(payload['model'], 'dolphin3:8b')
+            self.assertEqual(payload['options']['num_predict'], 2)
+            self.assertEqual(post.call_args.kwargs['timeout'], 120)
+            self.assertFalse(post.call_args.kwargs['allow_redirects'])
 
     def test_pixy_natural_language_and_llm_fallback(self):
         from app.pixy.pixy import PixyMind
