@@ -4,6 +4,18 @@ Khai es un asistente personal para Telegram que interpreta objetivos, genera o r
 
 El proyecto utilizaba originalmente nombres de OpenClaw. Los contenedores Docker ahora se denominan `khai_core` y `khai_docker_proxy`. Su motor de ejecución es propio; no utiliza el Gateway de OpenClaw ni el runtime de Hermes Agent. Ambos proyectos sirvieron como referencias de diseño.
 
+## Correcciones locales de interacción del 30 de octubre de 2026
+
+La revisión remota de solo lectura confirmó ambos contenedores activos en
+`0708f12`, pero encontró comandos Telegram con sufijo `@bot`, numeración de
+chats y admisión FIFO dependientes de timestamps empatados, y rechazos de
+Gemini presentados erróneamente como indisponibilidad total. El workspace local
+normaliza el sufijo, usa el orden durable de SQLite, respeta el cooldown de
+proveedores y distingue rechazo terminal de falta de disponibilidad sin arrancar
+Dolphin innecesariamente. Las 60 regresiones afectadas pasan. Estos cambios no
+se han desplegado ni reiniciado en Azure; detalles en
+[la revisión del 30 de octubre](docs/REVISION_INTERACCIONES_2026-10-30.md).
+
 ## Bloque 3 local: recuperación y aprendizaje con transacciones compartidas (29 de octubre de 2026)
 
 Implementado bajo la opción A: transacciones compartidas en SQLite (`ControlUnitOfWork`) reutilizando los puertos y máquinas de estados existentes. No añade LangGraph ni dependencias externas.

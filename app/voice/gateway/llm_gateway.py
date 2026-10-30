@@ -7,6 +7,11 @@ from app.pixy.budget import current_budget
 
 logger = logging.getLogger("LLMManager")
 
+
+class LLMContentRejected(ValueError):
+    """The provider made a terminal content decision, not an availability failure."""
+
+
 class LLMManager:
     """Fachada global del sistema LLM con Unified Fallback."""
     
@@ -162,7 +167,11 @@ class LLMManager:
                 [c for c in self.api_keys_pool if now <= status.get(c['id'], 0)],
                 key=lambda c: status.get(c['id'], 0),
             )
-            pool = ready + cooling
+            # Retrying cooling keys on every turn defeated admission control and
+            # amplified quota/provider failures.
+            pool = ready
+
+        content_rejections = 0
 
         for idx, current_cred in enumerate(pool):
             budget = current_budget.get()
@@ -178,6 +187,9 @@ class LLMManager:
             except Exception as exc:
                 # Never print credentials, URLs with keys, or full SDK exception payloads.
                 logger.warning('Proveedor %s falló (%s)', current_cred['id'], type(exc).__name__)
+                if isinstance(exc, LLMContentRejected):
+                    content_rejections += 1
+                    continue
                 msg = str(exc)
                 if isinstance(exc, ValueError) and ('Gemini no devolvió candidatos' in msg or 'Gemini devolvió candidato vacío' in msg):
                     continue
@@ -195,6 +207,11 @@ class LLMManager:
                         self._notify("Gemini Fallback no responde, pasando a Dolphin Medium")
                     else:
                         self._notify("Gemini no responde, pasando a Dolphin Medium")
+
+        if pool and content_rejections == len(pool):
+            message = 'La solicitud fue rechazada por los proveedores configurados; no se ejecutó ninguna acción.'
+            self._notify(message)
+            raise LLMContentRejected(message)
 
         if endpoint and not tried_dolphin and not (forced_key and forced_type):
             self._notify("Conectando con Dolphin Medium")
@@ -292,10 +309,14 @@ class LLMManager:
         candidates = data.get("candidates") or []
         if not candidates:
             reason = (data.get("promptFeedback") or {}).get("blockReason") or "sin_candidatos"
+            if reason != 'sin_candidatos':
+                raise LLMContentRejected(f"Gemini rechazó la solicitud ({reason})")
             raise ValueError(f"Gemini no devolvió candidatos ({reason})")
         parts = ((candidates[0].get("content") or {}).get("parts")) or []
         if not parts or not isinstance(parts[0].get("text"), str):
             reason = candidates[0].get("finishReason") or "sin_texto"
+            if reason in {'SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII'}:
+                raise LLMContentRejected(f"Gemini rechazó la solicitud ({reason})")
             raise ValueError(f"Gemini devolvió candidato vacío ({reason})")
         return parts[0]["text"].strip()
 

@@ -202,11 +202,11 @@ class ConversationStore:
             if thread_id is not None:
                 active_list = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id, thread_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id, thread_id)).fetchall()]
             else:
                 active_list = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id)).fetchall()]
             if not active_list:
                 return None
             if target is None:
@@ -234,11 +234,11 @@ class ConversationStore:
             if thread_id is not None:
                 remaining = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id, thread_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id, thread_id)).fetchall()]
             else:
                 remaining = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id)).fetchall()]
 
             active = next((c for c in remaining if c['is_current']), None)
             if target_conv['is_current'] and remaining:
@@ -273,12 +273,12 @@ class ConversationStore:
             if thread_id is not None:
                 rows = conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
-                    "ORDER BY updated_at DESC LIMIT ?",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (owner_id, chat_id, thread_id, limit)).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
-                    "ORDER BY updated_at DESC LIMIT ?",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (owner_id, chat_id, limit)).fetchall()
             return [dict(r) for r in rows]
 
@@ -290,11 +290,11 @@ class ConversationStore:
             if thread_id is not None:
                 active = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id, thread_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id, thread_id)).fetchall()]
             else:
                 active = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id)).fetchall()]
             if not active:
                 return None
             target_conv = None
@@ -330,11 +330,11 @@ class ConversationStore:
             if thread_id is not None:
                 active = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id, thread_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id, thread_id)).fetchall()]
             else:
                 active = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
-                    "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
+                    "ORDER BY created_at DESC, rowid DESC", (owner_id, chat_id)).fetchall()]
             if not active:
                 return None
             target_conv = None

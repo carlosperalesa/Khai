@@ -1457,6 +1457,7 @@ class Coordinator:
         self._schedule_mailbox()
         self.store.flush_events()
         all_tasks = self.store.all()
+        task_order = {task['id']: index for index, task in enumerate(all_tasks)}
         in_flight_states = {'ROUTING', 'SCOPE_PLANNING', 'RESOLVING_SCOPE', 'GENERATING', 'REVIEWING',
                             'SUBMITTED', 'READY', 'RUNNING', 'VERIFYING', 'DIAGNOSING'}
         active_by_conversation = {}
@@ -1499,7 +1500,7 @@ class Coordinator:
             if cid and task['state'] == 'ROUTING':
                 active_tasks = active_by_conversation.get(cid, [])
                 older_active = next((t for t in active_tasks if t['id'] != task['id']
-                                     and t.get('created_at', 0) < task.get('created_at', 0)), None)
+                                     and task_order[t['id']] < task_order[task['id']]), None)
                 if older_active:
                     continue
             if background and task['state'] in {'ROUTING', 'SCOPE_PLANNING', 'RESOLVING_SCOPE', 'GENERATING', 'REVIEWING'}:

@@ -4,10 +4,14 @@ from app.kernel.database import connect
 from contextlib import contextmanager
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Dict
 
 logger = logging.getLogger("MemoryEngine")
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 class MemoryEngine:
     """Motor de memoria persistente del agente basado en SQLite."""
@@ -239,7 +243,7 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
             cur = conn.execute('''
                 INSERT INTO hypotheses (topic, content, confidence, created_at)
                 VALUES (?, ?, ?, ?)
-            ''', (topic, content, initial_confidence, datetime.utcnow().isoformat() + "Z"))
+            ''', (topic, content, initial_confidence, _utc_now()))
             conn.commit()
             return cur.lastrowid
 
@@ -304,7 +308,7 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
     # --- V3: MÉTODO CIENTÍFICO (Guidelines Consolidadas) ---
     def add_guideline(self, topic: str, scope: str, rule_text: str, confidence: float = 1.0, supersedes: int = None) -> int:
         """Heart consolida una hipótesis en Guideline. Puede reemplazar una vieja (supersedes)."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now()
         with self._get_conn() as conn:
             if supersedes:
                 # Marcar la vieja como depreciada
@@ -319,7 +323,7 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
 
     def update_guideline_metrics(self, rule_id: int, success: bool) -> None:
         """El Garbage Collector cognitivo actualiza el rendimiento de la regla."""
-        now = datetime.utcnow().isoformat() + "Z"
+        now = _utc_now()
         with self._get_conn() as conn:
             if success:
                 conn.execute('''
@@ -372,7 +376,7 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
             conn.execute('''
                 INSERT INTO long_term_events (timestamp, event_type, content, metadata_json)
                 VALUES (?, ?, ?, ?)
-            ''', (datetime.utcnow().isoformat() + "Z", event_type, content, json.dumps(metadata or {})))
+            ''', (_utc_now(), event_type, content, json.dumps(metadata or {})))
             conn.commit()
 
     def get_recent_events(self, limit: int = 20) -> List[Dict]:

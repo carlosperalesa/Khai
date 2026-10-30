@@ -131,8 +131,19 @@ def secret_command(manager, text, user_id, chat_id):
     return 'Credenciales guardadas. Recibos: ' + ', '.join(receipts)
 
 
+def _command_name(text):
+    """Return Telegram's command without its optional ``@botname`` suffix."""
+    parts = str(text or '').split(maxsplit=1)
+    if not parts:
+        return ''
+    name = parts[0].casefold()
+    if name.startswith('/'):
+        name = name.split('@', 1)[0]
+    return name
+
+
 def urgent_command(text):
-    name = text.split(maxsplit=1)[0].lower()
+    name = _command_name(text)
     return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m', '/mode?', '/m?',
                     '/chats', '/c', '/new', '/clear', '/delete', '/rename', '/r',
                     'y', 'yes', 'sí', 'si', 'n', 'no'}
@@ -161,7 +172,7 @@ def process_ordinary(manager, source, trace_id, text):
     try:
         with trace_scope(trace_id):
             decision_text = text
-            if text.split(maxsplit=1)[0].lower() in {'/p', '/pixy'}:
+            if _command_name(text) in {'/p', '/pixy'}:
                 decision_text = text.partition(' ')[2].strip()
                 if not decision_text or decision_text.split()[0].casefold() not in {'y','yes','s?','si','n','no'}:
                     decision_text = ''
@@ -244,7 +255,9 @@ def _format_health(manager):
 def _command(manager, source, text):
     c = manager.coordinator
     parts = text.split()
-    name = parts[0].lower()
+    if not parts:
+        return None
+    name = _command_name(text)
     if name in {'/help', '/?'}:
         return {'text': HELP_TEXT, 'buttons': HELP_BUTTONS}
     if name in {'/mode', '/m', '/mode?', '/m?'}:

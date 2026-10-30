@@ -53,6 +53,8 @@ class Mind:
             raise
         except Exception as exc:
             logger.warning('No se pudo interpretar el turno (%s)', type(exc).__name__)
+            if type(exc).__name__ == 'LLMContentRejected':
+                return {'action': 'ROUTING_ERROR', 'reply': str(exc), 'error': 'ContentRejected'}
             if "Todos los LLM están ocupados" in str(exc):
                 return {'action': 'ROUTING_ERROR', 'reply': '', 'error': 'AllLLMsBusy'}
             return {'action': 'ROUTING_ERROR', 'reply': 'No pude interpretar el mensaje; no ejecute ninguna accion.',

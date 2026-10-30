@@ -1,6 +1,7 @@
 """Enrutamiento LLM unificado por modo (low=Gemini/Cloud, mid/high=Dolphin) con cascada completa."""
 import json
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -209,6 +210,8 @@ class DolphinPilotTests(unittest.TestCase):
                 self.assertTrue(urgent_command('/M?'))
             self.assertIn('Cancelación solicitada: task_1', _command(mgr, 'telegram:3', '/stop'))
             self.assertIn('Estado Heart: ok', _command(mgr, 'telegram:4', '/health'))
+            self.assertIn('Estado Heart: ok', _command(mgr, 'telegram:4b', '/health@Khaiiabot'))
+            self.assertTrue(urgent_command('/health@Khaiiabot'))
             self.assertIn('Reinicio de contenedores Docker (core, proxy) programado', _command(mgr, 'telegram:5', '/restart'))
             self.assertEqual(_command(mgr, 'telegram:6', '/tasks'), 'Comando no disponible. Consulta /help.')
 
@@ -476,6 +479,46 @@ class DolphinPilotTests(unittest.TestCase):
         self.assertIn('Gemini no responde, pasando a Gemini Fallback', notified)
         self.assertIn('Gemini Fallback no responde, pasando a Dolphin Medium', notified)
         self.assertIn('Todos los LLM están ocupados, por favor espere.', notified)
+
+    def test_terminal_content_rejection_does_not_start_dolphin(self):
+        from app.voice.gateway.llm_gateway import LLMContentRejected
+
+        notified = []
+        gateway = LLMManager.__new__(LLMManager)
+        gateway.dolphin = MagicMock()
+        gateway.dolphin.get_active_mode.return_value = 'low'
+        gateway.secrets = {}
+        gateway.notifier = notified.append
+        gateway.api_keys_pool = [
+            {'type': 'gemini', 'key': 'k1', 'id': 'GEMINI_API_KEY'},
+            {'type': 'gemini', 'key': 'k2', 'id': 'GEMINI_API_KEY_FALLBACK_2'},
+        ]
+        gateway._load_status = MagicMock(return_value={})
+        gateway._generate_gemini = MagicMock(side_effect=LLMContentRejected('SAFETY'))
+        gateway._dolphin_endpoint = MagicMock(return_value='http://10.200.0.2:11434')
+
+        with self.assertRaises(LLMContentRejected):
+            gateway.generate_content('contenido rechazado')
+
+        gateway.dolphin.start.assert_not_called()
+        self.assertTrue(any('rechazada' in message for message in notified))
+
+    def test_provider_cooldown_prevents_immediate_retry(self):
+        gateway = LLMManager.__new__(LLMManager)
+        gateway.dolphin = None
+        gateway.secrets = {}
+        gateway.notifier = MagicMock()
+        gateway.api_keys_pool = [
+            {'type': 'gemini', 'key': 'k1', 'id': 'GEMINI_API_KEY'},
+        ]
+        gateway._load_status = MagicMock(return_value={'GEMINI_API_KEY': time.time() + 30})
+        gateway._generate_gemini = MagicMock()
+        gateway._dolphin_endpoint = MagicMock(return_value='')
+
+        with self.assertRaisesRegex(ValueError, 'Todos los LLM están ocupados'):
+            gateway.generate_content('hola')
+
+        gateway._generate_gemini.assert_not_called()
 
 
 if __name__ == '__main__':

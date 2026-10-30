@@ -100,6 +100,17 @@ class TestMultiConversation(Fixture):
         res = command(self.manager, 'telegram:msg4', '/c fantasma')
         self.assertIn('No se encontró la conversación', res)
 
+    def test_switching_does_not_renumber_conversations(self):
+        """Stable numeric commands must keep pointing at the listed conversation."""
+        second = self.c.conversations.new_conversation(self.owner, self.chat, title='Segundo')
+        before = self.c.conversations.list_conversations(self.owner, self.chat)
+        self.assertEqual([c['title'] for c in before], ['Segundo', 'Chat Principal'])
+
+        self.c.conversations.switch_conversation(self.owner, self.chat, '2')
+        after = self.c.conversations.list_conversations(self.owner, self.chat)
+        self.assertEqual([c['id'] for c in after], [c['id'] for c in before])
+        self.assertEqual(after[0]['id'], second['id'])
+
     def test_clear_and_delete_current_conversation(self):
         """Test /clear and immediate deletion of the current chat."""
         # /clear archives current and creates fresh one
