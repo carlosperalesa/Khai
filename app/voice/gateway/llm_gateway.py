@@ -125,6 +125,12 @@ class LLMManager:
             primary_label = 'Medium' if active_mode == 'mid' else 'High'
             secondary_profile = 'high' if active_mode == 'mid' else 'mid'
             secondary_label = 'High' if active_mode == 'mid' else 'Medium'
+            if dolphin_ctrl is not None:
+                try:
+                    self._notify(f"Conectando con Dolphin {primary_label}")
+                    dolphin_ctrl.start(active_mode)
+                except Exception as exc_start:
+                    logger.warning('Auto-arranque Dolphin %s falló (%s)', active_mode, type(exc_start).__name__)
             try:
                 answer = self._call_dolphin(prompt, endpoint, kwargs)
                 if dolphin_ctrl is not None and not is_json:
@@ -463,14 +469,105 @@ class LLMManager:
                    'stream': False, 'options': {'num_predict': 4096, 'temperature': 0.2}}
         response = requests.post(endpoint + '/api/chat', json=payload,
                                  timeout=min(180, kwargs.get('_timeout', 60)), allow_redirects=False)
+        if response.status_code == 400 and 'does not support tools' in response.text:
+            logger.info('Dolphin Ollama sin soporte nativo de tools; adaptando vía prompt estructurado')
+            tool_desc = json.dumps(tools, ensure_ascii=False, indent=2)
+            sys_msg = (
+                "You have access to the following tools:\n"
+                f"{tool_desc}\n\n"
+                "If you need to call a tool, respond strictly with a JSON object: "
+                '{"tool_call": {"name": "<tool_name>", "arguments": {<args>}}}\n'
+                "Otherwise, respond with your text reply."
+            )
+            chat_msgs = [{'role': 'system', 'content': sys_msg}] + self._openai_messages(messages)
+            payload_fallback = {
+                'model': payload['model'],
+                'messages': chat_msgs,
+                'stream': False,
+                'options': {'num_predict': 4096, 'temperature': 0.2}
+            }
+            response = requests.post(endpoint + '/api/chat', json=payload_fallback,
+                                     timeout=min(180, kwargs.get('_timeout', 60)), allow_redirects=False)
         response.raise_for_status()
         message = response.json().get('message') or {}
         calls = [{'id': 'call_' + uuid.uuid4().hex,
                   'name': call.get('function', {}).get('name'),
                   'arguments': call.get('function', {}).get('arguments') or {}}
                  for call in message.get('tool_calls') or []]
-        return {'content': message.get('content') or '', 'tool_calls': calls,
+        content = message.get('content') or ''
+        if not calls and 'tool_call' in content:
+            try:
+                parsed = json.loads(content)
+                tc = parsed.get('tool_call')
+                if tc and tc.get('name'):
+                    calls.append({
+                        'id': 'call_' + uuid.uuid4().hex,
+                        'name': tc['name'],
+                        'arguments': tc.get('arguments') or {}
+                    })
+                    content = ''
+            except Exception:
+                pass
+        return {'content': content, 'tool_calls': calls,
                 'provider': 'dolphin', 'model': payload['model']}
+
+    @staticmethod
+    def _fallback_web_search(query: str, limit: int = 8) -> list:
+        import urllib.request
+        import urllib.parse
+        import re
+        import html
+        import http.cookiejar
+
+        cj = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        opener.addheaders = [
+            ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+            ('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'),
+            ('Accept-Language', 'en-US,en;q=0.5'),
+        ]
+        results = []
+        try:
+            url = 'https://html.duckduckgo.com/html/?q=' + urllib.parse.quote_plus(query)
+            resp = opener.open(url, timeout=12)
+            content = resp.read().decode('utf-8', errors='ignore')
+            blocks = re.findall(
+                r'<div[^>]*class="[^"]*(?:results_links|result\b)[^"]*"[^>]*>(.*?)(?=<div[^>]*class="[^"]*(?:results_links|result\b)|$)',
+                content,
+                re.DOTALL,
+            )
+            for b in blocks:
+                m_a = re.search(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', b)
+                if not m_a:
+                    continue
+                raw_url = m_a.group(1)
+                if 'uddg=' in raw_url:
+                    m_u = re.search(r'uddg=([^&]+)', raw_url)
+                    raw_url = urllib.parse.unquote(m_u.group(1)) if m_u else raw_url
+                title = html.unescape(re.sub(r'<[^>]+>', '', m_a.group(2))).strip()
+                m_s = re.search(r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', b)
+                snippet = html.unescape(re.sub(r'<[^>]+>', '', m_s.group(1))).strip() if m_s else ''
+                if raw_url.startswith('http') and title:
+                    results.append({'title': title, 'url': raw_url, 'description': snippet})
+                    if len(results) >= limit:
+                        break
+        except Exception as exc:
+            logger.warning('DuckDuckGo HTML search error: %s', exc)
+
+        if not results:
+            try:
+                wiki_url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={urllib.parse.quote_plus(query)}&limit={limit}&namespace=0&format=json"
+                req_w = urllib.request.Request(wiki_url, headers={'User-Agent': 'Khai/1.0'})
+                with urllib.request.urlopen(req_w, timeout=8) as r_w:
+                    data = json.loads(r_w.read().decode('utf-8'))
+                    if len(data) >= 4:
+                        titles, snippets, urls = data[1], data[2], data[3]
+                        for t, s, u in zip(titles, snippets, urls):
+                            if u.startswith('http'):
+                                results.append({'title': t, 'url': u, 'description': s or ''})
+            except Exception as exc_w:
+                logger.warning('Wikipedia search error: %s', exc_w)
+        return results
 
     def web_search(self, query, *, limit=8):
         """Platform research. Responses without sources are failures."""
@@ -480,33 +577,39 @@ class LLMManager:
         gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini' and now > status.get(item['id'], 0)]
         if not gemini_pool:
             gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini']
-        if not gemini_pool:
-            raise ValueError('No research provider is configured')
-        model = os.getenv('KHAI_RESEARCH_MODEL', DEFAULT_GEMINI_MODEL)
-        payload = {'contents': [{'parts': [{'text': query}]}], 'tools': [{'googleSearch': {}}],
-                   'generationConfig': {'maxOutputTokens': 2048, 'temperature': 0.1}}
-        last_error = None
-        for item in gemini_pool:
-            try:
-                url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={item["key"]}'
-                response = requests.post(url, json=payload, timeout=60)
-                response.raise_for_status()
-                candidate = (response.json().get('candidates') or [{}])[0]
-                results = []
-                for chunk in (candidate.get('groundingMetadata') or {}).get('groundingChunks') or []:
-                    web = chunk.get('web') or {}
-                    if web.get('uri') and web.get('title'):
-                        results.append({'title': web['title'], 'url': web['uri'], 'description': ''})
-                if not results:
-                    raise ValueError('El proveedor de investigación no entregó fuentes verificables')
-                return {'provider': 'google', 'query': query,
+        if gemini_pool:
+            model = os.getenv('KHAI_RESEARCH_MODEL', DEFAULT_GEMINI_MODEL)
+            payload = {'contents': [{'parts': [{'text': query}]}], 'tools': [{'googleSearch': {}}],
+                       'generationConfig': {'maxOutputTokens': 2048, 'temperature': 0.1}}
+            for item in gemini_pool:
+                try:
+                    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={item["key"]}'
+                    response = requests.post(url, json=payload, timeout=60)
+                    response.raise_for_status()
+                    candidate = (response.json().get('candidates') or [{}])[0]
+                    results = []
+                    for chunk in (candidate.get('groundingMetadata') or {}).get('groundingChunks') or []:
+                        web = chunk.get('web') or {}
+                        if web.get('uri') and web.get('title'):
+                            results.append({'title': web['title'], 'url': web['uri'], 'description': ''})
+                    if results:
+                        return {'provider': 'google', 'query': query,
+                                'results': results[:max(1, min(10, int(limit)))]}
+                except Exception as exc:
+                    code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                    if code in {401, 403}:
+                        self._mark_key_failed(item['id'], cooldown=300)
+
+        # Fallback de búsqueda web directa si Google Grounding falla o agota cuota
+        try:
+            results = self._fallback_web_search(query, limit=limit)
+            if results:
+                return {'provider': 'duckduckgo', 'query': query,
                         'results': results[:max(1, min(10, int(limit)))]}
-            except Exception as exc:
-                last_error = exc
-                code = getattr(getattr(exc, 'response', None), 'status_code', None)
-                if code in {401, 403}:
-                    self._mark_key_failed(item['id'], cooldown=300)
-        raise ValueError('El proveedor de investigación no entregó fuentes verificables') from last_error
+        except Exception as exc_fb:
+            logger.warning('Búsqueda web de respaldo falló (%s)', type(exc_fb).__name__)
+
+        raise ValueError('El proveedor de investigación no entregó fuentes verificables')
 
     def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
         """Ejecuta inferencia en el nodo privado Dolphin (Ollama) con soporte texto y JSON."""
