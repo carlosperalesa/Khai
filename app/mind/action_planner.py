@@ -16,6 +16,33 @@ def _sanitize_skill_id(raw_id, fallback='accion-nueva'):
     return cleaned[:64]
 
 
+def _clean_llm_json(raw):
+    if not isinstance(raw, str):
+        return raw
+    cleaned = raw.strip()
+    if cleaned.startswith('```'):
+        cleaned = '\n'.join(cleaned.splitlines()[1:])
+        if cleaned.rstrip().endswith('```'):
+            cleaned = cleaned.rstrip()[:-3]
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        sanitized = cleaned.replace('“', "'").replace('”', "'").replace('„', "'").replace('«', "'").replace('»', "'")
+        try:
+            return json.loads(sanitized)
+        except json.JSONDecodeError:
+            pass
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        if match:
+            candidate = match.group(0).replace('“', "'").replace('”', "'")
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        raise
+
+
 class ActionPlanner:
     def __init__(self, llm, catalog):
         self.llm = llm
@@ -159,7 +186,7 @@ class ActionPlanner:
             + '. Si hay correcciones, usa sus operaciones y resource_id; jamás repitas una creación.'
         )
         raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
-        proposal = json.loads(raw) if isinstance(raw, str) else raw
+        proposal = _clean_llm_json(raw)
         if not isinstance(proposal, dict):
             raise ValueError('El planificador no devolvió un objeto')
         if proposal.get('steps') == [] and 'recipe' not in proposal:
