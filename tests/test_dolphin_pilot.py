@@ -148,21 +148,21 @@ class DolphinPilotTests(unittest.TestCase):
             with patch.object(ctrl, 'get_instance', return_value=None), \
                  patch('app.voice.gateway.dolphin_controller.requests.post', return_value=post_resp) as post_mock:
                 msg_mid = ctrl.set_mode('mid')
-                self.assertEqual(msg_mid, '[Mode = mid]')
+                self.assertEqual(msg_mid, '[Modo Medium]')
                 self.assertTrue(post_mock.call_args.kwargs['json']['disks'][0]['boot'])
                 self.assertFalse(post_mock.call_args.kwargs['json']['disks'][0]['autoDelete'])
 
                 msg_high = ctrl.set_mode('high')
-                self.assertEqual(msg_high, '[Mode = high]')
+                self.assertEqual(msg_high, '[Modo High]')
 
             del_resp = MagicMock(status_code=200)
             del_resp.json.return_value = {'name': 'op-del-1'}
             with patch.object(ctrl, 'get_instance', return_value={'machineType': 'zones/us-west1-a/machineTypes/g2-standard-4', 'status': 'RUNNING'}), \
                  patch('app.voice.gateway.dolphin_controller.requests.delete', return_value=del_resp):
                 msg_low = ctrl.set_mode('low')
-                self.assertEqual(msg_low, '[Mode = low]')
+                self.assertEqual(msg_low, '[Modo Low]')
                 status_text = ctrl.status()
-                self.assertTrue(status_text.startswith('[Mode ='))
+                self.assertTrue(status_text.startswith('[Modo '))
                 self.assertIn('Crédito estimado disponible', status_text)
 
             # Fallback automático de mid/high -> low cuando Dolphin se apaga por inactividad
@@ -180,7 +180,7 @@ class DolphinPilotTests(unittest.TestCase):
                 first_reply = gateway.generate_content('Hola')
                 self.assertEqual(
                     first_reply,
-                    '[Mode = low]\nDolphin no respondió; continué con Gemini.\nRespuesta desde Gemini.',
+                    '[Modo Low]\nDolphin no respondió; continué con Gemini.\nRespuesta desde Gemini.',
                 )
                 self.assertEqual(ctrl.get_active_mode(), 'low')
                 ctrl._delete_instance.assert_called_once_with(wait=False)
@@ -234,7 +234,7 @@ class DolphinPilotTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     ctrl.set_mode('mid')
 
-            self.assertIn('[Mode = low]', str(raised.exception))
+            self.assertIn('[Modo Low]', str(raised.exception))
             self.assertIn('continúa con Gemini', str(raised.exception))
             self.assertEqual(ctrl.get_active_mode(), 'low')
             ctrl._delete_instance.assert_called_once_with(wait=True)
@@ -428,6 +428,54 @@ class DolphinPilotTests(unittest.TestCase):
                                                    {'folder': {}})['provided'], {'folder': 'Trabajo'})
             self.assertEqual(Recovery.select_evidence_resources('memoria'),
                              ['storage', 'container_state_core', 'container_state_proxy', 'core_logs', 'pixy'])
+
+    def test_help_command_returns_structured_buttons(self):
+        from app.voice.voice import _command
+        from app.voice.help import HELP_TEXT, HELP_BUTTONS
+        mgr = SimpleNamespace(coordinator=MagicMock())
+        res = _command(mgr, 'telegram:1', '/help')
+        self.assertIsInstance(res, dict)
+        self.assertEqual(res['text'], HELP_TEXT)
+        self.assertEqual(res['buttons'], HELP_BUTTONS)
+
+        res_q = _command(mgr, 'telegram:2', '/?')
+        self.assertIsInstance(res_q, dict)
+        self.assertEqual(res_q['text'], HELP_TEXT)
+        self.assertEqual(res_q['buttons'], HELP_BUTTONS)
+
+    def test_mode_command_notifies_transition_before_activation(self):
+        from app.voice.voice import _command
+        ctrl = MagicMock()
+        ctrl.set_mode.return_value = '[Modo Medium]'
+        coord = MagicMock()
+        mgr = SimpleNamespace(coordinator=coord, dolphin=ctrl)
+        res = _command(mgr, 'telegram:1', '/mode mid')
+        coord.notify.assert_called_once_with('[Pasando al modo medium]')
+        ctrl.set_mode.assert_called_once_with('mid')
+        self.assertEqual(res, '[Modo Medium]')
+
+    def test_transparent_llm_cascade_and_busy_notification(self):
+        notified = []
+        gateway = LLMManager.__new__(LLMManager)
+        gateway.dolphin = None
+        gateway.secrets = {}
+        gateway.notifier = lambda msg: notified.append(msg)
+        gateway.api_keys_pool = [
+            {'type': 'gemini', 'key': 'k1', 'id': 'GEMINI_API_KEY'},
+            {'type': 'gemini', 'key': 'k2', 'id': 'GEMINI_API_KEY_FALLBACK_2'},
+        ]
+        gateway._load_status = MagicMock(return_value={})
+        gateway._mark_key_failed = MagicMock()
+        gateway._generate_gemini = MagicMock(side_effect=Exception('429 Quota Exceeded'))
+        gateway._dolphin_endpoint = MagicMock(return_value='')
+
+        with self.assertRaises(ValueError) as ctx:
+            gateway.generate_content('hola')
+
+        self.assertIn('Todos los LLM están ocupados', str(ctx.exception))
+        self.assertIn('Gemini no responde, pasando a Gemini Fallback', notified)
+        self.assertIn('Gemini Fallback no responde, pasando a Dolphin Medium', notified)
+        self.assertIn('Todos los LLM están ocupados, por favor espere.', notified)
 
 
 if __name__ == '__main__':

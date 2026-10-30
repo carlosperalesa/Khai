@@ -130,13 +130,15 @@ class Coordinator:
         mailbox = getattr(manager, 'voice_mailbox', None)
         if mailbox is not None:
             mailbox.on_delivered = self._notification_delivered
+        if hasattr(manager, 'llm') and hasattr(manager.llm, '_gateway'):
+            manager.llm._gateway.notifier = self.notify
 
     def notify(self, text, buttons=None, message_thread_id=None, chat_id=None):
         if not text or not str(text).strip():
             return
         cleaned = re.sub(r'^(task_[a-f0-9]{32}|run_[a-f0-9]{32}|auth_[a-f0-9]{32}|case-[a-f0-9]{16,32}):\s*', '', str(text).strip())
         dolphin = getattr(self.manager, 'dolphin', None)
-        if dolphin is not None and not cleaned.startswith('[Mode ='):
+        if dolphin is not None and not cleaned.startswith('[Mode =') and not cleaned.startswith('[Modo '):
             banner = dolphin.consume_transition_banner(dolphin.get_active_mode())
             if isinstance(banner, str):
                 cleaned = banner + cleaned
@@ -1733,7 +1735,10 @@ class Coordinator:
                                                            conversation_history=history, questions=questions))
             if intent.get('error'):
                 self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']))
-                self.notify(intent.get('reply') or 'No pude interpretar la solicitud; no ejecuté ninguna acción.')
+                if intent.get('reply') is not None and intent['reply'].strip():
+                    self.notify(intent['reply'])
+                elif intent.get('reply') is None:
+                    self.notify('No pude interpretar la solicitud; no ejecuté ninguna acción.')
                 return
             action = intent.get('action')
             if action not in {'GENERAL_CHAT', 'ACTION_REQUIRED', 'TOOL_CALL'}:

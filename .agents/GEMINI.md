@@ -22,8 +22,12 @@ Desde Telegram, `/mode` (o `/m`) selecciona el motor conversacional: `/m low`
 usa Gemini y elimina la instancia Spot conservando el disco, `/m mid` levanta una
 VM Spot `e2-standard-8` (Dolphin low / CPU), `/m high` levanta una VM Spot
 `g2-standard-4` (Dolphin high / GPU NVIDIA L4 24 GB VRAM), y `/m ?` consulta el
-estado actual. El timer interno apaga la VM tras 5 minutos sin uso y cada cambio
-de modelo emite la notificación `[Mode = x]`. Se configuraron dos presupuestos con alarmas cada
+estado actual. El timer interno apaga la VM tras 10 minutos sin uso y cada cambio
+de modelo emite retroalimentación inmediata `[Pasando al modo xxx]` seguida de `[Modo Medium]` / `[Modo High]` / `[Modo Low]`.
+Ante agotamiento o indisponibilidad en cascada (Cloud -> Dolphin Medium -> Dolphin High),
+el sistema transparenta cada transición en tiempo real y, en caso de fallo total,
+notifica al usuario que todos los LLM están ocupados. El comando `/help` (`/?`)
+retorna un diccionario tipado con botones inline interactivos (`HELP_BUTTONS`). Se configuraron dos presupuestos con alarmas cada
 `1.000 CLP` (`~1 USD`) en `01074F-B289A3-A589D8` (consumo bruto de créditos vs.
 cobro real neto). Documentación y scripts diferenciados en `Dolphin/gcloud/` y
 `Dolphin/azure/`. Nginx y web operativos en `vm-carlosperales`.

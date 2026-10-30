@@ -91,6 +91,14 @@ class LLMManager:
         except TypeError:
             return self._generate_dolphin(prompt, endpoint)
 
+    def _notify(self, message: str) -> None:
+        notifier = getattr(self, 'notifier', None)
+        if callable(notifier):
+            try:
+                notifier(message)
+            except Exception as exc:
+                logger.warning('No se pudo enviar notificación de LLM: %s', exc)
+
     def generate_content(self, prompt: str, **kwargs) -> str:
         """Genera contenido en cascada según el modo activo (mid/high -> Dolphin -> Cloud; low -> Cloud -> Dolphin)."""
         rf = kwargs.get('response_format')
@@ -105,19 +113,38 @@ class LLMManager:
 
         if endpoint and active_mode in {'mid', 'high'}:
             tried_dolphin = True
+            primary_label = 'Medium' if active_mode == 'mid' else 'High'
+            secondary_profile = 'high' if active_mode == 'mid' else 'mid'
+            secondary_label = 'High' if active_mode == 'mid' else 'Medium'
             try:
                 answer = self._call_dolphin(prompt, endpoint, kwargs)
                 if dolphin_ctrl is not None and not is_json:
                     conv_banner = dolphin_ctrl.consume_transition_banner(active_mode)
                 return (conv_banner + answer) if conv_banner and not is_json else answer
             except Exception as exc:
-                logger.warning('Dolphin no disponible (%s); se usará el proveedor de respaldo en cascada',
-                               type(exc).__name__)
+                logger.warning('Dolphin %s no disponible (%s); se usará el proveedor de respaldo en cascada',
+                               active_mode, type(exc).__name__)
+                answer = None
+                if active_mode == 'mid' and dolphin_ctrl is not None:
+                    self._notify(f"Dolphin {primary_label} no responde, pasando a Dolphin {secondary_label}")
+                    self._notify(f"Conectando con Dolphin {secondary_label}")
+                    try:
+                        dolphin_ctrl.start(secondary_profile)
+                        answer = self._call_dolphin(prompt, endpoint, kwargs)
+                    except Exception as exc_alt:
+                        logger.warning('Dolphin %s también falló (%s)', secondary_profile, type(exc_alt).__name__)
+
+                if answer is not None:
+                    if dolphin_ctrl is not None and not is_json:
+                        conv_banner = dolphin_ctrl.consume_transition_banner(secondary_profile)
+                    return (conv_banner + answer) if conv_banner and not is_json else answer
+
                 if dolphin_ctrl is not None:
                     dolphin_ctrl.mark_fallback_to_low()
-                    if not is_json:
-                        conv_banner = (dolphin_ctrl.consume_transition_banner('low')
-                                       + 'Dolphin no respondió; continué con Gemini.\n')
+                self._notify("Dolphin no respondió; pasando a Gemini")
+                if not is_json:
+                    conv_banner = (dolphin_ctrl.consume_transition_banner('low')
+                                   + 'Dolphin no respondió; continué con Gemini.\n')
         elif dolphin_ctrl is not None and not is_json:
             conv_banner = dolphin_ctrl.consume_transition_banner('low')
 
@@ -137,7 +164,7 @@ class LLMManager:
             )
             pool = ready + cooling
 
-        for current_cred in pool:
+        for idx, current_cred in enumerate(pool):
             budget = current_budget.get()
             if budget is not None:
                 task = budget()
@@ -157,15 +184,58 @@ class LLMManager:
                 http_code = getattr(getattr(exc, 'response', None), 'status_code', None)
                 cooldown = 300 if http_code in {401, 403, 429} else getattr(self, 'cooldown_seconds', 60)
                 self._mark_key_failed(current_cred['id'], cooldown=cooldown)
+                if idx < len(pool) - 1:
+                    next_cred = pool[idx + 1]
+                    if 'FALLBACK' in next_cred['id']:
+                        self._notify("Gemini no responde, pasando a Gemini Fallback")
+                    else:
+                        self._notify(f"{current_cred['id']} no responde, pasando a {next_cred['id']}")
+                else:
+                    if len(pool) > 1:
+                        self._notify("Gemini Fallback no responde, pasando a Dolphin Medium")
+                    else:
+                        self._notify("Gemini no responde, pasando a Dolphin Medium")
 
         if endpoint and not tried_dolphin and not (forced_key and forced_type):
-            try:
-                answer = self._call_dolphin(prompt, endpoint, kwargs)
-                return (conv_banner + answer) if conv_banner and not is_json else answer
-            except Exception as exc:
-                logger.warning('Respaldo Dolphin falló (%s)', type(exc).__name__)
+            self._notify("Conectando con Dolphin Medium")
+            mid_ok = False
+            if dolphin_ctrl is not None:
+                try:
+                    dolphin_ctrl.start('mid')
+                    mid_ok = True
+                except Exception as exc:
+                    logger.warning('Auto-arranque Dolphin mid falló (%s)', type(exc).__name__)
 
-        raise ValueError("Unified Fallback agotó todos los intentos y llaves.")
+            if mid_ok or dolphin_ctrl is None:
+                try:
+                    answer = self._call_dolphin(prompt, endpoint, kwargs)
+                    if dolphin_ctrl is not None and not is_json:
+                        conv_banner = dolphin_ctrl.consume_transition_banner('mid')
+                    return (conv_banner + answer) if conv_banner and not is_json else answer
+                except Exception as exc:
+                    logger.warning('Inferencia Dolphin mid falló (%s)', type(exc).__name__)
+
+            self._notify("Dolphin Medium no responde, pasando a Dolphin High")
+            self._notify("Conectando con Dolphin High")
+            high_ok = False
+            if dolphin_ctrl is not None:
+                try:
+                    dolphin_ctrl.start('high')
+                    high_ok = True
+                except Exception as exc:
+                    logger.warning('Auto-arranque Dolphin high falló (%s)', type(exc).__name__)
+
+            if high_ok or dolphin_ctrl is None:
+                try:
+                    answer = self._call_dolphin(prompt, endpoint, kwargs)
+                    if dolphin_ctrl is not None and not is_json:
+                        conv_banner = dolphin_ctrl.consume_transition_banner('high')
+                    return (conv_banner + answer) if conv_banner and not is_json else answer
+                except Exception as exc:
+                    logger.warning('Inferencia Dolphin high falló (%s)', type(exc).__name__)
+
+        self._notify("Todos los LLM están ocupados, por favor espere.")
+        raise ValueError("Todos los LLM están ocupados, por favor espere.")
 
     def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
         """Ejecuta inferencia en el nodo privado Dolphin (Ollama) con soporte texto y JSON."""

@@ -14,7 +14,7 @@ from app.bootstrap import ModuleManager
 from app.mind.coordinator import Coordinator, _typing_loop
 from app.pixy.control import InstanceLock, TERMINAL
 from app.kernel.tracing import TracingFilter, trace_scope, new_trace_id
-from app.voice.help import HELP_TEXT
+from app.voice.help import HELP_TEXT, HELP_BUTTONS
 from app.mind.conversation import current_turn
 
 logger = logging.getLogger(__name__)
@@ -246,11 +246,16 @@ def _command(manager, source, text):
     parts = text.split()
     name = parts[0].lower()
     if name in {'/help', '/?'}:
-        return HELP_TEXT
+        return {'text': HELP_TEXT, 'buttons': HELP_BUTTONS}
     if name in {'/mode', '/m', '/mode?', '/m?'}:
         if not hasattr(manager, 'dolphin') or manager.dolphin is None:
             raise ValueError('Controlador Dolphin no configurado')
         arg = '?' if name.endswith('?') else (parts[1].lower() if len(parts) >= 2 else '?')
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
+        target_mode = aliases.get(arg, arg)
+        if target_mode in {'low', 'mid', 'high'}:
+            mode_labels = {'low': 'low', 'mid': 'medium', 'high': 'high'}
+            c.notify(f"[Pasando al modo {mode_labels[target_mode]}]")
         return manager.dolphin.set_mode(arg)
     if name in {'/pixy', '/p', '/pixy?', '/p?'}:
         payload = '?' if name.endswith('?') and len(parts) == 1 else text.partition(' ')[2]

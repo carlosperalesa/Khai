@@ -32,6 +32,9 @@ MACHINE_TO_MODE = {
     'g2-standard-4': 'high',
 }
 
+INACTIVITY_TIMEOUT_SEC = 600
+PROFILE_LABELS = {'low': 'Low', 'mid': 'Medium', 'high': 'High'}
+
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
@@ -140,7 +143,7 @@ class DolphinController:
             logger.warning('No se pudo apagar Dolphin tras el fallback (%s)', type(exc).__name__)
 
     def consume_transition_banner(self, effective_mode: str) -> str:
-        """Devuelve '[Mode = x]\\n' solo cuando el modo efectivo cambió respecto al último notificado."""
+        """Devuelve '[Modo X]\\n' solo cuando el modo efectivo cambió respecto al último notificado."""
         with connection(self.db_path) as conn:
             row = conn.execute(
                 'SELECT active_mode, notified_mode FROM dolphin_mode_state WHERE id = 1'
@@ -151,7 +154,8 @@ class DolphinController:
                     'UPDATE dolphin_mode_state SET active_mode = ?, notified_mode = ? WHERE id = 1',
                     (effective_mode, effective_mode),
                 )
-                return f'[Mode = {effective_mode}]\n'
+                label = PROFILE_LABELS.get(effective_mode, effective_mode.capitalize())
+                return f'[Modo {label}]\n'
         return ''
 
     def _load_service_account(self) -> dict:
@@ -245,7 +249,7 @@ class DolphinController:
         now = time.time()
         with connection(self.db_path) as conn:
             conn.execute(
-                'UPDATE dolphin_sessions SET ended_at = MIN(?, started_at + 300) '
+                f'UPDATE dolphin_sessions SET ended_at = MIN(?, started_at + {INACTIVITY_TIMEOUT_SEC}) '
                 'WHERE ended_at IS NULL',
                 (now,),
             )
@@ -259,8 +263,8 @@ class DolphinController:
         now = time.time()
         with connection(self.db_path) as conn:
             conn.execute(
-                'UPDATE dolphin_sessions SET ended_at = MIN(?, started_at + 300) '
-                'WHERE ended_at IS NULL AND ? - started_at > 360',
+                f'UPDATE dolphin_sessions SET ended_at = MIN(?, started_at + {INACTIVITY_TIMEOUT_SEC}) '
+                f'WHERE ended_at IS NULL AND ? - started_at > {INACTIVITY_TIMEOUT_SEC + 120}',
                 (now, now),
             )
             conn.execute(
@@ -276,7 +280,7 @@ class DolphinController:
                 'SELECT started_at, ended_at, rate_clp_per_hour FROM dolphin_sessions'
             ).fetchall()
         for row in rows:
-            end = row['ended_at'] if row['ended_at'] is not None else min(now, row['started_at'] + 300)
+            end = row['ended_at'] if row['ended_at'] is not None else min(now, row['started_at'] + INACTIVITY_TIMEOUT_SEC)
             dur_sec = max(60.0, end - row['started_at'])
             total_clp += (dur_sec / 3600.0) * float(row['rate_clp_per_hour'])
         remaining_clp = max(0.0, self.credit_pool_clp - total_clp)
@@ -311,7 +315,7 @@ class DolphinController:
                 'model': model,
                 'prompt': 'Responde solamente OK.',
                 'stream': False,
-                'keep_alive': '5m',
+                'keep_alive': '10m',
                 'options': {'num_predict': 2, 'temperature': 0},
             },
             timeout=timeout,
@@ -353,7 +357,7 @@ class DolphinController:
         else:
             detail = f'Fallo interno de activación ({type(exc).__name__}).'
         return ValueError(
-            f'[Mode = low]\nNo se pudo activar Dolphin {profile}. '
+            f'[Modo Low]\nNo se pudo activar Dolphin {profile}. '
             f'Khai continúa con Gemini. {detail}'
         )
 
@@ -367,7 +371,7 @@ class DolphinController:
 
     def set_mode(self, mode: str) -> str:
         mode = (mode or '?').strip().lower()
-        aliases = {'h': 'high', 'm': 'mid', 'l': 'low'}
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
         mode = aliases.get(mode, mode)
         if mode in {'?', 'status', 'info'}:
             return self.status()
@@ -384,7 +388,7 @@ class DolphinController:
 
     def start(self, profile: str = 'mid') -> str:
         profile = (profile or 'mid').strip().lower()
-        aliases = {'h': 'high', 'm': 'mid', 'l': 'low'}
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
         profile = aliases.get(profile, profile)
         if profile == 'low':
             return self.stop()
@@ -392,6 +396,7 @@ class DolphinController:
             raise ValueError("Modo inválido. Usa '/m low', '/m mid', '/m high' o '/m ?'.")
         spec = PROFILES[profile]
         target_mt = spec['machine_type']
+        label = PROFILE_LABELS.get(profile, profile.capitalize())
         current = self.get_instance()
         if current is not None:
             curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
@@ -399,7 +404,7 @@ class DolphinController:
             if curr_mt == target_mt and curr_status == 'RUNNING':
                 self._confirm_ready()
                 self._set_mode_state(profile, mark_notified=True)
-                return f"[Mode = {profile}]"
+                return f"[Modo {label}]"
             if curr_mt == target_mt and curr_status == 'TERMINATED':
                 resp = requests.post(
                     self._gce_url(f'instances/{quote(self.instance)}/start'),
@@ -411,7 +416,7 @@ class DolphinController:
                 self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
                 self._confirm_ready()
                 self._set_mode_state(profile, mark_notified=True)
-                return f"[Mode = {profile}]"
+                return f"[Modo {label}]"
             del_resp = requests.delete(
                 self._gce_url(f'instances/{quote(self.instance)}'),
                 headers=self._headers(),
@@ -456,16 +461,16 @@ class DolphinController:
         self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
         self._confirm_ready()
         self._set_mode_state(profile, mark_notified=True)
-        return f"[Mode = {profile}]"
+        return f"[Modo {label}]"
 
     def stop(self) -> str:
         current = self.get_instance()
         self._record_stop()
         self._set_mode_state('low', mark_notified=True)
         if current is None:
-            return "[Mode = low]"
+            return "[Modo Low]"
         self._delete_instance(wait=True)
-        return "[Mode = low]"
+        return "[Modo Low]"
 
     def status(self) -> str:
         current = self.get_instance()
@@ -473,7 +478,7 @@ class DolphinController:
             self._record_stop()
             self._set_mode_state('low', mark_notified=True)
             return (
-                f"[Mode = low]\nEstado: Gemini activo (Dolphin APAGADO; sin VM activa, disco {self.disk} de 32 GB en reposo). "
+                f"[Modo Low]\nEstado: Gemini activo (Dolphin APAGADO; sin VM activa, disco {self.disk} de 32 GB en reposo). "
                 f"{self.billing_summary()}"
             )
         curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
@@ -482,12 +487,13 @@ class DolphinController:
             self._record_stop()
             self._set_mode_state('low', mark_notified=True)
             return (
-                f"[Mode = low]\nEstado: Gemini activo (instancia Dolphin en estado {curr_status}, máquina {curr_mt}, disco {self.disk}). "
+                f"[Modo Low]\nEstado: Gemini activo (instancia Dolphin en estado {curr_status}, máquina {curr_mt}, disco {self.disk}). "
                 f"{self.billing_summary()}"
             )
         inferred_mode = MACHINE_TO_MODE.get(curr_mt, 'mid')
         self._set_mode_state(inferred_mode, mark_notified=True)
+        label = PROFILE_LABELS.get(inferred_mode, inferred_mode.capitalize())
         return (
-            f"[Mode = {inferred_mode}]\nEstado Dolphin: {curr_status} (máquina {curr_mt}, disco {self.disk}). "
+            f"[Modo {label}]\nEstado Dolphin: {curr_status} (máquina {curr_mt}, disco {self.disk}). "
             f"{self.billing_summary()}"
         )
