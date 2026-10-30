@@ -188,3 +188,29 @@ class TestMultiConversation(Fixture):
         
         updated = self.c.conversations.get_conversation(sid)
         self.assertEqual(updated['title'], '¿Cómo configuro Dolphin en Azure?')
+
+    def test_auto_naming_from_conversacion_n(self):
+        """Conversations titled 'Conversación N' from /new should auto-name on first user message."""
+        c = self.c.conversations.new_conversation(self.owner, self.chat)
+        sid = c['id']
+        self.assertTrue(c['title'].startswith('Conversación '))
+
+        self.c.conversations.begin('telegram:auto_name2', 'tr_name2', 'Explica los permisos de WireGuard', self.owner, self.chat)
+        updated = self.c.conversations.get_conversation(sid)
+        self.assertEqual(updated['title'], 'Explica los permisos de WireGuard')
+
+    def test_rename_conversation(self):
+        """Test /rename command for current conversation and by index."""
+        # Rename current conversation
+        res = command(self.manager, 'telegram:ren1', '/rename Proyecto Alpha')
+        self.assertIn('Conversación renombrada a: Proyecto Alpha', res)
+
+        # Create a second conversation
+        c2 = self.c.conversations.new_conversation(self.owner, self.chat, title='Beta')
+        
+        # Rename conversation 2 (which is Alpha) by index
+        res = command(self.manager, 'telegram:ren2', '/rename 2 Proyecto Omega')
+        self.assertIn('Conversación renombrada a: Proyecto Omega', res)
+
+        active = self.c.conversations.list_conversations(self.owner, self.chat)
+        self.assertEqual(active[1]['title'], 'Proyecto Omega')

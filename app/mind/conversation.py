@@ -130,7 +130,12 @@ class ConversationStore:
                          '(conversation_id,source,role,content,created_at) VALUES (?,?,?,?,?)',
                          (sid, source, 'user', text, time.time()))
 
-            if row['title'] in {'Chat Principal', 'Nuevo chat', f"Tema {thread_id}"} and not text.startswith('/'):
+            is_generic = (
+                row['title'] in {'Chat Principal', 'Nuevo chat'} or
+                row['title'].startswith('Conversación ') or
+                row['title'] == f"Tema {thread_id}"
+            )
+            if is_generic and not text.startswith('/'):
                 short_title = re.sub(r'[\r\n\t]+', ' ', text).strip()
                 if short_title:
                     short_title = short_title[:35]
@@ -285,6 +290,43 @@ class ConversationStore:
             conn.execute("UPDATE conversations SET is_current=1, updated_at=? WHERE id=?", (now, target_conv['id']))
             target_conv['is_current'] = 1
             target_conv['updated_at'] = now
+            return target_conv
+
+    def rename_conversation(self, owner_id, chat_id, new_title, target=None, thread_id=None):
+        owner_id, chat_id = str(owner_id), str(chat_id)
+        thread_id = int(thread_id) if thread_id is not None else None
+        new_title = re.sub(r'[\r\n\t]+', ' ', str(new_title)).strip()[:35]
+        if not new_title:
+            return None
+        with connection(self.path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if thread_id is not None:
+                active = [dict(r) for r in conn.execute(
+                    "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
+                    "ORDER BY updated_at DESC", (owner_id, chat_id, thread_id)).fetchall()]
+            else:
+                active = [dict(r) for r in conn.execute(
+                    "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
+                    "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
+            if not active:
+                return None
+            target_conv = None
+            if target is not None:
+                if str(target).strip().isdigit():
+                    idx = int(str(target).strip()) - 1
+                    if 0 <= idx < len(active):
+                        target_conv = active[idx]
+                else:
+                    target_str = str(target).strip().lower()
+                    target_conv = next((c for c in active if target_str in c['title'].lower() or target_str == c['id']), None)
+            else:
+                target_conv = next((c for c in active if c['is_current']), active[0])
+            
+            if not target_conv:
+                return None
+            
+            conn.execute("UPDATE conversations SET title=? WHERE id=?", (new_title, target_conv['id']))
+            target_conv['title'] = new_title
             return target_conv
 
     def bind(self, source, task_id):

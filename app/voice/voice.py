@@ -119,7 +119,7 @@ def secret_command(manager, text, user_id, chat_id):
 def urgent_command(text):
     name = text.split(maxsplit=1)[0].lower()
     return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m', '/mode?', '/m?',
-                    '/chats', '/c', '/new', '/clear', '/archive',
+                    '/chats', '/c', '/new', '/clear', '/archive', '/rename', '/r',
                     'y', 'yes', 'sí', 'si', 'n', 'no'}
 
 
@@ -224,7 +224,7 @@ def _command(manager, source, text):
         return manager.pixy.direct_response(text, source=source)
     if name in {'/chats', '/c'}:
         turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
-        owner_id = str(manager.telegram.user_id)
+        owner_id = str(getattr(getattr(manager, 'telegram', None), 'user_id', 'owner'))
         chat_id = turn.get('chat_id') or owner_id
         thread_id = turn.get('thread_id')
         if len(parts) > 1:
@@ -241,16 +241,33 @@ def _command(manager, source, text):
         for idx, conv in enumerate(active, 1):
             marker = "[Actual] " if conv.get('is_current') else ""
             lines.append(f"{idx}. {marker}{conv['title']}")
-            btn_label = f"{marker}{conv['title']}"[:30]
+            btn_label = f"{idx}. {marker}{conv['title']}"[:30]
             buttons.append([{"label": btn_label, "value": f"/c {idx}"}])
         buttons.append([
             {"label": "Nuevo chat", "value": "/new"},
             {"label": "Limpiar actual", "value": "/clear"}
         ])
         return {"text": "\n".join(lines), "buttons": buttons}
+    if name in {'/rename', '/r'}:
+        turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
+        owner_id = str(getattr(getattr(manager, 'telegram', None), 'user_id', 'owner'))
+        chat_id = turn.get('chat_id') or owner_id
+        thread_id = turn.get('thread_id')
+        if len(parts) < 2:
+            return "Uso: /rename [número] <nuevo nombre>"
+        if parts[1].isdigit() and len(parts) >= 3:
+            target = parts[1]
+            new_title = text.split(maxsplit=2)[2].strip()
+        else:
+            target = None
+            new_title = text.partition(' ')[2].strip()
+        renamed = c.conversations.rename_conversation(owner_id, chat_id, new_title, target=target, thread_id=thread_id)
+        if not renamed:
+            return "No se encontró la conversación para renombrar."
+        return f"Conversación renombrada a: {renamed['title']}"
     if name == '/new':
         turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
-        owner_id = str(manager.telegram.user_id)
+        owner_id = str(getattr(getattr(manager, 'telegram', None), 'user_id', 'owner'))
         chat_id = turn.get('chat_id') or owner_id
         thread_id = turn.get('thread_id')
         title = text.partition(' ')[2].strip() or None
@@ -258,14 +275,14 @@ def _command(manager, source, text):
         return f"Nueva conversación iniciada: {conv['title']}"
     if name == '/clear':
         turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
-        owner_id = str(manager.telegram.user_id)
+        owner_id = str(getattr(getattr(manager, 'telegram', None), 'user_id', 'owner'))
         chat_id = turn.get('chat_id') or owner_id
         thread_id = turn.get('thread_id')
         conv = c.conversations.clear_conversation(owner_id, chat_id, thread_id=thread_id)
         return "Conversación reiniciada."
     if name == '/archive':
         turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
-        owner_id = str(manager.telegram.user_id)
+        owner_id = str(getattr(getattr(manager, 'telegram', None), 'user_id', 'owner'))
         chat_id = turn.get('chat_id') or owner_id
         thread_id = turn.get('thread_id')
         target = text.partition(' ')[2].strip() or None

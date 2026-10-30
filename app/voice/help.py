@@ -14,8 +14,9 @@ Pulsa los botones para cambiar de modo.
 Comandos in-chat:
 /chats o /c [número|nombre]: Muestra la lista numerada de conversaciones recientes indicando cuál está activa
 /new [nombre]: Desmarca la anterior como activa y crea un hilo limpio con ese nombre.
+/rename [número] <nombre>: Renombra la conversación actual (o la indicada).
 /clear: Archiva el contexto de la conversación actual e inicia un hilo limpio inmediatamente sin cambiar de tema.
 /archive: Archiva la conversación activa actual y conmuta a la más reciente anterior (o crea una nueva si no quedan)."""
 
 HELP_BUTTONS = [{'label': '/mode ' + mode, 'value': '/mode ' + mode}
-                for mode in ('low', 'mid', 'high', '?')]
+                for mode in ('low', 'mid', 'high', '?')] + [{'label': 'Mis chats (/c)', 'value': '/c'}]
