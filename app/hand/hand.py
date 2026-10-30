@@ -306,10 +306,12 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             "credential_prefix": "Bearer ",
             "effect_contract": None
         }
-        prompt = ("Eres Hand. Investiga documentación oficial antes de declarar una operación HTTPS. "
+        field_list = ", ".join(sorted(template.keys()))
+        prompt = ("Eres Hand. Investiga documentación oficial antes de declarar una operación HTTPS para cumplir el Objetivo. "
                   "No adivines campos ni cambies de proveedor silenciosamente. Usa web_search tantas veces "
                   "como aporte información; cada error de validate_descriptor debe corregirse. Termina solo "
-                  "con finish_descriptor. Contrato exacto: " + json.dumps(template, ensure_ascii=False) +
+                  "con finish_descriptor. El descriptor DEBE contener exactamente estos 15 campos: " + field_list + ". "
+                  "Ejemplo ilustrativo de estructura: " + json.dumps(template, ensure_ascii=False) +
                   "\nObjetivo: " + str(task['request']) +
                   "\nError o evidencia anterior: " + str(task.get('feedback') or 'ninguno') +
                   "\nNotas relevantes: " + json.dumps(self._episode_context(task['request']), ensure_ascii=False))

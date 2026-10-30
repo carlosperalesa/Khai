@@ -31,7 +31,15 @@ def validate_descriptor(spec):
               'content_types', 'max_bytes', 'timeout', 'per_minute', 'effect',
               'credential_ref', 'credential_header', 'credential_prefix', 'effect_contract'}
     if not isinstance(spec, dict) or set(spec) != fields:
-        raise ValueError('ServiceDescriptor fields do not match the contract')
+        missing = sorted(fields - set(spec)) if isinstance(spec, dict) else []
+        extra = sorted(set(spec) - fields) if isinstance(spec, dict) else []
+        details = []
+        if missing:
+            details.append(f'missing: {missing}')
+        if extra:
+            details.append(f'extra: {extra}')
+        detail_msg = f' ({', '.join(details)})' if details else ''
+        raise ValueError(f'ServiceDescriptor fields do not match the contract{detail_msg}')
     for key in ('service_id', 'operation', 'version'):
         if not isinstance(spec[key], str) or not IDENTIFIER.fullmatch(spec[key]):
             raise ValueError('Invalid service identifier')
