@@ -376,7 +376,11 @@ class LLMManager:
                 continue
             parts = ([{'text': message['content']}] if message.get('content') else [])
             for call in message.get('tool_calls', []):
-                parts.append({'functionCall': {'name': call['name'], 'args': call.get('arguments', {})}})
+                call_part = {'functionCall': {'name': call['name'], 'args': call.get('arguments', {})}}
+                sig = call.get('thought_signature') or call.get('thoughtSignature')
+                if sig:
+                    call_part['thoughtSignature'] = sig
+                parts.append(call_part)
             contents.append({'role': 'model' if role == 'assistant' else 'user',
                              'parts': parts or [{'text': ''}]})
         return contents, '\n'.join(system)
@@ -446,8 +450,11 @@ class LLMManager:
                 text.append(part['text'])
             if isinstance(part.get('functionCall'), dict):
                 call = part['functionCall']
-                calls.append({'id': 'call_' + uuid.uuid4().hex, 'name': call.get('name'),
-                              'arguments': call.get('args') or {}})
+                call_data = {'id': 'call_' + uuid.uuid4().hex, 'name': call.get('name'),
+                             'arguments': call.get('args') or {}}
+                if part.get('thoughtSignature'):
+                    call_data['thought_signature'] = part['thoughtSignature']
+                calls.append(call_data)
         return {'content': '\n'.join(text).strip(), 'tool_calls': calls, 'model': model}
 
     def _complete_dolphin(self, messages, tools, endpoint, kwargs):
@@ -497,7 +504,8 @@ class LLMManager:
             except Exception as exc:
                 last_error = exc
                 code = getattr(getattr(exc, 'response', None), 'status_code', None)
-                self._mark_key_failed(item['id'], cooldown=300 if code in {401, 403, 429} else None)
+                if code in {401, 403}:
+                    self._mark_key_failed(item['id'], cooldown=300)
         raise ValueError('El proveedor de investigación no entregó fuentes verificables') from last_error
 
     def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
