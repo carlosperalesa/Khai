@@ -62,7 +62,7 @@ class DolphinPilotTests(unittest.TestCase):
                 self.assertIn(command, HELP_TEXT)
                 _command(manager, 'owner:button', command)
                 if command.startswith('/mode'):
-                    manager.dolphin.set_mode.assert_called_with(command.split()[1])
+                    manager.dolphin.set_mode.assert_called_with(command.split()[1], notifier=manager.coordinator.notify)
 
     def test_unified_routing_by_mode_and_cascade(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,19 +149,19 @@ class DolphinPilotTests(unittest.TestCase):
             with patch.object(ctrl, 'get_instance', return_value=None), \
                  patch('app.voice.gateway.dolphin_controller.requests.post', return_value=post_resp) as post_mock:
                 msg_mid = ctrl.set_mode('mid')
-                self.assertEqual(msg_mid, '[Modo Medium]')
+                self.assertEqual(msg_mid, '[Modo mid conectado]')
                 self.assertTrue(post_mock.call_args.kwargs['json']['disks'][0]['boot'])
                 self.assertFalse(post_mock.call_args.kwargs['json']['disks'][0]['autoDelete'])
 
                 msg_high = ctrl.set_mode('high')
-                self.assertEqual(msg_high, '[Modo High]')
+                self.assertEqual(msg_high, '[Modo high conectado]')
 
             del_resp = MagicMock(status_code=200)
             del_resp.json.return_value = {'name': 'op-del-1'}
             with patch.object(ctrl, 'get_instance', return_value={'machineType': 'zones/us-west1-a/machineTypes/g2-standard-4', 'status': 'RUNNING'}), \
                  patch('app.voice.gateway.dolphin_controller.requests.delete', return_value=del_resp):
                 msg_nano = ctrl.set_mode('nano')
-                self.assertEqual(msg_nano, '[Modo Nano]')
+                self.assertEqual(msg_nano, '[Modo nano conectado]')
                 status_text = ctrl.status()
                 self.assertTrue(status_text.startswith('[Modo '))
                 self.assertIn('Crédito estimado disponible', status_text)
@@ -181,7 +181,7 @@ class DolphinPilotTests(unittest.TestCase):
                 first_reply = gateway.generate_content('Hola')
                 self.assertEqual(
                     first_reply,
-                    '[Modo Nano]\nDolphin no respondió; continué con Gemini.\nRespuesta desde Gemini.',
+                    '[Modo nano conectado]\nRespuesta desde Gemini.',
                 )
                 self.assertEqual(ctrl.get_active_mode(), 'nano')
                 ctrl._delete_instance.assert_called_once_with(wait=False)
@@ -237,7 +237,7 @@ class DolphinPilotTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     ctrl.set_mode('mid')
 
-            self.assertIn('[Modo Nano]', str(raised.exception))
+            self.assertIn('[Modo nano conectado]', str(raised.exception))
             self.assertIn('continúa con Gemini', str(raised.exception))
             self.assertEqual(ctrl.get_active_mode(), 'nano')
             ctrl._delete_instance.assert_called_once_with(wait=True)
@@ -254,7 +254,7 @@ class DolphinPilotTests(unittest.TestCase):
                 ctrl._warmup_model()
             payload = post.call_args.kwargs['json']
             self.assertEqual(payload['model'], 'dolphin3:8b')
-            self.assertEqual(payload['options']['num_predict'], 2)
+            self.assertEqual(payload['options']['num_predict'], 1)
             self.assertEqual(post.call_args.kwargs['timeout'], 120)
             self.assertFalse(post.call_args.kwargs['allow_redirects'])
 
@@ -450,13 +450,13 @@ class DolphinPilotTests(unittest.TestCase):
     def test_mode_command_notifies_transition_before_activation(self):
         from app.voice.voice import _command
         ctrl = MagicMock()
-        ctrl.set_mode.return_value = '[Modo Medium]'
+        ctrl.set_mode.return_value = '[Modo mid conectado]'
         coord = MagicMock()
         mgr = SimpleNamespace(coordinator=coord, dolphin=ctrl)
         res = _command(mgr, 'telegram:1', '/mode mid')
-        coord.notify.assert_called_once_with('[Pasando al modo medium]')
-        ctrl.set_mode.assert_called_once_with('mid')
-        self.assertEqual(res, '[Modo Medium]')
+        coord.notify.assert_called_once_with('[Conectando con Modo mid]')
+        ctrl.set_mode.assert_called_once_with('mid', notifier=coord.notify)
+        self.assertEqual(res, '[Modo mid conectado]')
 
     def test_transparent_llm_cascade_and_busy_notification(self):
         notified = []
@@ -487,7 +487,7 @@ class DolphinPilotTests(unittest.TestCase):
         notified = []
         gateway = LLMManager.__new__(LLMManager)
         gateway.dolphin = MagicMock()
-        gateway.dolphin.get_active_mode.return_value = 'low'
+        gateway.dolphin.get_active_mode.return_value = 'nano'
         gateway.secrets = {}
         gateway.notifier = notified.append
         gateway.api_keys_pool = [

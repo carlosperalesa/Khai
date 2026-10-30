@@ -266,10 +266,9 @@ def _command(manager, source, text):
         arg = '?' if name.endswith('?') else (parts[1].lower() if len(parts) >= 2 else '?')
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
         target_mode = aliases.get(arg, arg)
-        if target_mode in {'low', 'mid', 'high'}:
-            mode_labels = {'low': 'low', 'mid': 'medium', 'high': 'high'}
-            c.notify(f"[Pasando al modo {mode_labels[target_mode]}]")
-        return manager.dolphin.set_mode(arg)
+        if target_mode in {'low', 'mid', 'high'} and hasattr(c, 'notify') and c.notify:
+            c.notify(f"[Conectando con Modo {target_mode}]")
+        return manager.dolphin.set_mode(arg, notifier=getattr(c, 'notify', None))
     if name in {'/pixy', '/p', '/pixy?', '/p?'}:
         payload = '?' if name.endswith('?') and len(parts) == 1 else text.partition(' ')[2]
         return manager.pixy.direct_response(payload, source=source)

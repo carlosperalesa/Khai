@@ -68,12 +68,12 @@ class TestIncidentFixes(Fixture):
     def test_dolphin_aliases(self):
         """B.1: DolphinController accepts aliases 'h', 'm', 'l'."""
         ctrl = DolphinController(data_dir=str(self.root))
-        ctrl.stop = MagicMock(return_value='[Mode = low]')
-        ctrl.start = MagicMock(side_effect=lambda mode: f"[Mode = {mode}]")
+        ctrl.stop = MagicMock(return_value='[Modo nano conectado]')
+        ctrl.start = MagicMock(side_effect=lambda mode: f"[Modo {mode} conectado]")
 
-        self.assertEqual(ctrl.set_mode('l'), '[Mode = low]')
-        self.assertEqual(ctrl.set_mode('m'), '[Mode = mid]')
-        self.assertEqual(ctrl.set_mode('h'), '[Mode = high]')
+        self.assertEqual(ctrl.set_mode('l'), '[Modo low conectado]')
+        self.assertEqual(ctrl.set_mode('m'), '[Modo mid conectado]')
+        self.assertEqual(ctrl.set_mode('h'), '[Modo high conectado]')
 
     def test_command_invalid_mode_handling(self):
         """B.1: command() raises ValueError on invalid mode which voice.py catches."""

@@ -131,44 +131,49 @@ class LLMManager:
 
         if endpoint and active_mode in {'low', 'mid', 'high'}:
             tried_dolphin = True
-            primary_label = 'Low' if active_mode == 'low' else ('Medium' if active_mode == 'mid' else 'High')
-            secondary_profile = 'mid' if active_mode == 'low' else ('high' if active_mode == 'mid' else 'mid')
-            secondary_label = 'Medium' if secondary_profile == 'mid' else ('High' if secondary_profile == 'high' else 'Low')
-            if dolphin_ctrl is not None:
-                try:
-                    self._notify(f"Conectando con Dolphin {primary_label}")
-                    dolphin_ctrl.start(active_mode)
-                except Exception as exc_start:
-                    logger.warning('Auto-arranque Dolphin %s falló (%s)', active_mode, type(exc_start).__name__)
+            ladder = ['high', 'mid', 'low'] if active_mode == 'high' else (['mid', 'low'] if active_mode == 'mid' else ['low'])
+            answer = None
+            successful_profile = None
+
+            # Intentar directamente si el nodo ya está activo y respondiendo
             try:
                 answer = self._call_dolphin(prompt, endpoint, kwargs)
+                successful_profile = active_mode
+            except Exception as exc_call:
+                logger.info('Dolphin %s no respondió directamente (%s), intentando arranque/cascada',
+                            active_mode, type(exc_call).__name__)
+                for profile in ladder:
+                    if dolphin_ctrl is not None:
+                        try:
+                            self._notify(f"[Conectando con Modo {profile}]")
+                            dolphin_ctrl.start(profile)
+                            answer = self._call_dolphin(prompt, endpoint, kwargs)
+                            successful_profile = profile
+                            self._notify(f"[Modo {profile} conectado]")
+                            break
+                        except Exception as exc:
+                            from app.voice.gateway.dolphin_controller import _format_error_reason
+                            reason = _format_error_reason(exc)
+                            logger.warning('Dolphin %s falló (%s): %s', profile, type(exc).__name__, exc)
+                            self._notify(f"[Modo {profile} falló por: {reason}]")
+                    else:
+                        try:
+                            answer = self._call_dolphin(prompt, endpoint, kwargs)
+                            successful_profile = profile
+                            break
+                        except Exception as exc:
+                            logger.warning('Llamada Dolphin falló (%s)', type(exc).__name__)
+
+            if answer is not None and successful_profile is not None:
                 if dolphin_ctrl is not None and not is_json:
-                    conv_banner = dolphin_ctrl.consume_transition_banner(active_mode)
+                    conv_banner = dolphin_ctrl.consume_transition_banner(successful_profile)
                 return (conv_banner + answer) if conv_banner and not is_json else answer
-            except Exception as exc:
-                logger.warning('Dolphin %s no disponible (%s); se usará el proveedor de respaldo en cascada',
-                               active_mode, type(exc).__name__)
-                answer = None
-                if dolphin_ctrl is not None and secondary_profile != active_mode:
-                    self._notify(f"Dolphin {primary_label} no responde, pasando a Dolphin {secondary_label}")
-                    self._notify(f"Conectando con Dolphin {secondary_label}")
-                    try:
-                        dolphin_ctrl.start(secondary_profile)
-                        answer = self._call_dolphin(prompt, endpoint, kwargs)
-                    except Exception as exc_alt:
-                        logger.warning('Dolphin %s también falló (%s)', secondary_profile, type(exc_alt).__name__)
 
-                if answer is not None:
-                    if dolphin_ctrl is not None and not is_json:
-                        conv_banner = dolphin_ctrl.consume_transition_banner(secondary_profile)
-                    return (conv_banner + answer) if conv_banner and not is_json else answer
-
-                if dolphin_ctrl is not None:
-                    dolphin_ctrl.mark_fallback_to_nano()
-                self._notify("Dolphin no respondió; pasando a Gemini")
-                if not is_json:
-                    conv_banner = (dolphin_ctrl.consume_transition_banner('nano')
-                                   + 'Dolphin no respondió; continué con Gemini.\n')
+            if dolphin_ctrl is not None:
+                dolphin_ctrl.mark_fallback_to_nano()
+            self._notify("[Modo nano conectado]")
+            if not is_json and dolphin_ctrl is not None:
+                conv_banner = dolphin_ctrl.consume_transition_banner('nano')
         elif dolphin_ctrl is not None and not is_json:
             conv_banner = dolphin_ctrl.consume_transition_banner('nano')
 
