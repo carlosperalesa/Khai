@@ -4,7 +4,7 @@
 **Entorno de ejecución:** Windows PowerShell (Control) / Linux Azure (Producción).  
 **Servidor Azure:**
 - Host / Usuario: `carlos@20.237.211.250` (`/opt/khai`)
-- Clave SSH: `.ssh/khai_azure_codex_ed25519`
+- Clave SSH: `.ssh/id_rsa`
 - Contenedores Docker: `khai_core`, `khai_docker_proxy`
 
 ---
@@ -25,11 +25,26 @@ Khai convierte objetivos conversacionales en resultados verificables manteniendo
 ## 2. SITUACIÓN ACTUAL DEL PROYECTO (Última Sesión)
 
 ### Commits Desplegados en Azure (`origin/main`)
+- `1225dc4`: `feat(dolphin): cascada high>mid>low>nano, timeouts optimizados y notificaciones concisas`
 - `eeceb43`: `feat(dolphin): reestructurar modos nano (Gemini), low (CPU), mid (GPU 8B) y high (GPU 32B)`
 - `36f843b`: `fix(registry): reutilizar descriptores aprobados y restaurar servicios autorizados en reintentos`
 - `190ad90`: `fix(hand): limpiar borrador huerfano en reintentos de creacion`
 - `360dabd`: `fix(gateway): propagar y validar servicios aprobados desde creation_consent y setup_proposals`
 - `126fc0d`: `fix(heart): incluir DIAGNOSING en estados de tarea y limpiar recovery_case_id en reintentos`
+
+### Infraestructura y Controlador Dolphin (Completado y Desplegado)
+1. **Disco Persistente Redimensionado a 100 GB:** `dolphin-boot-disk` en GCP (`us-west1-a`) redimensionado y verificado en 100 GB (`sizeGb: 100`, status: `READY`). 100% cubierto por los créditos promocionales ($2.80 USD/mes por los 70 GB excedentes del Free Tier).
+2. **Modelo 32B Descargado y Persistido:** Descargado en disco `qwen2.5-32b-abliterated` (19 GB, sha256 validado) junto a `dolphin3:8b` (4.9 GB).
+3. **Timeouts Optimizados:** Timeout de espera a Ollama ajustado a 90s; warmup acotado a 90s (máximo 120s) con inferencia mínima de 1 token (`num_predict: 1`). Se eliminó el timeout excesivo de 180s.
+4. **Cascada de Modos y Mensajería Concisa:**
+   - Cascada estricta: `high > mid > low > nano`.
+   - Mensajes limpios y concisos durante la transición:
+     - `[Conectando con Modo <nombre>]`
+     - `[Modo <nombre> conectado]`
+     - `[Modo <nombre> falló por: <motivo>]` (ej. `spot no disponible`)
+     - En fallback final a Gemini: `[Modo nano conectado]`
+   - Eliminados mensajes innecesarios de facturación y logs durante el uso habitual (la facturación se reserva para `/mode ?`).
+   - Verificado con 24 tests unitarios en verde y desplegado en Azure (`khai_core` reconstruido y validado con `check_integrity = ok`).
 
 ### Diagnóstico de la Prueba Sintética en Producción
 Durante la ejecución del Paso 1 de `docs/VALIDATION.md` (*"crea una skill para conectarse a internet y buscar en Google..."*):
