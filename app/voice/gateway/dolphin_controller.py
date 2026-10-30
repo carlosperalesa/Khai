@@ -15,25 +15,34 @@ from app.kernel.database import adopt_schema, connection
 logger = logging.getLogger(__name__)
 
 PROFILES = {
-    'mid': {
+    'low': {
         'machine_type': 'e2-standard-8',
-        'label': 'mid (Dolphin CPU Spot e2-standard-8, 8 vCPU / 32 GB RAM)',
+        'label': 'low (Dolphin CPU Spot e2-standard-8, 8 vCPU / 32 GB RAM)',
         'rate_clp_per_hour': 152.0,
+        'model': 'dolphin3:8b',
+    },
+    'mid': {
+        'machine_type': 'g2-standard-4',
+        'label': 'mid (Dolphin 8B GPU Spot g2-standard-4, NVIDIA L4 24 GB VRAM)',
+        'rate_clp_per_hour': 418.0,
+        'model': 'dolphin3:8b',
     },
     'high': {
-        'machine_type': 'g2-standard-4',
-        'label': 'high (Dolphin GPU Spot g2-standard-4, NVIDIA L4 24 GB VRAM)',
-        'rate_clp_per_hour': 418.0,
+        'machine_type': 'g2-standard-8',
+        'label': 'high (Qwen 32B Abliterated GPU Spot g2-standard-8, NVIDIA L4 24 GB VRAM)',
+        'rate_clp_per_hour': 550.0,
+        'model': 'qwen2.5-32b-abliterated',
     },
 }
 
 MACHINE_TO_MODE = {
-    'e2-standard-8': 'mid',
-    'g2-standard-4': 'high',
+    'e2-standard-8': 'low',
+    'g2-standard-4': 'mid',
+    'g2-standard-8': 'high',
 }
 
 INACTIVITY_TIMEOUT_SEC = 600
-PROFILE_LABELS = {'low': 'Low', 'mid': 'Medium', 'high': 'High'}
+PROFILE_LABELS = {'nano': 'Nano', 'low': 'Low', 'mid': 'Medium', 'high': 'High'}
 
 
 def _b64url(data: bytes) -> str:
@@ -102,7 +111,7 @@ class DolphinController:
             )
             conn.execute(
                 "INSERT OR IGNORE INTO dolphin_mode_state(id, active_mode, notified_mode) "
-                "VALUES (1, 'low', 'low')"
+                "VALUES (1, 'nano', 'nano')"
             )
         adopt_schema(self.db_path, 'dolphin-sessions', ['dolphin_sessions', 'dolphin_mode_state'])
         self._token = None
@@ -118,7 +127,7 @@ class DolphinController:
     def get_active_mode(self) -> str:
         with connection(self.db_path) as conn:
             row = conn.execute('SELECT active_mode FROM dolphin_mode_state WHERE id = 1').fetchone()
-            return row['active_mode'] if row else 'low'
+            return row['active_mode'] if row else 'nano'
 
     def _set_mode_state(self, active_mode: str, *, mark_notified: bool = False) -> None:
         with connection(self.db_path) as conn:
@@ -133,14 +142,17 @@ class DolphinController:
                     (active_mode,),
                 )
 
-    def mark_fallback_to_low(self) -> None:
-        """Registra que Dolphin se apagó/no está disponible y vuelve a modo low (Gemini)."""
+    def mark_fallback_to_nano(self) -> None:
+        """Registra que Dolphin se apagó/no está disponible y vuelve a modo nano (Gemini)."""
         self._record_stop()
-        self._set_mode_state('low', mark_notified=False)
+        self._set_mode_state('nano', mark_notified=False)
         try:
             self._delete_instance(wait=False)
         except Exception as exc:
             logger.warning('No se pudo apagar Dolphin tras el fallback (%s)', type(exc).__name__)
+
+    def mark_fallback_to_low(self) -> None:
+        self.mark_fallback_to_nano()
 
     def consume_transition_banner(self, effective_mode: str) -> str:
         """Devuelve '[Modo X]\\n' solo cuando el modo efectivo cambió respecto al último notificado."""
@@ -305,10 +317,20 @@ class DolphinController:
             time.sleep(2)
         return False
 
-    def _warmup_model(self) -> None:
+    def get_model_for_mode(self, mode: str | None = None) -> str:
+        override = self._cfg('KHAI_DOLPHIN_MODEL', '')
+        if override:
+            return override
+        target_mode = (mode or self.get_active_mode() or 'mid').lower()
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
+        target_mode = aliases.get(target_mode, target_mode)
+        spec = PROFILES.get(target_mode, PROFILES.get('mid', {}))
+        return spec.get('model', 'dolphin3:8b')
+
+    def _warmup_model(self, profile: str = 'mid') -> None:
         """Carga el modelo y exige una inferencia mínima antes de declarar el modo activo."""
         timeout = max(30, min(300, int(self._cfg('KHAI_DOLPHIN_WARMUP_TIMEOUT', '180'))))
-        model = self._cfg('KHAI_DOLPHIN_MODEL', 'dolphin3:8b')
+        model = self.get_model_for_mode(profile)
         response = requests.post(
             f'{self.endpoint}/api/generate',
             json={
@@ -326,10 +348,10 @@ class DolphinController:
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError('Ollama no devolvió respuesta durante la precarga')
 
-    def _confirm_ready(self) -> None:
+    def _confirm_ready(self, profile: str = 'mid') -> None:
         if not self._wait_ollama_ready(timeout_sec=60):
             raise TimeoutError('Ollama no abrió su API dentro del plazo de arranque')
-        self._warmup_model()
+        self._warmup_model(profile)
 
     def _delete_instance(self, *, wait: bool = True) -> None:
         current = self.get_instance()
@@ -357,13 +379,13 @@ class DolphinController:
         else:
             detail = f'Fallo interno de activación ({type(exc).__name__}).'
         return ValueError(
-            f'[Modo Low]\nNo se pudo activar Dolphin {profile}. '
+            f'[Modo Nano]\nNo se pudo activar Dolphin {profile}. '
             f'Khai continúa con Gemini. {detail}'
         )
 
     def _rollback_activation(self) -> None:
         self._record_stop()
-        self._set_mode_state('low', mark_notified=True)
+        self._set_mode_state('nano', mark_notified=True)
         try:
             self._delete_instance(wait=True)
         except Exception as exc:
@@ -371,14 +393,14 @@ class DolphinController:
 
     def set_mode(self, mode: str) -> str:
         mode = (mode or '?').strip().lower()
-        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid', 'n': 'nano', 'off': 'nano'}
         mode = aliases.get(mode, mode)
         if mode in {'?', 'status', 'info'}:
             return self.status()
-        if mode == 'low':
+        if mode in {'nano', 'off'}:
             return self.stop()
         if mode not in PROFILES:
-            raise ValueError("Modo inválido. Usa '/m low' (Gemini), '/m mid' (Dolphin CPU), '/m high' (Dolphin GPU) o '/m ?'.")
+            raise ValueError("Modo inválido. Usa '/m nano' (Gemini), '/m low' (Dolphin CPU), '/m mid' (Dolphin GPU 8B), '/m high' (GPU L4 32B) o '/m ?'.")
         try:
             return self.start(mode)
         except (requests.RequestException, RuntimeError, TimeoutError, KeyError, ValueError) as exc:
@@ -388,12 +410,12 @@ class DolphinController:
 
     def start(self, profile: str = 'mid') -> str:
         profile = (profile or 'mid').strip().lower()
-        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
+        aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid', 'n': 'nano', 'off': 'nano'}
         profile = aliases.get(profile, profile)
-        if profile == 'low':
+        if profile in {'nano', 'off'}:
             return self.stop()
         if profile not in PROFILES:
-            raise ValueError("Modo inválido. Usa '/m low', '/m mid', '/m high' o '/m ?'.")
+            raise ValueError("Modo inválido. Usa '/m nano', '/m low', '/m mid', '/m high' o '/m ?'.")
         spec = PROFILES[profile]
         target_mt = spec['machine_type']
         label = PROFILE_LABELS.get(profile, profile.capitalize())
@@ -402,7 +424,7 @@ class DolphinController:
             curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
             curr_status = current.get('status', '')
             if curr_mt == target_mt and curr_status == 'RUNNING':
-                self._confirm_ready()
+                self._confirm_ready(profile)
                 self._set_mode_state(profile, mark_notified=True)
                 return f"[Modo {label}]"
             if curr_mt == target_mt and curr_status == 'TERMINATED':
@@ -414,7 +436,7 @@ class DolphinController:
                 resp.raise_for_status()
                 self._wait_operation(resp.json()['name'])
                 self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
-                self._confirm_ready()
+                self._confirm_ready(profile)
                 self._set_mode_state(profile, mark_notified=True)
                 return f"[Modo {label}]"
             del_resp = requests.delete(
@@ -461,40 +483,43 @@ class DolphinController:
             self._wait_operation(ins_resp.json()['name'])
         except RuntimeError as op_err:
             if profile == 'high' and 'not enough resources' in str(op_err).lower():
-                logger.warning('GCP sin cupo GPU Spot para high; fallback automático a mid (CPU)')
+                logger.warning('GCP sin cupo GPU Spot para high; fallback automático a mid (GPU g2-standard-4)')
                 return self.start('mid')
+            if profile == 'mid' and 'not enough resources' in str(op_err).lower():
+                logger.warning('GCP sin cupo GPU Spot para mid; fallback automático a low (CPU e2-standard-8)')
+                return self.start('low')
             raise
 
         self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
-        self._confirm_ready()
+        self._confirm_ready(profile)
         self._set_mode_state(profile, mark_notified=True)
         return f"[Modo {label}]"
 
     def stop(self) -> str:
         current = self.get_instance()
         self._record_stop()
-        self._set_mode_state('low', mark_notified=True)
+        self._set_mode_state('nano', mark_notified=True)
         if current is None:
-            return "[Modo Low]"
+            return "[Modo Nano]"
         self._delete_instance(wait=True)
-        return "[Modo Low]"
+        return "[Modo Nano]"
 
     def status(self) -> str:
         current = self.get_instance()
         if current is None:
             self._record_stop()
-            self._set_mode_state('low', mark_notified=True)
+            self._set_mode_state('nano', mark_notified=True)
             return (
-                f"[Modo Low]\nEstado: Gemini activo (Dolphin APAGADO; sin VM activa, disco {self.disk} de 32 GB en reposo). "
+                f"[Modo Nano]\nEstado: Gemini activo (Dolphin APAGADO; sin VM activa, disco {self.disk} de 100 GB en reposo). "
                 f"{self.billing_summary()}"
             )
         curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
         curr_status = current.get('status', 'UNKNOWN')
         if curr_status != 'RUNNING':
             self._record_stop()
-            self._set_mode_state('low', mark_notified=True)
+            self._set_mode_state('nano', mark_notified=True)
             return (
-                f"[Modo Low]\nEstado: Gemini activo (instancia Dolphin en estado {curr_status}, máquina {curr_mt}, disco {self.disk}). "
+                f"[Modo Nano]\nEstado: Gemini activo (instancia Dolphin en estado {curr_status}, máquina {curr_mt}, disco {self.disk}). "
                 f"{self.billing_summary()}"
             )
         inferred_mode = MACHINE_TO_MODE.get(curr_mt, 'mid')

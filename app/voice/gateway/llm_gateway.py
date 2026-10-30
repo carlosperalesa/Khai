@@ -100,6 +100,15 @@ class LLMManager:
         except TypeError:
             return self._generate_dolphin(prompt, endpoint)
 
+    def _dolphin_model(self) -> str:
+        env_model = os.getenv('KHAI_DOLPHIN_MODEL', '').strip()
+        if env_model:
+            return env_model
+        dolphin_ctrl = getattr(self, 'dolphin', None)
+        if dolphin_ctrl is not None and hasattr(dolphin_ctrl, 'get_model_for_mode'):
+            return dolphin_ctrl.get_model_for_mode()
+        return 'dolphin3:8b'
+
     def _notify(self, message: str) -> None:
         notifier = getattr(self, 'notifier', None)
         if callable(notifier):
@@ -115,16 +124,16 @@ class LLMManager:
         dolphin_ctrl = getattr(self, 'dolphin', None)
         active_mode = (dolphin_ctrl.get_active_mode()
                        if dolphin_ctrl is not None
-                       else os.getenv('KHAI_DOLPHIN_MODE', 'low').strip().lower())
+                       else os.getenv('KHAI_DOLPHIN_MODE', 'nano').strip().lower())
         endpoint = self._dolphin_endpoint()
         conv_banner = ''
         tried_dolphin = False
 
-        if endpoint and active_mode in {'mid', 'high'}:
+        if endpoint and active_mode in {'low', 'mid', 'high'}:
             tried_dolphin = True
-            primary_label = 'Medium' if active_mode == 'mid' else 'High'
-            secondary_profile = 'high' if active_mode == 'mid' else 'mid'
-            secondary_label = 'High' if active_mode == 'mid' else 'Medium'
+            primary_label = 'Low' if active_mode == 'low' else ('Medium' if active_mode == 'mid' else 'High')
+            secondary_profile = 'mid' if active_mode == 'low' else ('high' if active_mode == 'mid' else 'mid')
+            secondary_label = 'Medium' if secondary_profile == 'mid' else ('High' if secondary_profile == 'high' else 'Low')
             if dolphin_ctrl is not None:
                 try:
                     self._notify(f"Conectando con Dolphin {primary_label}")
@@ -140,7 +149,7 @@ class LLMManager:
                 logger.warning('Dolphin %s no disponible (%s); se usará el proveedor de respaldo en cascada',
                                active_mode, type(exc).__name__)
                 answer = None
-                if active_mode == 'mid' and dolphin_ctrl is not None:
+                if dolphin_ctrl is not None and secondary_profile != active_mode:
                     self._notify(f"Dolphin {primary_label} no responde, pasando a Dolphin {secondary_label}")
                     self._notify(f"Conectando con Dolphin {secondary_label}")
                     try:
@@ -155,13 +164,13 @@ class LLMManager:
                     return (conv_banner + answer) if conv_banner and not is_json else answer
 
                 if dolphin_ctrl is not None:
-                    dolphin_ctrl.mark_fallback_to_low()
+                    dolphin_ctrl.mark_fallback_to_nano()
                 self._notify("Dolphin no respondió; pasando a Gemini")
                 if not is_json:
-                    conv_banner = (dolphin_ctrl.consume_transition_banner('low')
+                    conv_banner = (dolphin_ctrl.consume_transition_banner('nano')
                                    + 'Dolphin no respondió; continué con Gemini.\n')
         elif dolphin_ctrl is not None and not is_json:
-            conv_banner = dolphin_ctrl.consume_transition_banner('low')
+            conv_banner = dolphin_ctrl.consume_transition_banner('nano')
 
         status = self._load_status()
         now = time.time()
@@ -303,7 +312,7 @@ class LLMManager:
         dolphin_ctrl = getattr(self, 'dolphin', None)
         if endpoint:
             if dolphin_ctrl is not None:
-                for profile in ('mid', 'high'):
+                for profile in ('high', 'mid', 'low'):
                     try:
                         self._notify(f"Conectando con Dolphin {profile.capitalize()}")
                         dolphin_ctrl.start(profile)
@@ -464,7 +473,7 @@ class LLMManager:
         return {'content': '\n'.join(text).strip(), 'tool_calls': calls, 'model': model}
 
     def _complete_dolphin(self, messages, tools, endpoint, kwargs):
-        payload = {'model': os.getenv('KHAI_DOLPHIN_MODEL', 'dolphin3:8b'),
+        payload = {'model': self._dolphin_model(),
                    'messages': self._openai_messages(messages), 'tools': tools,
                    'stream': False, 'options': {'num_predict': 4096, 'temperature': 0.2}}
         response = requests.post(endpoint + '/api/chat', json=payload,
@@ -675,7 +684,7 @@ class LLMManager:
         timeout = min(300.0, max(1.0, float(os.getenv('KHAI_DOLPHIN_TIMEOUT', '180'))))
         num_predict = max(256, int(os.getenv('KHAI_DOLPHIN_NUM_PREDICT', '2048')))
         payload = {
-            'model': os.getenv('KHAI_DOLPHIN_MODEL', 'dolphin3:8b'),
+            'model': self._dolphin_model(),
             'prompt': prompt, 'stream': False,
             'options': {'num_predict': num_predict},
         }

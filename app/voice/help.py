@@ -4,9 +4,10 @@ HELP_TEXT = """Comandos disponibles:
 /help o /? - muestra esta ayuda.
 
 Modo:
-/mode low o /m l - Gemini.
-/mode mid o /m m - Dolphin CPU.
-/mode high o /m h - Dolphin GPU.
+/mode nano o /m n - Gemini (Cloud API sin VM).
+/mode low o /m l - Dolphin CPU (e2-standard-8, 8B).
+/mode mid o /m m - Dolphin GPU (g2-standard-4, L4 8B).
+/mode high o /m h - Qwen 32B GPU (g2-standard-8, L4 32B).
 /mode ? o /m ? - muestra el modo actual.
 
 Sistema:
@@ -24,6 +25,7 @@ Conversaciones:
 
 HELP_BUTTONS = [
     [
+        {'label': 'Mode nano', 'value': '/mode nano'},
         {'label': 'Mode low', 'value': '/mode low'},
         {'label': 'Mode medium', 'value': '/mode mid'},
         {'label': 'Mode high', 'value': '/mode high'},

@@ -54,7 +54,7 @@ class DolphinPilotTests(unittest.TestCase):
         payload = post.call_args.kwargs['json']
         buttons = json.loads(payload['reply_markup'])['inline_keyboard']
         callbacks = [button['callback_data'] for row in buttons for button in row]
-        self.assertEqual(callbacks, ['/mode low', '/mode mid', '/mode high', '/mode ?', '/c'])
+        self.assertEqual(callbacks, ['/mode nano', '/mode low', '/mode mid', '/mode high', '/mode ?', '/c'])
         manager = SimpleNamespace(coordinator=MagicMock(), dolphin=MagicMock())
         for row in buttons:
             for button in row:
@@ -78,14 +78,14 @@ class DolphinPilotTests(unittest.TestCase):
             gateway._mark_key_failed = MagicMock()
 
             # 1. En modo low (por defecto), todo va a Gemini; si k1 falla (429 o bloqueo), cascada a k2
-            ctrl._set_mode_state('low', mark_notified=True)
+            ctrl._set_mode_state('nano', mark_notified=True)
             gateway._generate_dolphin = MagicMock(return_value='{"action": "GENERAL_CHAT", "reply": "Dolphin"}')
             gateway._generate_gemini = MagicMock(side_effect=[
                 ValueError('Gemini no devolvió candidatos (SAFETY)'),
                 json.dumps({'reply': 'Respuesta desde k2.', 'tool_calls': []}),
             ])
-            res_low = Mind(gateway, _Memory()).process_message('Explícame esto')
-            self.assertEqual(res_low['reply'], 'Respuesta desde k2.')
+            res_nano = Mind(gateway, _Memory()).process_message('Explícame esto')
+            self.assertEqual(res_nano['reply'], 'Respuesta desde k2.')
             gateway._generate_dolphin.assert_not_called()
             self.assertEqual(gateway._generate_gemini.call_count, 2)
 
@@ -160,8 +160,8 @@ class DolphinPilotTests(unittest.TestCase):
             del_resp.json.return_value = {'name': 'op-del-1'}
             with patch.object(ctrl, 'get_instance', return_value={'machineType': 'zones/us-west1-a/machineTypes/g2-standard-4', 'status': 'RUNNING'}), \
                  patch('app.voice.gateway.dolphin_controller.requests.delete', return_value=del_resp):
-                msg_low = ctrl.set_mode('low')
-                self.assertEqual(msg_low, '[Modo Low]')
+                msg_nano = ctrl.set_mode('nano')
+                self.assertEqual(msg_nano, '[Modo Nano]')
                 status_text = ctrl.status()
                 self.assertTrue(status_text.startswith('[Modo '))
                 self.assertIn('Crédito estimado disponible', status_text)
@@ -181,9 +181,9 @@ class DolphinPilotTests(unittest.TestCase):
                 first_reply = gateway.generate_content('Hola')
                 self.assertEqual(
                     first_reply,
-                    '[Modo Low]\nDolphin no respondió; continué con Gemini.\nRespuesta desde Gemini.',
+                    '[Modo Nano]\nDolphin no respondió; continué con Gemini.\nRespuesta desde Gemini.',
                 )
-                self.assertEqual(ctrl.get_active_mode(), 'low')
+                self.assertEqual(ctrl.get_active_mode(), 'nano')
                 ctrl._delete_instance.assert_called_once_with(wait=False)
 
                 # El siguiente turno ya está en low: no repite el banner ni intenta contactar a Dolphin
@@ -237,9 +237,9 @@ class DolphinPilotTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     ctrl.set_mode('mid')
 
-            self.assertIn('[Modo Low]', str(raised.exception))
+            self.assertIn('[Modo Nano]', str(raised.exception))
             self.assertIn('continúa con Gemini', str(raised.exception))
-            self.assertEqual(ctrl.get_active_mode(), 'low')
+            self.assertEqual(ctrl.get_active_mode(), 'nano')
             ctrl._delete_instance.assert_called_once_with(wait=True)
 
     def test_dolphin_warmup_uses_minimal_inference(self):
