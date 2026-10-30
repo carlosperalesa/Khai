@@ -52,15 +52,16 @@ class DolphinPilotTests(unittest.TestCase):
             telegram.send_message(HELP_TEXT, parse_mode=None)
         payload = post.call_args.kwargs['json']
         buttons = json.loads(payload['reply_markup'])['inline_keyboard']
-        callbacks = [row[0]['callback_data'] for row in buttons]
+        callbacks = [button['callback_data'] for row in buttons for button in row]
         self.assertEqual(callbacks, ['/mode low', '/mode mid', '/mode high', '/mode ?', '/c'])
         manager = SimpleNamespace(coordinator=MagicMock(), dolphin=MagicMock())
         for row in buttons:
-            command = row[0]['callback_data']
-            self.assertIn(command, HELP_TEXT)
-            _command(manager, 'owner:button', command)
-            if command.startswith('/mode'):
-                manager.dolphin.set_mode.assert_called_with(command.split()[1])
+            for button in row:
+                command = button['callback_data']
+                self.assertIn(command, HELP_TEXT)
+                _command(manager, 'owner:button', command)
+                if command.startswith('/mode'):
+                    manager.dolphin.set_mode.assert_called_with(command.split()[1])
 
     def test_unified_routing_by_mode_and_cascade(self):
         with tempfile.TemporaryDirectory() as tmp:

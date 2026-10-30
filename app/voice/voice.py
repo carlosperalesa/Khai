@@ -11,8 +11,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 
 from app.bootstrap import ModuleManager
-from app.mind.coordinator import Coordinator
-from app.pixy.control import InstanceLock
+from app.mind.coordinator import Coordinator, _typing_loop
+from app.pixy.control import InstanceLock, TERMINAL
 from app.kernel.tracing import TracingFilter, trace_scope, new_trace_id
 from app.voice.help import HELP_TEXT
 from app.mind.conversation import current_turn
@@ -134,7 +134,7 @@ def secret_command(manager, text, user_id, chat_id):
 def urgent_command(text):
     name = text.split(maxsplit=1)[0].lower()
     return name in {'/cancel', '/stop', '/health', '/restart', '/mode', '/m', '/mode?', '/m?',
-                    '/chats', '/c', '/new', '/clear', '/archive', '/rename', '/r',
+                    '/chats', '/c', '/new', '/clear', '/delete', '/rename', '/r',
                     'y', 'yes', 'sí', 'si', 'n', 'no'}
 
 
@@ -147,6 +147,16 @@ def process_ordinary(manager, source, trace_id, text):
         turn = c.conversations.begin(source, trace_id, text, owner, owner)
     if turn['status'] in {'completed', 'routed', 'calling'}:
         return
+    typing_stop = threading.Event()
+    typing_thread = None
+    if callable(getattr(manager.telegram, 'send_chat_action', None)):
+        typing_thread = threading.Thread(
+            target=_typing_loop,
+            args=(manager.telegram, turn.get('chat_id'), turn.get('thread_id'), typing_stop),
+            daemon=True,
+            name='khai-telegram-command-typing',
+        )
+        typing_thread.start()
     token = current_turn.set(turn)
     try:
         with trace_scope(trace_id):
@@ -168,19 +178,29 @@ def process_ordinary(manager, source, trace_id, text):
                 reply = str(exc)
             if reply is not None:
                 buttons = None
+                reply_turn = None
                 if isinstance(reply, dict):
                     buttons = reply.get('buttons')
                     reply_text = reply.get('text', '')
+                    reply_turn = reply.get('_turn')
                 else:
                     reply_text = str(reply)
                 c.conversations.complete(source, {'result': reply_text})
-                if buttons:
-                    c.notify(reply_text, buttons=buttons)
-                else:
-                    c.notify(reply_text)
+                reply_token = current_turn.set(reply_turn) if reply_turn else None
+                try:
+                    if buttons:
+                        c.notify(reply_text, buttons=buttons)
+                    else:
+                        c.notify(reply_text)
+                finally:
+                    if reply_token is not None:
+                        current_turn.reset(reply_token)
                 return
             c.intake(source, text, trace_id=trace_id)
     finally:
+        typing_stop.set()
+        if typing_thread is not None:
+            typing_thread.join(timeout=0.2)
         current_turn.reset(token)
 
 
@@ -247,7 +267,7 @@ def _command(manager, source, text):
             switched = c.conversations.switch_conversation(owner_id, chat_id, target, thread_id=thread_id)
             if not switched:
                 return f"No se encontró la conversación '{target}'."
-            return f"Conversación activa: {switched['title']}"
+            return f"Chat activo: {switched['title']}"
         active = c.conversations.list_conversations(owner_id, chat_id, thread_id=thread_id)
         if not active:
             return "No hay conversaciones activas."
@@ -260,7 +280,8 @@ def _command(manager, source, text):
             buttons.append([{"label": btn_label, "value": f"/c {idx}"}])
         buttons.append([
             {"label": "Nuevo chat", "value": "/new"},
-            {"label": "Limpiar actual", "value": "/clear"}
+            {"label": "Limpiar actual", "value": "/clear"},
+            {"label": "Eliminar", "value": "/delete"},
         ])
         return {"text": "\n".join(lines), "buttons": buttons}
     if name in {'/rename', '/r'}:
@@ -295,16 +316,31 @@ def _command(manager, source, text):
         thread_id = turn.get('thread_id')
         conv = c.conversations.clear_conversation(owner_id, chat_id, thread_id=thread_id)
         return "Conversación reiniciada."
-    if name == '/archive':
+    if name == '/delete':
         turn = current_turn.get() or (c.conversations.turn(source) if hasattr(c, 'conversations') else None) or {}
         owner_id = str(getattr(getattr(manager, 'telegram', None), 'user_id', 'owner'))
         chat_id = turn.get('chat_id') or owner_id
         thread_id = turn.get('thread_id')
-        target = text.partition(' ')[2].strip() or None
-        conv = c.conversations.archive_conversation(owner_id, chat_id, target=target, thread_id=thread_id)
-        if not conv:
-            return "No se pudo archivar la conversación."
-        return f"Conversación archivada: {conv['title']}"
+        if len(parts) > 2 or (len(parts) == 2 and not parts[1].isdigit()):
+            return "Uso: /delete [número]"
+        target = parts[1] if len(parts) == 2 else None
+        candidate = c.conversations.conversation_for_delete(
+            owner_id, chat_id, target=target, thread_id=thread_id)
+        if not candidate:
+            return "No se encontró el chat indicado."
+        blocking = next((task for task in c.store.all()
+                         if task.get('conversation_id') == candidate['id']
+                         and (task.get('state') not in TERMINAL or c._agent_active(task))), None)
+        if blocking:
+            return "No puedo eliminar ese chat mientras tenga una tarea activa. Usa /cancel primero."
+        deleted = c.conversations.delete_conversation(
+            owner_id, chat_id, target=target, thread_id=thread_id)
+        active = deleted['active']
+        next_turn = dict(turn)
+        next_turn.update({'conversation_id': active['id'], 'chat_id': active['chat_id'],
+                          'thread_id': active.get('thread_id'), 'title': active['title'],
+                          'source': None, 'task_id': None})
+        return {'text': f"Chat eliminado: {deleted['deleted']['title']}", '_turn': next_turn}
     if name == '/health':
         return _format_health(manager)
     if name in {'/cancel', '/stop'}:

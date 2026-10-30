@@ -1,10 +1,13 @@
 import unittest
-from unittest.mock import MagicMock, Mock
+import threading
+from unittest.mock import MagicMock, Mock, patch
 
 from tests.test_control import Fixture
 from app.kernel.control_plane import ControlPlane, PixyPort
+from app.mind.coordinator import _typing_loop
 from app.mind.conversation import ReplyResult
 from app.voice.gateway.dolphin_controller import DolphinController
+from app.voice.gateway.telegram_gateway import TelegramHandler
 from app.voice.voice import command
 
 
@@ -78,6 +81,22 @@ class TestIncidentFixes(Fixture):
         
         with self.assertRaises(ValueError):
             command(self.manager, 'telegram:1', '/mode invalid_foo')
+
+    def test_typing_indicator_targets_same_chat_and_topic(self):
+        stop = threading.Event()
+        telegram = Mock()
+        telegram.send_chat_action.side_effect = lambda *args, **kwargs: stop.set()
+        _typing_loop(telegram, '-100123', 77, stop, delay=0, interval=0.01)
+        telegram.send_chat_action.assert_called_once_with(
+            'typing', chat_id='-100123', message_thread_id=77)
+
+    @patch('app.voice.gateway.telegram_gateway.requests.post')
+    def test_telegram_chat_action_payload(self, post):
+        post.return_value.json.return_value = {'ok': True}
+        handler = TelegramHandler('token', 'owner')
+        handler.send_chat_action('typing', chat_id='-100123', message_thread_id=77)
+        self.assertEqual(post.call_args.kwargs['json'], {
+            'chat_id': '-100123', 'action': 'typing', 'message_thread_id': 77})
 
     def test_intake_debounce_coalescence(self):
         """C.3: intake() coalesces immediate consecutive messages into the same ROUTING task."""

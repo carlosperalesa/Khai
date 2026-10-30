@@ -178,12 +178,19 @@ class TelegramHandler:
             logger.warning(f"Error editando mensaje {message_id}: {type(e).__name__}")
             return {}
         
-    def send_chat_action(self, action: str = "typing") -> Dict:
+    def send_chat_action(
+        self,
+        action: str = "typing",
+        chat_id: Optional[str] = None,
+        message_thread_id: Optional[int] = None,
+    ) -> Dict:
         """Enviar acción de chat (ej: typing, upload_video)"""
         payload = {
-            "chat_id": self.user_id,
+            "chat_id": chat_id or self.user_id,
             "action": action
         }
+        if message_thread_id is not None:
+            payload["message_thread_id"] = message_thread_id
         try:
             response = requests.post(
                 f"{self.base_url}/sendChatAction",

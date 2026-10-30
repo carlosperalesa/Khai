@@ -1,9 +1,10 @@
 import unittest
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 from tests.test_control import Fixture
 from app.mind.conversation import current_turn
-from app.voice.voice import command, urgent_command
+from app.voice.voice import command, process_ordinary, urgent_command
+from app.voice.help import HELP_BUTTONS, HELP_TEXT
 
 
 class TestMultiConversation(Fixture):
@@ -21,9 +22,18 @@ class TestMultiConversation(Fixture):
 
     def test_urgent_command_classification(self):
         """Conversation commands must be classified as urgent to avoid queue delays."""
-        for cmd in ['/c', '/chats', '/new', '/clear', '/archive']:
+        for cmd in ['/c', '/chats', '/new', '/clear', '/delete']:
             self.assertTrue(urgent_command(cmd), f"{cmd} should be urgent")
             self.assertTrue(urgent_command(f"{cmd} 2"), f"{cmd} with args should be urgent")
+        self.assertFalse(urgent_command('/archive'))
+
+    def test_help_buttons_and_text(self):
+        self.assertEqual([button['label'] for button in HELP_BUTTONS[0]],
+                         ['Mode low', 'Mode medium', 'Mode high'])
+        self.assertEqual(HELP_BUTTONS[1][0]['label'], 'Ver modo actual')
+        self.assertEqual(HELP_BUTTONS[2][0]['label'], 'Mis Chats')
+        self.assertNotIn('/archive', HELP_TEXT)
+        self.assertIn('/delete [número]', HELP_TEXT)
 
     def test_new_and_list_conversations_with_buttons(self):
         """Test creating multiple conversations and listing with interactive inline buttons."""
@@ -66,6 +76,7 @@ class TestMultiConversation(Fixture):
         self.assertEqual(buttons[1][0]['value'], '/c 2')
         self.assertEqual(buttons[2][0]['value'], '/new')
         self.assertEqual(buttons[2][1]['value'], '/clear')
+        self.assertEqual(buttons[2][2]['value'], '/delete')
 
     def test_switch_conversation(self):
         """Test switching conversations via /c <index> and /c <name>."""
@@ -77,20 +88,20 @@ class TestMultiConversation(Fixture):
 
         # Switch to conversation 2 (which is c1)
         res = command(self.manager, 'telegram:msg2', '/c 2')
-        self.assertIn('Conversación activa: Chat Principal', res)
+        self.assertIn('Chat activo: Chat Principal', res)
         self.assertEqual(self.c.conversations.session(self.owner, self.chat), c1_id)
 
         # Switch by title substring
         res = command(self.manager, 'telegram:msg3', '/c docker')
-        self.assertIn('Conversación activa: Docker logs', res)
+        self.assertIn('Chat activo: Docker logs', res)
         self.assertEqual(self.c.conversations.session(self.owner, self.chat), c2['id'])
 
         # Switch to non-existent
         res = command(self.manager, 'telegram:msg4', '/c fantasma')
         self.assertIn('No se encontró la conversación', res)
 
-    def test_clear_and_archive_conversation(self):
-        """Test /clear and /archive commands."""
+    def test_clear_and_delete_current_conversation(self):
+        """Test /clear and immediate deletion of the current chat."""
         # /clear archives current and creates fresh one
         res = command(self.manager, 'telegram:msg5', '/clear')
         self.assertIn('Conversación reiniciada.', res)
@@ -100,12 +111,51 @@ class TestMultiConversation(Fixture):
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]['title'], 'Nuevo chat')
 
-        # /archive archives the active one and regenerates a clean Chat Principal
-        res = command(self.manager, 'telegram:msg6', '/archive')
-        self.assertIn('Conversación archivada', res)
+        deleted_id = active[0]['id']
+        res = command(self.manager, 'telegram:msg6', '/delete')
+        self.assertEqual(res['text'], 'Chat eliminado: Nuevo chat')
+        self.assertIsNone(self.c.conversations.get_conversation(deleted_id))
         active = self.c.conversations.list_conversations(self.owner, self.chat)
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]['title'], 'Chat Principal')
+
+    def test_delete_conversation_by_number_only(self):
+        self.c.conversations.new_conversation(self.owner, self.chat, title='Proyecto largo')
+        active = self.c.conversations.list_conversations(self.owner, self.chat)
+        target = active[1]
+        res = command(self.manager, 'telegram:delete-number', '/delete 2')
+        self.assertEqual(res['text'], f"Chat eliminado: {target['title']}")
+        self.assertIsNone(self.c.conversations.get_conversation(target['id']))
+        self.assertEqual(command(self.manager, 'telegram:delete-name', '/delete Proyecto largo'),
+                         'Uso: /delete [número]')
+
+    def test_delete_rejects_conversation_with_active_task(self):
+        current = self.c.conversations.list_conversations(self.owner, self.chat)[0]
+        self.store.create('telegram:active-delete', 'trabajo',
+                          conversation_id=current['id'], state='RUNNING')
+        result = command(self.manager, 'telegram:delete-active', '/delete')
+        self.assertIn('tarea activa', result)
+        self.assertIsNotNone(self.c.conversations.get_conversation(current['id']))
+
+    def test_delete_response_uses_replacement_conversation(self):
+        doomed = self.c.conversations.new_conversation(
+            self.owner, self.chat, title='Temporal')
+        source = 'telegram:delete-routing'
+        self.c.conversations.begin(source, 'trace-delete', '/delete', self.owner, self.chat)
+        captured = {}
+
+        def capture(text, buttons=None):
+            captured.update(text=text, turn=dict(current_turn.get() or {}))
+
+        with patch.object(self.c, 'notify', side_effect=capture):
+            process_ordinary(self.manager, source, 'trace-delete', '/delete')
+
+        active = self.c.conversations.list_conversations(self.owner, self.chat)[0]
+        self.assertIsNone(self.c.conversations.get_conversation(doomed['id']))
+        self.assertIsNone(self.c.conversations.turn(source))
+        self.assertEqual(captured['text'], 'Chat eliminado: Temporal')
+        self.assertEqual(captured['turn']['conversation_id'], active['id'])
+        self.assertEqual(captured['turn']['title'], active['title'])
 
     def test_message_history_isolation(self):
         """Verify message history does not leak between distinct conversation sessions."""

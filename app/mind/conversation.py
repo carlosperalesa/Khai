@@ -195,11 +195,10 @@ class ConversationStore:
                     (owner_id, chat_id))
         return self.new_conversation(owner_id, chat_id, title="Nuevo chat", thread_id=thread_id)
 
-    def archive_conversation(self, owner_id, chat_id, target=None, thread_id=None):
+    def conversation_for_delete(self, owner_id, chat_id, target=None, thread_id=None):
         owner_id, chat_id = str(owner_id), str(chat_id)
         thread_id = int(thread_id) if thread_id is not None else None
         with connection(self.path) as conn:
-            conn.execute('BEGIN IMMEDIATE')
             if thread_id is not None:
                 active_list = [dict(r) for r in conn.execute(
                     "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
@@ -210,34 +209,62 @@ class ConversationStore:
                     "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
             if not active_list:
                 return None
-            target_conv = None
-            if target is not None:
-                if str(target).strip().isdigit():
-                    idx = int(str(target).strip()) - 1
-                    if 0 <= idx < len(active_list):
-                        target_conv = active_list[idx]
-                else:
-                    target_str = str(target).strip().lower()
-                    target_conv = next((c for c in active_list if target_str in c['title'].lower() or target_str == c['id']), None)
-            else:
-                target_conv = next((c for c in active_list if c['is_current']), active_list[0])
-            
-            if not target_conv:
+            if target is None:
+                return next((c for c in active_list if c['is_current']), active_list[0])
+            value = str(target).strip()
+            if not value.isdigit():
                 return None
-            
-            conn.execute("UPDATE conversations SET status='archived', is_current=0 WHERE id=?", (target_conv['id'],))
-            
-            remaining = [c for c in active_list if c['id'] != target_conv['id']]
-            if remaining:
-                conn.execute("UPDATE conversations SET is_current=1 WHERE id=?", (remaining[0]['id'],))
+            idx = int(value) - 1
+            return active_list[idx] if 0 <= idx < len(active_list) else None
+
+    def delete_conversation(self, owner_id, chat_id, target=None, thread_id=None):
+        owner_id, chat_id = str(owner_id), str(chat_id)
+        thread_id = int(thread_id) if thread_id is not None else None
+        target_conv = self.conversation_for_delete(owner_id, chat_id, target, thread_id)
+        if not target_conv:
+            return None
+        with connection(self.path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute("DELETE FROM conversation_questions WHERE conversation_id=?", (target_conv['id'],))
+            conn.execute("DELETE FROM conversation_messages WHERE conversation_id=?", (target_conv['id'],))
+            conn.execute("DELETE FROM conversation_turns WHERE conversation_id=?", (target_conv['id'],))
+            conn.execute("DELETE FROM conversations WHERE id=? AND owner_id=? AND chat_id=?",
+                         (target_conv['id'], owner_id, chat_id))
+
+            if thread_id is not None:
+                remaining = [dict(r) for r in conn.execute(
+                    "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id=? AND status='active' "
+                    "ORDER BY updated_at DESC", (owner_id, chat_id, thread_id)).fetchall()]
             else:
+                remaining = [dict(r) for r in conn.execute(
+                    "SELECT * FROM conversations WHERE owner_id=? AND chat_id=? AND thread_id IS NULL AND status='active' "
+                    "ORDER BY updated_at DESC", (owner_id, chat_id)).fetchall()]
+
+            active = next((c for c in remaining if c['is_current']), None)
+            if target_conv['is_current'] and remaining:
+                if thread_id is None:
+                    conn.execute("UPDATE conversations SET is_current=0 WHERE owner_id=? AND chat_id=? AND thread_id IS NULL",
+                                 (owner_id, chat_id))
+                else:
+                    conn.execute("UPDATE conversations SET is_current=0 WHERE owner_id=? AND chat_id=? AND thread_id=?",
+                                 (owner_id, chat_id, thread_id))
+                active = remaining[0]
+                conn.execute("UPDATE conversations SET is_current=1 WHERE id=?", (active['id'],))
+                active['is_current'] = 1
+            elif active is None and remaining:
+                active = remaining[0]
+                conn.execute("UPDATE conversations SET is_current=1 WHERE id=?", (active['id'],))
+                active['is_current'] = 1
+            elif not remaining:
                 now = time.time()
                 sid = 'session_' + hashlib.sha256(f"{owner_id}:{chat_id}:{now}".encode()).hexdigest()[:32]
+                title = f"Tema {thread_id}" if thread_id is not None else 'Chat Principal'
                 conn.execute(
                     "INSERT INTO conversations (id, owner_id, chat_id, thread_id, title, status, is_current, created_at, updated_at) "
-                    "VALUES (?, ?, ?, NULL, 'Chat Principal', 'active', 1, ?, ?)",
-                    (sid, owner_id, chat_id, now, now))
-            return target_conv
+                    "VALUES (?, ?, ?, ?, ?, 'active', 1, ?, ?)",
+                    (sid, owner_id, chat_id, thread_id, title, now, now))
+                active = dict(conn.execute("SELECT * FROM conversations WHERE id=?", (sid,)).fetchone())
+            return {'deleted': target_conv, 'active': active}
 
     def list_conversations(self, owner_id, chat_id, thread_id=None, limit=10):
         owner_id, chat_id = str(owner_id), str(chat_id)

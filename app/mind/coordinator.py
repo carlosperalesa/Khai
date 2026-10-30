@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import secrets
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +29,19 @@ from app.kernel.tracing import trace_scope, get_trace_id, new_trace_id
 from app.pixy.skill_approvals import scope_for
 
 logger = logging.getLogger(__name__)
+
+
+def _typing_loop(telegram, chat_id, thread_id, stop_event, delay=0.5, interval=4.0):
+    if stop_event.wait(delay):
+        return
+    while not stop_event.is_set():
+        try:
+            telegram.send_chat_action(
+                'typing', chat_id=chat_id, message_thread_id=thread_id)
+        except Exception:
+            logger.warning('No se pudo actualizar el indicador de escritura')
+        if stop_event.wait(interval):
+            return
 
 
 def normalize_manifest(raw, default_purpose):
@@ -236,6 +250,23 @@ class Coordinator:
             self._mailbox_job = self._mailbox_executor.submit(self._deliver_notifications)
 
     def _run_task(self, task):
+        typing_stop = threading.Event()
+        typing_thread = None
+        try:
+            conversation = (self.conversations.get_conversation(task.get('conversation_id'))
+                            if task.get('conversation_id') else None)
+            send_action = getattr(getattr(self.manager, 'telegram', None), 'send_chat_action', None)
+            if conversation and callable(send_action):
+                typing_thread = threading.Thread(
+                    target=_typing_loop,
+                    args=(self.manager.telegram, conversation['chat_id'],
+                          conversation.get('thread_id'), typing_stop),
+                    daemon=True,
+                    name='khai-telegram-typing',
+                )
+                typing_thread.start()
+        except Exception:
+            logger.warning('No se pudo iniciar el indicador de escritura')
         token = current_budget.set(lambda: self.store.consume(task['id'], 'llm_calls'))
         goal_token = current_goal_revision.set((task['id'], task.get('goal_revision', 0)))
         try:
@@ -264,6 +295,9 @@ class Coordinator:
                 self.notify(f"{task['id']}: detenido: {str(exc)[:700]}")
                 logger.exception('Error de coordinación')
         finally:
+            typing_stop.set()
+            if typing_thread is not None:
+                typing_thread.join(timeout=0.2)
             current_budget.reset(token)
             current_goal_revision.reset(goal_token)
 
