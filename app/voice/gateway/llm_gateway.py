@@ -8,6 +8,8 @@ from typing import Dict
 from app.pixy.budget import current_budget
 
 logger = logging.getLogger("LLMManager")
+DEFAULT_GEMINI_MODEL = os.getenv('KHAI_GEMINI_MODEL', 'gemini-flash-lite-latest')
+
 
 
 class LLMContentRejected(ValueError):
@@ -396,7 +398,7 @@ class LLMManager:
         return clean
 
     def _complete_gemini(self, messages, tools, key, kwargs):
-        model = kwargs.get('model', 'gemini-2.5-flash')
+        model = kwargs.get('model') or DEFAULT_GEMINI_MODEL
         contents, system = self._gemini_contents(messages)
         payload = {'contents': contents,
                    'generationConfig': {'maxOutputTokens': 8192, 'temperature': 0.2}}
@@ -413,10 +415,28 @@ class LLMManager:
                     'parameters': params
                 })
             payload['tools'] = [{'functionDeclarations': declarations}]
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
-        response = requests.post(url, json=payload, timeout=kwargs.get('_timeout', 60))
-        response.raise_for_status()
+        
+        models_to_try = [model]
+        if model != DEFAULT_GEMINI_MODEL:
+            models_to_try.append(DEFAULT_GEMINI_MODEL)
+        if 'gemini-3.1-flash-lite' not in models_to_try:
+            models_to_try.append('gemini-3.1-flash-lite')
+
+        response = None
+        for m in models_to_try:
+            url = f'https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}'
+            response = requests.post(url, json=payload, timeout=kwargs.get('_timeout', 60))
+            if response.status_code == 429 and 'free_tier_requests' in response.text:
+                continue
+            response.raise_for_status()
+            model = m
+            break
+        if response is None or not response.ok:
+            if response is not None:
+                response.raise_for_status()
+            raise ValueError('Gemini no respondió')
         candidates = response.json().get('candidates') or []
+
         if not candidates:
             raise ValueError('Gemini no devolvió un turno agente')
         parts = ((candidates[0].get('content') or {}).get('parts')) or []
@@ -455,7 +475,7 @@ class LLMManager:
             gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini']
         if not gemini_pool:
             raise ValueError('No research provider is configured')
-        model = os.getenv('KHAI_RESEARCH_MODEL', 'gemini-2.5-flash')
+        model = os.getenv('KHAI_RESEARCH_MODEL', DEFAULT_GEMINI_MODEL)
         payload = {'contents': [{'parts': [{'text': query}]}], 'tools': [{'googleSearch': {}}],
                    'generationConfig': {'maxOutputTokens': 2048, 'temperature': 0.1}}
         last_error = None
@@ -495,7 +515,7 @@ class LLMManager:
             raise ValueError('KHAI_DOLPHIN_URL requiere una IP privada explícita') from exc
         if not address.is_private or address.is_loopback or address.is_link_local:
             raise ValueError('KHAI_DOLPHIN_URL requiere una IP privada de Azure')
-        timeout = min(180.0, max(1.0, float(os.getenv('KHAI_DOLPHIN_TIMEOUT', '90'))))
+        timeout = min(300.0, max(1.0, float(os.getenv('KHAI_DOLPHIN_TIMEOUT', '180'))))
         num_predict = max(256, int(os.getenv('KHAI_DOLPHIN_NUM_PREDICT', '2048')))
         payload = {
             'model': os.getenv('KHAI_DOLPHIN_MODEL', 'dolphin3:8b'),
@@ -513,9 +533,7 @@ class LLMManager:
         return answer.strip()
 
     def _generate_gemini(self, prompt: str, key: str, kwargs: Dict) -> str:
-        model_name = kwargs.get("model", "gemini-2.5-flash")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
-        
+        model_name = kwargs.get("model") or DEFAULT_GEMINI_MODEL
         generation_config = {"maxOutputTokens": 8192}
         rf = kwargs.get("response_format")
         if isinstance(rf, dict) and rf.get("type") == "json_object":
@@ -529,9 +547,26 @@ class LLMManager:
             payload["tools"] = [{"googleSearch": {}}]
             
         headers = {"Content-Type": "application/json"}
-        response = requests.post(url, json=payload, headers=headers, timeout=kwargs.get("_timeout", 60))
-        response.raise_for_status()
+        models_to_try = [model_name]
+        if model_name != DEFAULT_GEMINI_MODEL:
+            models_to_try.append(DEFAULT_GEMINI_MODEL)
+        if 'gemini-3.1-flash-lite' not in models_to_try:
+            models_to_try.append('gemini-3.1-flash-lite')
+
+        response = None
+        for m in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
+            response = requests.post(url, json=payload, headers=headers, timeout=kwargs.get("_timeout", 60))
+            if response.status_code == 429 and 'free_tier_requests' in response.text:
+                continue
+            response.raise_for_status()
+            break
+        if response is None or not response.ok:
+            if response is not None:
+                response.raise_for_status()
+            raise ValueError('Gemini no respondió')
         data = response.json()
+
         candidates = data.get("candidates") or []
         if not candidates:
             reason = (data.get("promptFeedback") or {}).get("blockReason") or "sin_candidatos"

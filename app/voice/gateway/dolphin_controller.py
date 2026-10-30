@@ -457,7 +457,14 @@ class DolphinController:
         )
         if not ins_resp.ok:
             raise RuntimeError(f'No se pudo crear instancia Spot ({target_mt}): {ins_resp.text[:300]}')
-        self._wait_operation(ins_resp.json()['name'])
+        try:
+            self._wait_operation(ins_resp.json()['name'])
+        except RuntimeError as op_err:
+            if profile == 'high' and 'not enough resources' in str(op_err).lower():
+                logger.warning('GCP sin cupo GPU Spot para high; fallback automático a mid (CPU)')
+                return self.start('mid')
+            raise
+
         self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
         self._confirm_ready()
         self._set_mode_state(profile, mark_notified=True)

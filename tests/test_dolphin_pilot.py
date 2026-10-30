@@ -407,7 +407,8 @@ class DolphinPilotTests(unittest.TestCase):
                     'url': 'https://weather.example.org/forecast', 'method': 'GET',
                     'parameters': ['city'], 'content_types': ['application/json'],
                     'max_bytes': 10000, 'timeout': 5, 'per_minute': 10,
-                    'effect': 'read', 'credential_ref': None, 'effect_contract': None}
+                    'effect': 'read', 'credential_ref': None, 'credential_header': 'Authorization',
+                    'credential_prefix': '', 'effect_contract': None}
             registry.propose(spec)
             rid = rules.propose('Responder siempre en Celsius', 'owner')
             llm = MagicMock()
