@@ -360,8 +360,13 @@ class ExternalGateway:
                         or request.get('artifact_hash') != task.get('artifact_hash')
                         or request.get('goal_revision') != task.get('goal_revision', 0)):
                     raise PermissionError('Worker request belongs to another execution or revision')
+                approved_refs = list(task.get('services') or [])
+                if not approved_refs and task.get('creation_consent'):
+                    approved_refs = list(task['creation_consent'].get('allowed_services', []))
+                if not approved_refs and task.get('setup_proposals'):
+                    approved_refs = [p['ref'] for p in task['setup_proposals'] if p.get('ref')]
                 approved = {(ref['service_id'], ref['operation'], ref['version'])
-                            for ref in task.get('services', [])}
+                            for ref in approved_refs}
                 requested = (request.get('service'), request.get('operation'))
                 operation = self.services.get(requested[0], {}).get('operations', {}).get(requested[1])
                 if not operation or (requested[0], requested[1], operation.get('version')) not in approved:

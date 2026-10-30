@@ -560,9 +560,15 @@ class Coordinator:
         missing = step['version_id'].startswith('missing-')
         if missing:
             action = task['recipe_missing_specs'][step['id']]
+            step_svcs = action.get('services', [])
+            if not step_svcs:
+                step_svcs = [p['ref'] for p in task.get('setup_proposals', [])
+                             if p.get('step_id') in {step['id'], None} and p.get('ref')]
+                if not step_svcs and task.get('creation_consent'):
+                    step_svcs = list(task['creation_consent'].get('allowed_services', []))
             spec = {key: action[key] for key in ('skill_id', 'description', 'use_cases',
                                                  'input_schema', 'output_schema')}
-            spec.update(runtime='SAFE', dependencies=[], services=action.get('services', []),
+            spec.update(runtime='SAFE', dependencies=[], services=step_svcs,
                         verifier={'kind': 'owner_criterion'})
             manifest = {'purpose': action['description'], 'capabilities': action['capabilities']}
             selected_version_id = None
@@ -591,12 +597,13 @@ class Coordinator:
                       prior.get('version_id') == step['version_id'] and
                       prior.get('params') == params and
                       prior.get('services') == spec['services'] else None)
+        resolved_svcs = spec.get('services') or [p['ref'] for p in task.get('setup_proposals', []) if p.get('ref')] or list((task.get('creation_consent') or {}).get('allowed_services', []))
         self.store.update(task['id'], expected={'RECIPE_STEP'}, state='GENERATING',
                           selected_version_id=selected_version_id,
                           version_id=selected_version_id,
                           skill_name=skill_name, manifest=manifest,
                           request=manifest.get('purpose', task['request']), params=params,
-                          services=spec['services'], context=manifest.get('purpose', '')[:160],
+                          services=resolved_svcs, context=manifest.get('purpose', '')[:160],
                           planned_skill_spec=action if missing else None,
                           reuse_authorized_hash=reuse_hash, reused_step_receipt=None,
                           artifact=None, artifact_hash=None, authorized_hash=None,
