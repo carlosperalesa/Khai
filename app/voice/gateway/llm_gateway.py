@@ -517,57 +517,96 @@ class LLMManager:
         import urllib.parse
         import re
         import html
-        import http.cookiejar
+        import json
 
-        cj = http.cookiejar.CookieJar()
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-        opener.addheaders = [
-            ('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
-            ('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'),
-            ('Accept-Language', 'en-US,en;q=0.5'),
-        ]
         results = []
+
+        # 1. DuckDuckGo HTML
         try:
             url = 'https://html.duckduckgo.com/html/?q=' + urllib.parse.quote_plus(query)
-            resp = opener.open(url, timeout=12)
-            content = resp.read().decode('utf-8', errors='ignore')
-            blocks = re.findall(
-                r'<div[^>]*class="[^"]*(?:results_links|result\b)[^"]*"[^>]*>(.*?)(?=<div[^>]*class="[^"]*(?:results_links|result\b)|$)',
-                content,
-                re.DOTALL,
-            )
-            for b in blocks:
-                m_a = re.search(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', b)
-                if not m_a:
-                    continue
-                raw_url = m_a.group(1)
-                if 'uddg=' in raw_url:
-                    m_u = re.search(r'uddg=([^&]+)', raw_url)
-                    raw_url = urllib.parse.unquote(m_u.group(1)) if m_u else raw_url
-                title = html.unescape(re.sub(r'<[^>]+>', '', m_a.group(2))).strip()
-                m_s = re.search(r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', b)
-                snippet = html.unescape(re.sub(r'<[^>]+>', '', m_s.group(1))).strip() if m_s else ''
-                if raw_url.startswith('http') and title:
-                    results.append({'title': title, 'url': raw_url, 'description': snippet})
-                    if len(results) >= limit:
-                        break
-        except Exception as exc:
-            logger.warning('DuckDuckGo HTML search error: %s', exc)
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            })
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                if resp.status == 200:
+                    content = resp.read().decode('utf-8', errors='ignore')
+                    blocks = re.findall(
+                        r'<div[^>]*class="[^"]*(?:results_links|result\b)[^"]*"[^>]*>(.*?)(?=<div[^>]*class="[^"]*(?:results_links|result\b)|$)',
+                        content,
+                        re.DOTALL,
+                    )
+                    for b in blocks:
+                        m_a = re.search(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', b)
+                        if not m_a:
+                            continue
+                        raw_url = m_a.group(1)
+                        if 'uddg=' in raw_url:
+                            m_u = re.search(r'uddg=([^&]+)', raw_url)
+                            raw_url = urllib.parse.unquote(m_u.group(1)) if m_u else raw_url
+                        title = html.unescape(re.sub(r'<[^>]+>', '', m_a.group(2))).strip()
+                        m_s = re.search(r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', b)
+                        snippet = html.unescape(re.sub(r'<[^>]+>', '', m_s.group(1))).strip() if m_s else ''
+                        if raw_url.startswith('http') and title:
+                            results.append({'title': title, 'url': raw_url, 'description': snippet})
+                            if len(results) >= limit:
+                                break
+        except Exception:
+            pass
 
-        if not results:
-            try:
-                wiki_url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={urllib.parse.quote_plus(query)}&limit={limit}&namespace=0&format=json"
-                req_w = urllib.request.Request(wiki_url, headers={'User-Agent': 'Khai/1.0'})
-                with urllib.request.urlopen(req_w, timeout=8) as r_w:
-                    data = json.loads(r_w.read().decode('utf-8'))
-                    if len(data) >= 4:
-                        titles, snippets, urls = data[1], data[2], data[3]
-                        for t, s, u in zip(titles, snippets, urls):
-                            if u.startswith('http'):
-                                results.append({'title': t, 'url': u, 'description': s or ''})
-            except Exception as exc_w:
-                logger.warning('Wikipedia search error: %s', exc_w)
-        return results
+        # 2. Wikipedia Fulltext Search
+        if len(results) < limit:
+            clean_q = re.sub(r'\bsite:\S+', '', query).strip() or query
+            queries_to_try = [clean_q]
+            words = [w for w in clean_q.split() if len(w) > 1]
+            if len(words) > 4:
+                queries_to_try.append(' '.join(words[:4]))
+            for q_term in queries_to_try:
+                try:
+                    wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(q_term)}&utf8=&format=json"
+                    req_w = urllib.request.Request(wiki_url, headers={'User-Agent': 'Khai/1.0 (https://github.com/carlosperalesa/Khai)'})
+                    with urllib.request.urlopen(req_w, timeout=6) as r_w:
+                        data = json.loads(r_w.read().decode('utf-8'))
+                        for item in data.get('query', {}).get('search', []):
+                            title = item.get('title')
+                            snippet = html.unescape(re.sub(r'<[^>]+>', '', item.get('snippet', ''))).strip()
+                            url = 'https://en.wikipedia.org/wiki/' + urllib.parse.quote(title.replace(' ', '_'))
+                            if title and url and not any(r['url'] == url for r in results):
+                                results.append({'title': title, 'url': url, 'description': snippet})
+                                if len(results) >= limit:
+                                    break
+                except Exception:
+                    pass
+                if len(results) >= limit:
+                    break
+
+        # 3. GitHub Search API
+        if len(results) < limit:
+            clean_q = re.sub(r'\bsite:\S+', '', query).strip() or query
+            gh_queries = [clean_q]
+            words = [w for w in clean_q.split() if len(w) > 1]
+            if len(words) > 4:
+                gh_queries.append(' '.join(words[:4]))
+            for q_term in gh_queries:
+                try:
+                    gh_url = f"https://api.github.com/search/repositories?q={urllib.parse.quote_plus(q_term)}&per_page={limit}"
+                    req_gh = urllib.request.Request(gh_url, headers={'User-Agent': 'Khai/1.0', 'Accept': 'application/vnd.github.v3+json'})
+                    with urllib.request.urlopen(req_gh, timeout=6) as r_gh:
+                        data = json.loads(r_gh.read().decode('utf-8'))
+                        for item in data.get('items', []):
+                            name = item.get('full_name') or item.get('name')
+                            url = item.get('html_url')
+                            desc = item.get('description') or ''
+                            if name and url and not any(r['url'] == url for r in results):
+                                results.append({'title': name, 'url': url, 'description': desc})
+                                if len(results) >= limit:
+                                    break
+                except Exception:
+                    pass
+                if len(results) >= limit:
+                    break
+
+        return results[:limit]
 
     def web_search(self, query, *, limit=8):
         """Platform research. Responses without sources are failures."""
