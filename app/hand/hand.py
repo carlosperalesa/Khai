@@ -407,7 +407,9 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         with self.locked():
             draft = self.root/('.'+name)
             if draft.exists():
-                raise ValueError('An unfinished draft already exists')
+                if draft.is_symlink() or draft.resolve().parent != self.root.resolve():
+                    raise PermissionError('Symlink in skills root is forbidden')
+                shutil.rmtree(draft)
             current = self.active(name)
             with connection(self.db) as conn:
                 count = conn.execute('SELECT COUNT(*) FROM versions WHERE skill_name=?',(name,)).fetchone()[0]
