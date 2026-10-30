@@ -292,12 +292,23 @@ class LLMManager:
                 code = getattr(getattr(exc, 'response', None), 'status_code', None)
                 self._mark_key_failed(current['id'], cooldown=300 if code in {401, 403, 429} else None)
         endpoint = self._dolphin_endpoint()
+        dolphin_ctrl = getattr(self, 'dolphin', None)
         if endpoint:
-            try:
-                return self._complete_dolphin(messages, tools, endpoint, kwargs)
-            except Exception as exc:
-                last_error = exc
-                logger.warning('Dolphin tool-calling unavailable (%s)', type(exc).__name__)
+            if dolphin_ctrl is not None:
+                for profile in ('mid', 'high'):
+                    try:
+                        self._notify(f"Conectando con Dolphin {profile.capitalize()}")
+                        dolphin_ctrl.start(profile)
+                        return self._complete_dolphin(messages, tools, endpoint, kwargs)
+                    except Exception as exc:
+                        last_error = exc
+                        logger.warning('Dolphin tool-calling %s unavailable (%s)', profile, type(exc).__name__)
+            else:
+                try:
+                    return self._complete_dolphin(messages, tools, endpoint, kwargs)
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning('Dolphin tool-calling unavailable (%s)', type(exc).__name__)
         raise ValueError('Ningún LLM disponible soportó el turno con herramientas') from last_error
 
     @staticmethod
@@ -368,6 +379,22 @@ class LLMManager:
                              'parts': parts or [{'text': ''}]})
         return contents, '\n'.join(system)
 
+    @classmethod
+    def _sanitize_gemini_schema(cls, schema):
+        if not isinstance(schema, dict):
+            return schema
+        clean = {}
+        for k, v in schema.items():
+            if k in {'additionalProperties', '$schema', 'default'}:
+                continue
+            if isinstance(v, dict):
+                clean[k] = cls._sanitize_gemini_schema(v)
+            elif isinstance(v, list):
+                clean[k] = [cls._sanitize_gemini_schema(item) for item in v]
+            else:
+                clean[k] = v
+        return clean
+
     def _complete_gemini(self, messages, tools, key, kwargs):
         model = kwargs.get('model', 'gemini-2.5-flash')
         contents, system = self._gemini_contents(messages)
@@ -376,7 +403,16 @@ class LLMManager:
         if system:
             payload['systemInstruction'] = {'parts': [{'text': system}]}
         if tools:
-            payload['tools'] = [{'functionDeclarations': [tool['function'] for tool in tools]}]
+            declarations = []
+            for tool in tools:
+                fn = tool.get('function', tool)
+                params = self._sanitize_gemini_schema(fn.get('parameters', {'type': 'object', 'properties': {}}))
+                declarations.append({
+                    'name': fn['name'],
+                    'description': fn.get('description', ''),
+                    'parameters': params
+                })
+            payload['tools'] = [{'functionDeclarations': declarations}]
         url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
         response = requests.post(url, json=payload, timeout=kwargs.get('_timeout', 60))
         response.raise_for_status()
@@ -413,25 +449,36 @@ class LLMManager:
         """Platform research. Responses without sources are failures."""
         if not isinstance(query, str) or not query.strip() or len(query) > 500:
             raise ValueError('Invalid research query')
-        key = next((item['key'] for item in self.api_keys_pool if item['type'] == 'gemini'), None)
-        if not key:
+        status, now = self._load_status(), time.time()
+        gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini' and now > status.get(item['id'], 0)]
+        if not gemini_pool:
+            gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini']
+        if not gemini_pool:
             raise ValueError('No research provider is configured')
         model = os.getenv('KHAI_RESEARCH_MODEL', 'gemini-2.5-flash')
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}'
         payload = {'contents': [{'parts': [{'text': query}]}], 'tools': [{'googleSearch': {}}],
                    'generationConfig': {'maxOutputTokens': 2048, 'temperature': 0.1}}
-        response = requests.post(url, json=payload, timeout=60)
-        response.raise_for_status()
-        candidate = (response.json().get('candidates') or [{}])[0]
-        results = []
-        for chunk in (candidate.get('groundingMetadata') or {}).get('groundingChunks') or []:
-            web = chunk.get('web') or {}
-            if web.get('uri') and web.get('title'):
-                results.append({'title': web['title'], 'url': web['uri'], 'description': ''})
-        if not results:
-            raise ValueError('El proveedor de investigación no entregó fuentes verificables')
-        return {'provider': 'google', 'query': query,
-                'results': results[:max(1, min(10, int(limit)))]}
+        last_error = None
+        for item in gemini_pool:
+            try:
+                url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={item["key"]}'
+                response = requests.post(url, json=payload, timeout=60)
+                response.raise_for_status()
+                candidate = (response.json().get('candidates') or [{}])[0]
+                results = []
+                for chunk in (candidate.get('groundingMetadata') or {}).get('groundingChunks') or []:
+                    web = chunk.get('web') or {}
+                    if web.get('uri') and web.get('title'):
+                        results.append({'title': web['title'], 'url': web['uri'], 'description': ''})
+                if not results:
+                    raise ValueError('El proveedor de investigación no entregó fuentes verificables')
+                return {'provider': 'google', 'query': query,
+                        'results': results[:max(1, min(10, int(limit)))]}
+            except Exception as exc:
+                last_error = exc
+                code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                self._mark_key_failed(item['id'], cooldown=300 if code in {401, 403, 429} else None)
+        raise ValueError('El proveedor de investigación no entregó fuentes verificables') from last_error
 
     def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
         """Ejecuta inferencia en el nodo privado Dolphin (Ollama) con soporte texto y JSON."""
