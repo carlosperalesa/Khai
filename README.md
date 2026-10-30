@@ -1,19 +1,58 @@
 # Khai
 
-Khai es un agente personal capaz de investigar, construir, revisar, ejecutar y aprender capacidades reutilizables. EstÃ¡ en desarrollo activo: la salud confirma infraestructura, pero la aceptaciÃ³n funcional depende de recorridos conversacionales reales documentados en `docs/VALIDATION.md`.
+Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente.
 
-## Principios
+La infraestructura del sistema se valida mediante pruebas de integridad, mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
 
-- Adaptabilidad: una solicitud es capacidad, proveedor opcional y objetivo. Los proveedores son datos del catÃ¡logo, no ramas del Core.
-- Transparencia: Khai pregunta ante decisiones nuevas y nunca sustituye silenciosamente un proveedor.
-- AutonomÃ­a acotada: decide detalles tÃ©cnicos reversibles dentro del objetivo autorizado. Secretos, permisos, costos, efectos externos y preferencias pasan por Pixy.
-- Evidencia: no declara Ã©xito sin ejecuciÃ³n y verificaciÃ³n reales.
-- Aprendizaje: cada Ã©xito o fallo tÃ©cnico Ãºtil deja un episodio recuperable; cambiar polÃ­ticas requiere evidencia repetida.
+---
 
-## Componentes
+## Órganos del Sistema
 
-Mind interpreta y coordina; Hand investiga, crea y repara mediante un ciclo de herramientas persistente; Pixy revisa y obtiene decisiones; Heart diagnostica fallos repetidos o sistÃ©micos; Voice concentra red, credenciales y recibos; Dreams registra resultados y propone aprendizaje.
+- **Mind:** Interpreta el lenguaje natural, extrayendo la intención, la capacidad requerida y el proveedor opcional.
+- **Hand:** Ciclo activo de herramientas persistente; investiga, construye código, valida esquemas y repara skills.
+- **Pixy:** Custodia de gobernanza, autoridad, secretos y contratos; solicita aprobación explícita (`y`/`n`) para efectos externos o costos.
+- **Heart:** Diagnóstico profundo ante fallos reiterados o sistémicos utilizando evidencia real de telemetría y logs (`CoreEyes`).
+- **Voice:** Concentra el acceso a redes externas, gestión segura de secretos y puntos de enlace de mensajería (Telegram).
+- **Dreams:** Registra episodios de ejecución, extrae aprendizajes técnicos y propone mejoras al catálogo.
 
-Cada skill contiene `SKILL.md`, `app/`, `data/` y `other/`. Sus metadatos declaran `capability`, `provider` y `aliases`. Instalar una skill no cambia preferencias. Los workers no tienen red directa.
+---
 
-La arquitectura vigente estÃ¡ en `docs/ARCHITECTURE.md`; despliegue, purga y rollback en `docs/OPERATIONS.md`; evidencia en `docs/VALIDATION.md`; decisiones aceptadas en `docs/adr/`. Para limpieza segura use `make clean`; `clean-all` elimina `.venv` y no forma parte del flujo normal.
+## Modos de Inferencia y Cascada
+
+Khai opera bajo una arquitectura híbrida con una escala de respaldo estricta (`high > mid > low > nano`):
+
+| Modo | Comando | Plataforma | Hardware | Modelo | Propósito |
+| --- | --- | --- | --- | --- | --- |
+| **High** | `/mode high` | Google Cloud (Spot) | 8 vCPU, 32 GB RAM + NVIDIA L4 (24 GB) | `qwen2.5-32b-abliterated` | Razonamiento técnico y generación estructurada de skills |
+| **Mid** | `/mode mid` | Google Cloud (Spot) | 4 vCPU, 16 GB RAM + NVIDIA L4 (24 GB) | `dolphin3:8b` | Respuestas rápidas aceleradas por GPU |
+| **Low** | `/mode low` | Google Cloud (Spot) | 8 vCPU, 32 GB RAM (CPU) | `dolphin3:8b` | Inferencia privada en CPU de respaldo |
+| **Nano** | `/mode nano` | Google Cloud API | Cloud Serverless ($0 cómputo GCE) | Gemini API | Coordinación general, clasificación rápida y fallback |
+
+*Consulta de estado y saldo de créditos:* `/mode ?` o `/m ?`.
+
+---
+
+## Comandos Operativos
+
+```bash
+make start      # Inicia el sistema Khai
+make stop       # Detiene el sistema Khai
+make test       # Ejecuta la suite de pruebas unitarias
+make stats      # Verifica la integridad de las bases de datos SQLite
+make clean      # Limpia archivos temporales y logs respetando .venv
+```
+
+---
+
+## Mapa Canónico de Documentación
+
+Toda la documentación del proyecto se mantiene unificada en los siguientes documentos canónicos:
+
+1. **[`.agents/GEMINI.md`](./.agents/GEMINI.md) — Constitución y Reglas de Comportamiento:**  
+   Reglas éticas, límites de seguridad (workers sin red), directrices de inferencia, cascada y gobierno del agente.
+2. **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — Manual Técnico Integral:**  
+   Arquitectura de órganos, contratos, almacén transaccional (`control.sqlite3`), seguridad, Decisiones Arquitectónicas Canónicas (ADRs 0001 a 0005), guía de operaciones/despliegue e infraestructura híbrida Dolphin.
+3. **[`docs/VALIDATION.md`](./docs/VALIDATION.md) — Validación Sintética y Evidencia:**  
+   Protocolo de prueba sintética en producción (Pasos 1 al 7) y registro observable de ejecuciones y resoluciones.
+4. **[`CHECKPOINT.md`](./CHECKPOINT.md) — Estado y Hoja de Ruta:**  
+   Situación viva del repositorio, commits desplegados en Azure y próximo paso inmediato a ejecutar.
