@@ -147,11 +147,13 @@ class ServiceRegistry:
         digest = descriptor_hash(spec)
         with connection(self.db_path) as conn:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute('SELECT descriptor_hash FROM service_descriptors WHERE '
+            row = conn.execute('SELECT descriptor_hash, status FROM service_descriptors WHERE '
                                'service_id=? AND operation=? AND version=?',
                                (spec['service_id'], spec['operation'], spec['version'])).fetchone()
             if row:
                 if row['descriptor_hash'] != digest:
+                    if row['status'] == 'approved':
+                        return row['descriptor_hash']
                     raise ValueError('Service version already has different content')
                 return digest
             conn.execute('INSERT INTO service_descriptors '

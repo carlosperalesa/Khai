@@ -330,7 +330,12 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
              'handler': lambda args: self._finish_descriptor(args)},
         ])
         self.last_agent_run_id = run_id
-        return result, self.propose_service(result)
+        digest = self.propose_service(result)
+        if hasattr(self.service_proposals, 'get'):
+            record = self.service_proposals.get(digest)
+            if record and record.get('spec'):
+                result = record['spec']
+        return result, digest
 
     @staticmethod
     def _validate_descriptor_tool(args):

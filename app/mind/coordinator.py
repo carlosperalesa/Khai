@@ -1945,6 +1945,9 @@ class Coordinator:
                 self.notify(reply)
         elif state == 'GENERATING':
             selected_version_id = task.get('selected_version_id')
+            if not task.get('services') and (task.get('creation_consent') or {}).get('allowed_services'):
+                task['services'] = list(task['creation_consent']['allowed_services'])
+                self.store.update(tid, expected={'GENERATING'}, services=task['services'])
             if ('Network' in task['manifest'].get('capabilities', [])
                     and not task.get('services') and not selected_version_id):
                 try:
