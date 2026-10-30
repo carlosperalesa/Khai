@@ -38,7 +38,8 @@ def validate_descriptor(spec):
             details.append(f'missing: {missing}')
         if extra:
             details.append(f'extra: {extra}')
-        detail_msg = f' ({', '.join(details)})' if details else ''
+        details_str = ', '.join(details)
+        detail_msg = f' ({details_str})' if details else ''
         raise ValueError(f'ServiceDescriptor fields do not match the contract{detail_msg}')
     for key in ('service_id', 'operation', 'version'):
         if not isinstance(spec[key], str) or not IDENTIFIER.fullmatch(spec[key]):
