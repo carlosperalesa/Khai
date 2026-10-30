@@ -1,10 +1,16 @@
+from app.mind.coordinator import Coordinator
+import tempfile
+from pathlib import Path
+import unittest
+import threading
+import time
 """One durable session, one routed operation, and replies bound to delivered questions."""
 import itertools
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from tests.test_control import Fixture
+from tests.fixtures import Fixture
 from app.mind.conversation import ConversationStore, current_turn
 from app.mind.mind import Mind
 from app.pixy.authorization import AuthorizationStore
@@ -318,3 +324,105 @@ class ConversationFlowTests(Fixture):
         pending = self.c.conversations.pending(self.sid)
         self.assertEqual(self.store.get(task['id'])['state'], 'WAITING_FEEDBACK')
         self.assertTrue(any(q['subject_id'] == task['id'] and q['state'] == 'WAITING_FEEDBACK' for q in pending))
+
+
+    def test_intake_debounce_coalescence(self):
+        """C.3: intake() coalesces immediate consecutive messages into the same ROUTING task."""
+        self.c.conversations.begin('telegram:turn1', 'trace_1', 'Primera parte', 'owner', 'owner')
+
+        # First intake creates task in ROUTING
+        task1 = self.c.intake('telegram:turn1', 'Primera parte', trace_id='trace_1')
+        self.assertEqual(task1['request'], 'Primera parte')
+
+        # Rapid second intake (same conversation, < 3s, not direct)
+        self.c.conversations.begin('telegram:turn2', 'trace_2', 'Segunda parte', 'owner', 'owner')
+        task2 = self.c.intake('telegram:turn2', 'Segunda parte', trace_id='trace_2')
+
+        # Coalesced into task1
+        self.assertEqual(task2['id'], task1['id'])
+        self.assertIn('Primera parte\n\nSegunda parte', task2['request'])
+
+    def test_tick_sequential_fifo_by_conversation(self):
+        """C.1: Coordinator.tick() pauses second ROUTING task while first is in-flight."""
+        t1 = self.store.create('telegram:t1', 'Tarea 1', conversation_id=self.sid, state='RUNNING')
+        t2 = self.store.create('telegram:t2', 'Tarea 2', conversation_id=self.sid, state='ROUTING')
+
+        # Mock _run_task to track execution
+        executed = []
+        self.c._run_task = lambda t: executed.append(t['id'])
+        self.c._supervise_agent = Mock()
+
+        # Run tick
+        self.c.tick(background=False)
+
+        # t2 should NOT have run because t1 is in RUNNING for the same conversation
+        self.assertNotIn(t2['id'], executed)
+
+        # Transition t1 to COMPLETED
+        self.store.update(t1['id'], expected={'RUNNING'}, state='COMPLETED')
+
+        # Run tick again
+        self.c.tick(background=False)
+
+        # Now t2 should have been admitted and executed
+        self.assertIn(t2['id'], executed)
+
+
+class SchedulerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+        def blocked_generate(*_args):
+            self.started.set()
+            self.release.wait(5)
+            return "# MODE: SAFE\nprint('ok')", "SAFE", []
+
+        manager = SimpleNamespace(
+            state=SimpleNamespace(db_path=str(root / "control.sqlite3")),
+            data_dir=root,
+            runtime=Mock(),
+            telegram=Mock(),
+            memory=Mock(get_active_hypotheses=Mock(return_value=[])),
+            hand=Mock(generate=blocked_generate, snapshot=Mock(return_value=(str(root / "a.py"), "a" * 64))),
+            rules=Mock(active=Mock(return_value=[])),
+            pixy=Mock(preflight=Mock(return_value={"safe": True})),
+            mind=Mock(),
+            heart=SimpleNamespace(recovery=None),
+        )
+        self.coordinator = Coordinator(manager)
+        self.task = self.coordinator.store.create("scheduler-source", "goal")
+        self.coordinator.store.update(
+            self.task["id"], state="GENERATING",
+            manifest={"purpose": "goal", "capabilities": []},
+            deadline=time.time() + 300,
+        )
+
+    def tearDown(self):
+        self.release.set()
+        self.coordinator._llm_executor.shutdown(wait=True, cancel_futures=True)
+        self.coordinator._mailbox_executor.shutdown(wait=True, cancel_futures=True)
+        self.tmp.cleanup()
+
+    def test_background_tick_does_not_wait_for_llm_job_and_cancel_wins(self):
+        started = time.monotonic()
+        self.coordinator.tick(background=True)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(self.started.wait(1))
+
+        cancelled = self.coordinator.cancel(self.task["id"], "cancel-command")
+        self.assertEqual(cancelled["state"], "CANCELLED")
+        self.release.set()
+
+    def test_configured_concurrency_is_bounded(self):
+        self.assertEqual(self.coordinator.llm_concurrency, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+if __name__ == '__main__':
+    unittest.main()

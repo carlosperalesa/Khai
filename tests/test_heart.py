@@ -1,26 +1,34 @@
-"""Unit and integration tests for the coordinated recovery cycle (Pixy, Heart, Senses, Hand)."""
+"""Heart organ tests: Doctor recovery cycle, diagnosis taxonomy, incident deduplication, and Senses evidence."""
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from app.hand.hand import Hand
+from app.heart.beat import Beat
+from app.heart.catalog import (
+    ACTIONS,
+    CAUSE_TAXONOMY,
+    TARGETS,
+    cause_fingerprint,
+    plan_hash,
+    requires_approval,
+    validate_plan,
+)
+from app.heart.recovery import Recovery
 from app.kernel.database import connection, migrate
 from app.kernel.events import Events
-from app.heart.catalog import validate_plan, plan_hash, requires_approval, ACTIONS, TARGETS
 from app.pixy.authorization import AuthorizationStore
 from app.pixy.pixy import PixyMind
-from app.senses.senses import Senses, OBSERVERS
-from app.heart.recovery import Recovery
-from app.heart.beat import Beat
-from app.hand.hand import Hand
-from app.voice.runtime.recovery_runtime import ProxyRecoveryExecutor, RecoveryRejected
+from app.senses.senses import OBSERVERS, Senses
 from app.voice.runtime.recovery_engine import RecoveryEngine
+from app.voice.runtime.recovery_runtime import ProxyRecoveryExecutor, RecoveryRejected
 
 
 class RecoveryCatalogTests(unittest.TestCase):
@@ -80,29 +88,23 @@ class AuthorizationStoreTests(unittest.TestCase):
         self.assertEqual(auth['status'], 'pending')
         self.assertEqual(self.store.pending()['authorization_id'], auth['authorization_id'])
 
-        # Cannot verify before user approval
         with self.assertRaises(PermissionError):
             self.store.verify(auth['authorization_id'], auth['nonce'], case_id, ['DockerRestart'], 'core', h)
 
-        # Decide approve
         decided = self.store.decide(auth['authorization_id'], True, 'telegram:1')
         self.assertEqual(decided['status'], 'approved')
 
-        # Now verify succeeds
         verified = self.store.verify(auth['authorization_id'], auth['nonce'], case_id, ['DockerRestart'], 'core', h)
         self.assertEqual(verified['status'], 'approved')
 
-        # Consume once by Hand
         consumed = self.store.consume(auth['authorization_id'], auth['nonce'], case_id, ['DockerRestart'], 'core', h,
                                       consumer='hand:' + case_id)
         self.assertEqual(consumed['status'], 'consumed')
 
-        # Same consumer retry succeeds (idempotent for crash-recovery)
         retry = self.store.consume(auth['authorization_id'], auth['nonce'], case_id, ['DockerRestart'], 'core', h,
                                    consumer='hand:' + case_id)
         self.assertEqual(retry['status'], 'consumed')
 
-        # Different consumer fails
         with self.assertRaises(PermissionError):
             self.store.consume(auth['authorization_id'], auth['nonce'], case_id, ['DockerRestart'], 'core', h,
                                consumer='hand:other_case')
@@ -114,15 +116,12 @@ class AuthorizationStoreTests(unittest.TestCase):
         auth = self.store.issue(case_id, ['HealthCheck'], 'core', h, 'user')
         self.store.decide(auth['authorization_id'], True, 'user')
 
-        # Altered capabilities
         with self.assertRaises(PermissionError):
             self.store.verify(auth['authorization_id'], auth['nonce'], case_id, ['DockerRestart'], 'core', h)
 
-        # Altered target
         with self.assertRaises(PermissionError):
             self.store.verify(auth['authorization_id'], auth['nonce'], case_id, ['HealthCheck'], 'proxy', h)
 
-        # Altered hash
         with self.assertRaises(PermissionError):
             self.store.verify(auth['authorization_id'], auth['nonce'], case_id, ['HealthCheck'], 'core', '0' * 64)
 
@@ -135,7 +134,6 @@ class AuthorizationStoreTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             short_store.decide(auth1['authorization_id'], True, 'user')
 
-        # Independent questions remain pending and require an explicit ID upstream.
         auth2 = self.store.issue('case-20261025abcd0002', ['DockerRestart'], 'core', '2' * 64, 'user')
         auth3 = self.store.issue('case-20261025abcd0003', ['DockerRestart'], 'core', '3' * 64, 'user')
         self.assertEqual(self.store.get(auth2['authorization_id'])['status'], 'pending')
@@ -154,13 +152,11 @@ class SensesEvidenceTests(unittest.TestCase):
             mock_gateway.observe.side_effect = lambda rid, reason: json.dumps({'running': True, 'started_at': 100})
             senses = Senses(path, adapters, mock_gateway)
 
-            # Heart specifically requests only storage and container_state_core
             samples = senses.sample(['storage', 'container_state_core'], 'diagnostic test')
             self.assertEqual(samples['storage']['vitals']['ram_percent'], 50)
             self.assertTrue(samples['container_state_core']['running'])
-            self.assertNotIn('core_logs', samples)  # Not requested by Heart, therefore not sampled
+            self.assertNotIn('core_logs', samples)
 
-            # Check persisted audit in observations table
             with connection(path) as conn:
                 rows = conn.execute('SELECT * FROM observations WHERE observer="sample"').fetchall()
                 self.assertEqual(len(rows), 1)
@@ -215,13 +211,11 @@ class HeartRecoveryTests(unittest.TestCase):
         case = self.recovery.open_case('diagnóstico de memoria', 'user:1')
         self.assertEqual(case['state'], 'SOLUTION_PROPOSED')
 
-        # Issue authorization and await approval
         auth = self.auth_store.issue(case['case_id'], case['plan']['capabilities'], case['plan']['target'],
                                       case['plan_hash'], 'user:1')
         waiting = self.recovery.await_approval(case['case_id'], auth)
         self.assertEqual(waiting['state'], 'WAITING_USER_APPROVAL')
 
-        # User denies
         denied_auth = self.auth_store.decide(auth['authorization_id'], False, 'user:1')
         denied_case = self.recovery.receive_decision(case['case_id'], denied_auth)
         self.assertEqual(denied_case['state'], 'DENIED')
@@ -233,12 +227,10 @@ class HeartRecoveryTests(unittest.TestCase):
             'container_core': {'running': True}, 'container_proxy': {'running': True, 'scheduler_age': 5}
         }
         case = self.recovery.open_case('diagnóstico de memoria', 'user:1')
-        # Attempting advance while not authorized does nothing
         self.recovery.advance(case['case_id'])
         self.assertEqual(self.recovery.get(case['case_id'])['state'], 'SOLUTION_PROPOSED')
         self.hand.create_recovery.assert_not_called()
 
-        # If somehow moved to AUTHORIZED without valid Pixy authorization terms, advance fails closed
         with connection(self.recovery.path) as conn:
             conn.execute('UPDATE recovery_cases SET state="AUTHORIZED",authorization_id=NULL WHERE case_id=?',
                          (case['case_id'],))
@@ -276,14 +268,13 @@ class HandRecoveryTests(unittest.TestCase):
             'plan': plan
         }
 
-        # 1. Hand creates skill under data/hand/heart/<case_id>
         created = self.hand.create_recovery(order)
         self.assertEqual(created['status'], 'created')
         skill_dir = self.root / 'hand' / 'heart' / case_id
         self.assertTrue(skill_dir.exists())
         self.assertTrue((skill_dir / 'app' / 'recovery.json').exists())
+        self.assertTrue((skill_dir / 'SKILL.md').exists())
 
-        # 2. Hand executes steps
         self.mock_executor.submit.side_effect = [
             {'status': 'completed', 'requested_at': time.time(), 'action_id': 'rec_1'},
             {'status': 'completed', 'state': {'running': True}, 'action_id': 'rec_2'}
@@ -292,7 +283,6 @@ class HandRecoveryTests(unittest.TestCase):
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(len(result['steps']), 2)
 
-        # Pixy authorization must now be consumed
         consumed_auth = self.auth_store.get(auth['authorization_id'])
         self.assertEqual(consumed_auth['status'], 'consumed')
 
@@ -313,6 +303,214 @@ class RecoveryEngineProxyTests(unittest.TestCase):
             self.assertTrue(res['state']['running'])
 
 
+class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db = self.root / 'recovery.sqlite3'
+        self.senses = Mock()
+        self.senses.evidence.return_value = {
+            'storage': {'vitals': {'ram_percent': 20, 'disk_free': 10 * 1024**3}, 'integrity': {'status': 'ok'}},
+            'container_core': {'running': True},
+            'container_proxy': {'running': True, 'status': 'running'},
+            'core_logs': {'text': 'All good'},
+            'pixy': {'recent_tasks': []}
+        }
+        self.hand = Mock()
+        self.authorizations = Mock()
+        self.recovery = Recovery(self.db, self.senses, self.hand, self.authorizations)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_deterministic_cause_classification(self):
+        c1, _ = Recovery.classify_cause({'error': 'Presupuesto agotado: generations'})
+        self.assertEqual(c1, 'budget_exhausted')
+
+        c2, _ = Recovery.classify_cause({'error': 'HTTP 401 Unauthorized: API key missing'})
+        self.assertEqual(c2, 'missing_credential')
+
+        c3, _ = Recovery.classify_cause({'status': 'unknown', 'stderr': 'Timeout sin confirmación'})
+        self.assertEqual(c3, 'uncertain_effect')
+
+        c4, _ = Recovery.classify_cause({'error': 'CapabilityRejected: service not registered'})
+        self.assertEqual(c4, 'missing_capability')
+
+        c5, _ = Recovery.classify_cause({'stderr': 'ModuleNotFoundError: No module named pandas'})
+        self.assertEqual(c5, 'dependency_error')
+
+        c6, _ = Recovery.classify_cause({'stderr': 'SyntaxError: invalid syntax', 'returncode': 1})
+        self.assertEqual(c6, 'syntax_or_code')
+
+        c7, _ = Recovery.classify_cause({'error': '503 Service Unavailable: connection reset'})
+        self.assertEqual(c7, 'temporary_provider')
+
+        c8, _ = Recovery.classify_cause({'verification': {'success': False}, 'error': 'Oracle mismatch'})
+        self.assertEqual(c8, 'invalid_result')
+
+    def test_status_query_does_not_retry_an_older_failed_task(self):
+        self.senses.evidence.return_value['pixy']['recent_tasks'] = [
+            {'id': 'task_old', 'request': 'hola', 'state': 'FAILED',
+             'created_at': 1, 'updated_at': 100, 'error': 'LLM unavailable'},
+            {'id': 'task_current', 'request': 'Hazlo', 'state': 'COMPLETED',
+             'created_at': 2, 'updated_at': 2, 'executions': 0, 'trace_id': 'current'}]
+        self.senses.evidence.return_value['core_logs']['text'] = '\n'.join(
+            'ERROR [old] LLM unavailable' for _ in range(6))
+        case = self.recovery.open_case('cual es el estado de la tarea?', 'owner:status')
+        self.assertIsNone(case['plan'])
+        self.assertEqual(case['diagnosis']['task']['id'], 'task_current')
+        self.assertIn('No hay ejecución', case['diagnosis']['task']['note'])
+        self.assertFalse(any(f['code'] in {'task_failure', 'core_error_burst'}
+                             for f in case['diagnosis']['findings']))
+
+    def test_explicit_last_error_query_selects_failed_task(self):
+        failed_id = 'task_' + '1' * 32
+        self.senses.evidence.return_value['pixy']['recent_tasks'] = [
+            {'id': failed_id, 'request': 'hola', 'state': 'FAILED',
+             'created_at': 1, 'error': 'LLM unavailable'},
+            {'id': 'task_chat', 'request': 'Hola', 'state': 'COMPLETED', 'created_at': 2}]
+        self.recovery._llm_analyze_incident = Mock(return_value=None)
+        case = self.recovery.open_case('revisa el último error', 'owner:error')
+        self.assertEqual(case['diagnosis']['task']['id'], failed_id)
+        self.assertEqual(case['plan']['task_id'], failed_id)
+
+    def test_incident_key_deduplication(self):
+        task = {'id': 'task_00000000000000000000000000000001', 'execution_id': 'run_111'}
+        failure = {'stderr': 'SyntaxError: unexpected EOF while parsing', 'returncode': 1}
+
+        case1 = self.recovery.open_incident_case(task, failure)
+        self.assertIsNotNone(case1)
+        self.assertEqual(case1['state'], 'SOLUTION_PROPOSED')
+        self.assertEqual(case1['task_id'], task['id'])
+        self.assertEqual(case1['cause_code'], 'syntax_or_code')
+
+        case2 = self.recovery.open_incident_case(task, failure)
+        self.assertEqual(case1['case_id'], case2['case_id'])
+
+        with connection(self.db) as conn:
+            count = conn.execute('SELECT COUNT(*) FROM recovery_cases').fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_different_failure_causes_create_distinct_incident_cases(self):
+        task = {'id': 'task_00000000000000000000000000000002', 'execution_id': 'run_222'}
+        f1 = {'stderr': 'SyntaxError: unexpected EOF', 'returncode': 1}
+        f2 = {'stderr': 'ModuleNotFoundError: No module named requests', 'returncode': 1}
+
+        case1 = self.recovery.open_incident_case(task, f1)
+        case2 = self.recovery.open_incident_case(task, f2)
+
+        self.assertNotEqual(case1['case_id'], case2['case_id'])
+        self.assertEqual(case1['cause_code'], 'syntax_or_code')
+        self.assertEqual(case2['cause_code'], 'dependency_error')
+
+    def test_coordinator_failure_delegates_to_heart_incident(self):
+        from types import SimpleNamespace
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+
+        c_db = self.root / 'coordinator.sqlite3'
+        store = ControlStore(c_db)
+        manager = SimpleNamespace(
+            coordinator_control=store,
+            data_dir=self.root,
+            heart=SimpleNamespace(recovery=self.recovery),
+            pixy=Mock(),
+            hand=Mock(),
+            mind=Mock(),
+            memory=Mock(),
+            events=Mock(),
+        )
+        proxy = Mock()
+        coordinator = Coordinator(manager, proxy=proxy)
+        manager.coordinator = coordinator
+
+        task = store.create('test_source', 'consultar clima', state='RUNNING',
+                            execution_id='run_fail_1',
+                            artifact_hash='hash_123', mode='SAFE',
+                            manifest={'purpose': 'clima', 'capabilities': []})
+        tid = task['id']
+
+        proxy.get.return_value = {
+            'status': 'failed',
+            'returncode': 1,
+            'stderr': 'ZeroDivisionError: division by zero',
+            'evidence_kind': 'process_exit'
+        }
+
+        coordinator.advance(task)
+        t_diagnosing = store.get(tid)
+        self.assertEqual(t_diagnosing['state'], 'DIAGNOSING')
+        self.assertIsNotNone(t_diagnosing.get('recovery_case_id'))
+
+        heart_case = self.recovery.get(t_diagnosing['recovery_case_id'])
+        self.assertEqual(heart_case['cause_code'], 'syntax_or_code')
+        self.assertEqual(heart_case['task_id'], tid)
+        self.assertIn('ZeroDivisionError', heart_case['diagnosis']['findings'][0]['detail'])
+
+        manager.pixy.request_recovery_approval.return_value = {'authorization_id': 'auth_diag_123', 'status': 'pending'}
+        coordinator.advance(t_diagnosing)
+        t_after = store.get(tid)
+        self.assertEqual(t_after['state'], 'DIAGNOSING')
+        self.assertEqual(t_after.get('recovery_authorization_id'), 'auth_diag_123')
+        manager.mind.process_message.assert_not_called()
+
+    def test_causal_cycle_transitions_and_verification(self):
+        from types import SimpleNamespace
+        from app.pixy.control import ControlStore
+
+        c_db = self.root / 'coord_causal.sqlite3'
+        store = ControlStore(c_db)
+        task = store.create('test_source', 'consultar clima', state='FAILED',
+                            execution_id='run_fail_2',
+                            manifest={'purpose': 'clima', 'capabilities': []})
+        tid = task['id']
+
+        case = self.recovery.open_incident_case(task, {'stderr': 'ZeroDivisionError', 'returncode': 1})
+        cid = case['case_id']
+
+        with self.assertRaises(ValueError):
+            self.recovery._move(cid, 'RECOVERED', expected={'AUTHORIZED'})
+
+        coord_mock = SimpleNamespace(
+            store=store,
+            retry_task=Mock()
+        )
+        self.recovery.coordinator = coord_mock
+
+        auth = {
+            'authorization_id': 'auth_123',
+            'nonce': 'nonce_abc',
+            'case_id': cid,
+            'target': 'task',
+            'capabilities': ['TaskRemediate'],
+            'plan_hash': case['plan_hash'],
+            'status': 'approved',
+            'decided_by': 'user'
+        }
+        self.authorizations.get.return_value = auth
+        self.authorizations.verify.return_value = True
+
+        self.recovery.receive_decision(cid, auth)
+        case_auth = self.recovery.get(cid)
+        self.assertEqual(case_auth['state'], 'AUTHORIZED')
+
+        self.recovery.advance(cid)
+        case_exec = self.recovery.get(cid)
+        self.assertEqual(case_exec['state'], 'HAND_EXECUTING')
+        coord_mock.retry_task.assert_called_once()
+        self.assertEqual(coord_mock.retry_task.call_args[0][0], tid)
+        self.assertEqual(coord_mock.retry_task.call_args[1]['authorization_id'], 'auth_123')
+        self.assertEqual(coord_mock.retry_task.call_args[1]['order']['plan']['task_id'], tid)
+
+        store.update(tid, expected={'FAILED'}, state='GENERATING')
+        self.recovery.advance(cid)
+        self.assertEqual(self.recovery.get(cid)['state'], 'HAND_EXECUTING')
+
+        store.update(tid, expected={'GENERATING'}, state='FAILED', error='Still broken')
+        self.recovery.advance(cid)
+        self.assertEqual(self.recovery.get(cid)['state'], 'FAILED')
+
+
 class FullRecoveryCycleIntegrationTests(unittest.TestCase):
     def test_full_cycle_pixy_heart_senses_hand(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -326,48 +524,40 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 manager.llm.generate_content = Mock(return_value='Explico el diagnóstico. apruebas: y/n')
                 manager.telegram = Mock()
 
-                # Simulate degraded proxy scheduler
                 manager.senses.evidence = Mock(side_effect=[
-                    # Before evidence
                     {'storage': {'vitals': {'ram_percent': 50, 'disk_free': 10 * 1024**3}, 'integrity': {'status': 'ok'}},
                      'container_core': {'running': True, 'started_at': 100},
                      'container_proxy': {'running': True, 'status': 'running', 'scheduler_age': 120},
                      'core_logs': {'text': 'OK'}},
-                    # After evidence
                     {'storage': {'vitals': {'ram_percent': 50, 'disk_free': 10 * 1024**3}, 'integrity': {'status': 'ok'}},
                      'container_core': {'running': True, 'started_at': 100},
                      'container_proxy': {'running': True, 'status': 'running', 'scheduler_age': 2, 'started_at': time.time() + 10},
                      'core_logs': {'text': 'OK'}}
                 ])
 
-                # Mock executor for Hand
                 manager.hand.recovery_executor = Mock()
                 manager.hand.recovery_executor.submit.return_value = {'status': 'completed', 'requested_at': time.time()}
                 manager.hand.recovery_executor.status.return_value = {'status': 'completed'}
 
-                # 1. User asks Pixy for diagnostic
                 pixy_reply = manager.pixy.direct_response('diagnóstico del sistema', source='telegram:101')
                 self.assertIn('apruebas: y/n', pixy_reply)
                 pending_auth = manager.pixy.authorizations.pending()
                 self.assertIsNotNone(pending_auth)
                 case_id = pending_auth['case_id']
 
-                # 2. User approves with 'y'
                 approval_reply = manager.pixy.direct_response('y', source='telegram:102')
                 self.assertIn('Autorización', approval_reply)
 
-                # 3. Heart advances the case
                 case = manager.heart.recovery.get(case_id)
                 self.assertEqual(case['state'], 'AUTHORIZED')
 
-                # Coordinator or Heart tick advances through HAND_CREATING, HAND_EXECUTING, VERIFYING, RECOVERED
                 manager.heart.recovery.tick()
                 case_final = manager.heart.recovery.get(case_id)
                 self.assertEqual(case_final['state'], 'RECOVERED')
                 self.assertIsNone(case_final['error'])
 
-                # Verify skill created under data/hand/heart/<case_id>
                 self.assertTrue((root / 'hand' / 'heart' / case_id / 'app' / 'recovery.json').exists())
+                self.assertTrue((root / 'hand' / 'heart' / case_id / 'SKILL.md').exists())
 
     def test_task_failure_remediation_cycle(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -385,13 +575,11 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 manager.llm.generate_content = Mock(return_value='Diagnóstico: fallo en tarea. apruebas: y/n')
                 manager.telegram = Mock()
 
-                # Create an EXHAUSTED task
                 task = coordinator.store.create('test_source', 'consultar clima manana',
                                                 state='EXHAUSTED', error='Presupuesto agotado: generations',
                                                 generations=4, manifest={'purpose': 'clima', 'capabilities': ['Network']})
                 tid = task['id']
 
-                # Mock Senses evidence returning the failed task in pixy observer
                 manager.senses.evidence = Mock(return_value={
                     'storage': {'vitals': {'ram_percent': 30, 'disk_free': 20 * 1024**3}, 'integrity': {'status': 'ok'}},
                     'container_core': {'running': True, 'started_at': 100},
@@ -400,7 +588,6 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                     'pixy': {'recent_tasks': [coordinator.store.get(tid)]}
                 })
 
-                # Pixy receives user request for error diagnosis
                 pixy_reply = manager.pixy.direct_response('por que fallo la tarea?', source='telegram:201')
                 self.assertIn('apruebas: y/n', pixy_reply)
 
@@ -408,16 +595,13 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(pending_auth)
                 case_id = pending_auth['case_id']
 
-                # User approves remediation with 'y'
                 approval_reply = manager.pixy.direct_response('y', source='telegram:202')
                 self.assertIn('Autorización', approval_reply)
 
-                # Heart advances the case: AUTHORIZED -> HAND_EXECUTING (eliminating premature RECOVERED)
                 manager.heart.recovery.tick()
                 case = manager.heart.recovery.get(case_id)
                 self.assertEqual(case['state'], 'HAND_EXECUTING')
 
-                # Verify task was retried without erasing historical consumption.
                 retried_task = coordinator.store.get(tid)
                 self.assertEqual(retried_task['state'], 'GENERATING')
                 self.assertEqual(retried_task['generations'], 4)
@@ -427,11 +611,9 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 self.assertIsNone(retried_task['error'])
                 self.assertEqual(retried_task['recovery_history'][0]['error'], 'Presupuesto agotado: generations')
 
-                # Simulate completed verified task
                 coordinator.store.update(tid, expected={'GENERATING'}, state='COMPLETED',
                                          verification={'success': True, 'evidence': {'test': True}})
 
-                # Second tick advances HAND_EXECUTING -> VERIFYING -> RECOVERED
                 manager.heart.recovery.tick()
                 case = manager.heart.recovery.get(case_id)
                 self.assertEqual(case['state'], 'RECOVERED')
@@ -453,38 +635,36 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
 
                 manager.action_planner = None
                 manager.skill_selector = None
-                # Mock Mind deciding ACTION_REQUIRED
                 manager.mind.process_message = Mock(return_value={
                     'action': 'ACTION_REQUIRED',
                     'extracted_goal': 'Consultar pronóstico del clima mañana'
                 })
-                manager.llm.generate_content = Mock(side_effect=[
-                    json.dumps({'purpose': 'Consultar el clima de mañana', 'capabilities': ['Network']}),
-                    json.dumps({
-                        'service_id': 'weather', 'operation': 'forecast', 'version': 'v1',
-                        'url': 'https://weather.example.org/forecast', 'method': 'GET',
-                        'parameters': ['city'], 'content_types': ['application/json'],
-                        'max_bytes': 10000, 'timeout': 5, 'per_minute': 10,
-                        'effect': 'read', 'credential_ref': None, 'effect_contract': None,
-                    }),
-                ])
+                manager.llm.generate_content = Mock(return_value=json.dumps({
+                    'purpose': 'Consultar el clima de mañana', 'capabilities': ['Network']
+                }))
+                spec = {
+                    'service_id': 'weather', 'operation': 'forecast', 'version': 'v1',
+                    'url': 'https://weather.example.org/forecast', 'method': 'GET',
+                    'parameters': ['city'], 'content_types': ['application/json'],
+                    'max_bytes': 10000, 'timeout': 5, 'per_minute': 10,
+                    'effect': 'read', 'credential_ref': None, 'credential_header': 'Authorization',
+                    'credential_prefix': '', 'effect_contract': None,
+                }
+                spec_hash = manager.hand.propose_service(spec)
+                manager.hand.describe_service = Mock(return_value=(spec, spec_hash))
 
-                # Intake a user message
                 task = coordinator.intake('tg:1', 'Khai que clima voy a tener?')
                 tid = task['id']
 
-                # First tick processes ROUTING -> WAITING_CREATION_APPROVAL
                 coordinator.tick()
                 if coordinator._mailbox_job is not None:
                     coordinator._mailbox_job.result(timeout=5)
                 current = coordinator.store.get(tid)
                 self.assertEqual(current['state'], 'WAITING_CREATION_APPROVAL')
 
-                # Verify notification asked for approval
                 notifications = [call.args[0] for call in manager.telegram.send_message.call_args_list]
                 self.assertTrue(any('necesito preparar una capacidad nueva' in n and 'Responde y/n' in n for n in notifications))
 
-                # User approves via Pixy with 'y'
                 manager.pixy.direct_response('y', source='tg:2')
                 current = coordinator.store.get(tid)
                 self.assertEqual(current['state'], 'SCOPE_PLANNING')
@@ -494,3 +674,4 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

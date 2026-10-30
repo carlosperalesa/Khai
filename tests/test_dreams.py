@@ -1,4 +1,4 @@
-"""Unit tests for Phase 5: Dreams consolidated learning, distinct objectives, and rule lifecycle."""
+"""Unit tests for Dreams: consolidated learning, distinct objectives, and rule lifecycle."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +10,7 @@ from app.pixy.rules import Rules
 from app.kernel.database import connection
 
 
-class Phase5DreamsTests(unittest.TestCase):
+class DreamsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -30,7 +30,6 @@ class Phase5DreamsTests(unittest.TestCase):
             self.dreams.record({'execution_id': 'run_1'}, 'not_a_bool', {})
 
     def test_distinct_task_objectives_required_for_skill_consolidation(self):
-        # 3 executions of the SAME task ID must NOT trigger skill proposal
         skill_name = 'weather_forecast'
         version_id = 'v1_0'
         artifact_hash = 'sha_' + '0' * 60
@@ -41,7 +40,7 @@ class Phase5DreamsTests(unittest.TestCase):
             'skill_name': skill_name,
             'version_id': version_id,
             'artifact_hash': artifact_hash,
-            'context': 'clima'
+            'context': 'clima',
         }
         self.assertTrue(self.dreams.record(same_task, True, {'ok': True}))
 
@@ -81,11 +80,7 @@ class Phase5DreamsTests(unittest.TestCase):
 
         # 3 failures using this rule
         for i in range(3):
-            task = {
-                'id': f'task_fail_{i}',
-                'execution_id': f'run_fail_{i}',
-                'guidelines': [rid]
-            }
+            task = {'id': f'task_fail_{i}', 'execution_id': f'run_fail_{i}', 'guidelines': [rid]}
             self.dreams.record(task, False, {'error': 'timed out'})
 
         # The rule must now be deprecated and excluded from active()
@@ -93,18 +88,16 @@ class Phase5DreamsTests(unittest.TestCase):
         rule_record = self.rules.get(rid)
         self.assertEqual(rule_record['status'], 'deprecated')
         self.events.emit.assert_called_with(
-            'dreams', 'rule_deprecated', correlation_id='task_fail_2', task_id='task_fail_2',
-            metadata={'rule_id': rid, 'success_rate': 0.0, 'uses': 3}
+            'dreams',
+            'rule_deprecated',
+            correlation_id='task_fail_2',
+            task_id='task_fail_2',
+            metadata={'rule_id': rid, 'success_rate': 0.0, 'uses': 3},
         )
 
     def test_hypothesis_tracking_updates_memory_engine(self):
         hid = self.memory.add_hypothesis('parsing', 'use ast parser', 0.5)
-        task = {
-            'id': 'task_hyp_1',
-            'execution_id': 'run_hyp_1',
-            'hypothesis_id': hid,
-            'context': 'coding'
-        }
+        task = {'id': 'task_hyp_1', 'execution_id': 'run_hyp_1', 'hypothesis_id': hid, 'context': 'coding'}
         self.dreams.record(task, True, {'test': True})
 
         hyp = self.memory.get_hypothesis(hid)
@@ -141,3 +134,4 @@ class Phase5DreamsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

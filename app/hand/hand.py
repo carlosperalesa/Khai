@@ -787,6 +787,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             try:
                 for part in ('app','data','other'):
                     (draft/part).mkdir(parents=True)
+                (draft/'SKILL.md').write_text(f'---\\nname: recovery-{case_id}\\n---\\n\\n# Recovery {case_id}\\n', encoding='utf-8')
                 (draft/'app'/'recovery.json').write_bytes(self._recovery_document(case_id,core,h))
                 (draft/'other'/'manifest.json').write_bytes(canonical({
                     'purpose':'recovery','case_id':case_id,'issued_by':'heart','created_by':'hand',

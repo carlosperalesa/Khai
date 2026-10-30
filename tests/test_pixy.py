@@ -1,16 +1,155 @@
-"""Cancellation fences real SQLite admission; runtime facts preserve goal evidence."""
+"""Pixy organ tests: governance, permissions, secret capture, skill approval, and execution authority."""
 import hashlib
 import json
+import tempfile
 import time
-from unittest.mock import Mock, patch
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
-from tests.test_control import Fixture
+from tests.fixtures import Fixture
+from app.kernel.control_plane import ControlPlane, PixyPort
 from app.kernel.database import connection
 from app.kernel.execution_authority import VoiceExecutionPort
+from app.mind.conversation import ReplyResult
+from app.pixy.skill_approvals import SkillApprovalStore
 from app.voice.gateway.external_gateway import ExternalGateway
+from app.voice.secrets import SecretCaptureService, Secrets
 from app.voice.voice import command
+
+
+class ReusableSkillApprovalTests(Fixture):
+    def test_approved_version_reuses_subset_after_restart_and_rejects_wider_scope(self):
+        code = '# MODE: SAFE\nprint("result")'
+        manifest = {'purpose': 'guardar nota', 'capabilities': ['Network']}
+        version = self.manager.hand.create('notes', code, manifest)
+        artifact, code_hash = self.manager.hand.snapshot(code)
+        broad = [{'service_id': 'notes', 'operation': 'create', 'version': 'v1'},
+                 {'service_id': 'notes', 'operation': 'update', 'version': 'v1'}]
+        original = self.task(state='REVIEWING', code=code, artifact=artifact,
+                             artifact_hash=code_hash, manifest=manifest,
+                             skill_name='notes', version_id=version['version_id'],
+                             selected_version_id=version['version_id'], mode='SAFE',
+                             dependencies=[], services=broad)
+        self.c._wait_approval(original, 'Código revisado')
+        token = self.store.get(original['id'])['approval']['token']
+        self.c.approval(original['id'], token, True, 'telegram:owner')
+        self.manager.hand.pixy.audit_artifact.return_value = {
+            'safe': True, 'requires_approval': True, 'audit_id': 'test-audit'}
+        self.manager.hand.approve(version['version_id'], user_approved=True)
+        self.manager.pixy.skill_approvals = SkillApprovalStore(self.manager.pixy.skill_approvals.path)
+        self.manager.pixy.review = Mock(return_value={'safe': True, 'requires_approval': True})
+
+        def task_with(services):
+            return self.task(state='REVIEWING', code=code, artifact=artifact,
+                             artifact_hash=code_hash, manifest=manifest,
+                             skill_name='notes', version_id=version['version_id'],
+                             selected_version_id=version['version_id'], mode='SAFE',
+                             dependencies=[], services=services)
+
+        narrow = task_with(broad[:1])
+        self.c.advance(narrow)
+        reused = self.store.get(narrow['id'])
+        self.assertEqual(reused['state'], 'READY')
+        self.assertEqual(reused['approval']['reused_from_task'], original['id'])
+        wider = task_with(broad + [{'service_id': 'notes', 'operation': 'delete', 'version': 'v1'}])
+        self.c.advance(wider)
+        self.assertEqual(self.store.get(wider['id'])['state'], 'WAITING_APPROVAL')
+        changed_version = dict(self.manager.hand.version(version['version_id']), artifact_hash='different')
+        self.assertIsNone(self.manager.pixy.skill_approvals.matching(narrow, changed_version))
+        self.manager.pixy.review.assert_called()
+
+    def test_approval_rejects_scope_change_after_prompt(self):
+        code = '# MODE: SAFE\nprint("result")'
+        artifact, code_hash = self.manager.hand.snapshot(code)
+        task = self.task(state='REVIEWING', code=code, artifact=artifact,
+                         artifact_hash=code_hash, manifest={'purpose': 'notes', 'capabilities': ['Network']},
+                         mode='SAFE', dependencies=[], services=[])
+        self.c._wait_approval(task, 'Código revisado')
+        pending = self.store.get(task['id'])
+        self.store.update(task['id'], services=[{'service_id': 'notes', 'operation': 'create',
+                                                 'version': 'v1'}])
+        with self.assertRaisesRegex(ValueError, 'alcance cambi'):
+            self.c.approval(task['id'], pending['approval']['token'], True, 'telegram:owner')
+
+
+class SecretCaptureTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db = self.root / "control.sqlite3"
+        self.secrets = Secrets(self.root)
+        self.plane = ControlPlane(self.db)
+        self.capture = SecretCaptureService(self.secrets, self.plane.voice_secrets)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_capture_is_bound_to_private_identity_and_is_not_persisted_in_control_store(self):
+        request = self.plane.ports.pixy.request_secret(
+            kind="api_key", env_key="GEMINI_API_KEY", provider="gemini",
+            purpose="Proveedor LLM", user_id="owner", chat_id="chat",
+        )
+        receipt = self.capture.capture("/api", "marker-value", "owner", "chat")
+        self.assertTrue(receipt.startswith("secret_"))
+        self.assertEqual(self.secrets.get("GEMINI_API_KEY"), "marker-value")
+        with self.assertRaises(PermissionError):
+            self.capture.capture("/api", "other-value", "owner", "chat")
+        self.assertNotIn("marker-value", str(self.plane.voice_secrets.outbox()))
+        self.assertNotIn("marker-value", request["request_id"])
+
+    def test_ambiguous_or_wrong_identity_does_not_select_a_request(self):
+        self.plane.ports.pixy.request_secret(
+            kind="password", env_key="SERVICE_PASSWORD", provider="service",
+            purpose="Servicio", user_id="owner", chat_id="chat",
+        )
+        self.plane.ports.pixy.request_secret(
+            kind="password", env_key="OTHER_PASSWORD", provider="other",
+            purpose="Otro servicio", user_id="owner", chat_id="chat",
+        )
+        with self.assertRaises(PermissionError):
+            self.capture.capture("/pas", "value", "owner", "chat")
+        with self.assertRaises(PermissionError):
+            self.capture.capture("/pas", "value", "attacker", "chat")
+
+    def test_rotation_uses_expected_file_version(self):
+        first = self.plane.ports.pixy.request_secret(
+            kind="api_key", env_key="OPENAI_API_KEY", provider="openai",
+            purpose="Proveedor", user_id="owner", chat_id="chat",
+        )
+        self.capture.capture("/api", "first", "owner", "chat")
+        second = self.plane.ports.pixy.request_secret(
+            kind="api_key", env_key="OPENAI_API_KEY", provider="openai",
+            purpose="Rotación", user_id="owner", chat_id="chat", expected_version=1,
+        )
+        self.capture.capture("/api", "second", "owner", "chat")
+        self.assertEqual(self.secrets.get("OPENAI_API_KEY"), "second")
+        self.assertEqual(self.plane.voice_secrets.outbox()[0]["request_id"], first["request_id"])
+        self.assertEqual(len(self.plane.voice_secrets.outbox()), 2)
+
+    def test_outbox_receipt_can_be_delivered_and_acknowledged_after_restart(self):
+        self.plane.ports.pixy.request_secret(
+            kind="username", env_key="SERVICE_USER", provider="service",
+            purpose="Servicio", user_id="owner", chat_id="chat",
+        )
+        self.capture.capture("/us", "carlos", "owner", "chat")
+        delivered = []
+        self.capture.flush(delivered.append)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(self.plane.voice_secrets.outbox(), [])
+
+    def test_restart_reconciles_write_before_receipt_without_resending_value(self):
+        request = self.plane.ports.pixy.request_secret(
+            kind="api_key", env_key="RECONCILE_API_KEY", provider="service",
+            purpose="Servicio", user_id="owner", chat_id="chat",
+        )
+        self.plane.voice_secrets.capture(request["request_id"], "owner", "chat", "api_key")
+        self.secrets.put("RECONCILE_API_KEY", "marker", 0)
+        receipt = self.capture.capture("/api", "not-used", "owner", "chat")
+        self.assertTrue(receipt.startswith("secret_"))
+        self.assertEqual(len(self.plane.voice_secrets.outbox()), 1)
 
 
 class ExecutionAuthorityTests(Fixture):
@@ -269,3 +408,53 @@ class AgentSupervisionTests(Fixture):
         reply = command(self.manager, 'owner:stop-all', '/stop')
         self.assertIn('Cancelación solicitada', reply)
         self.proxy.cancel.assert_called_once_with(task['execution_id'])
+
+
+class PixyPortTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.plane = ControlPlane(self.state.db_path)
+        self.manager.pixy.authorizations = self.plane.ports.pixy
+        self.sid = self.c.conversations.session('owner', 'owner')
+
+    def test_pixy_port_get_and_get_by_trace(self):
+        """PixyPort must expose get and get_by_trace from underlying store."""
+        pixy_port = self.plane.ports.pixy
+        self.assertIsInstance(pixy_port, PixyPort)
+        
+        case_id = 'case-20261029' + 'a' * 8
+        auth = pixy_port.issue(case_id, ['DockerRestart'], 'core', 'hash123', 'telegram:test')
+        auth_id = auth['authorization_id']
+        self.assertTrue(auth_id.startswith('auth_'))
+
+        fetched = pixy_port.get(auth_id)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched['authorization_id'], auth_id)
+        self.assertEqual(fetched['status'], 'pending')
+        self.assertEqual(fetched['plan_hash'], 'hash123')
+
+        by_trace = pixy_port.get_by_trace(auth.get('trace_id') or case_id)
+        self.assertIsNotNone(by_trace)
+        self.assertEqual(by_trace['authorization_id'], auth_id)
+
+        self.assertIsNone(pixy_port.get('auth_nonexistent'))
+
+    def test_answer_question_with_pixy_port(self):
+        """Verify Coordinator.answer_question succeeds when manager.pixy.authorizations is PixyPort."""
+        self.manager.pixy.direct_response = Mock(return_value='Operación aprobada por Pixy')
+
+        case_id = 'case-20261029' + 'b' * 8
+        auth = self.plane.ports.pixy.issue(case_id, ['DockerRestart'], 'core', 'hash_abc', 'telegram:123')
+        qid = self.c.conversations.question(self.sid, 'authorization', auth['authorization_id'], 'hash_abc', 'pending')
+        self.c.conversations.delivered(self.sid, 'deliv-test-01', '¿Apruebas?', question_id=qid)
+
+        question = self.c.conversations.pending(self.sid)[0]
+        res = self.c.answer_question('telegram:123', question, 'Y', self.sid)
+        self.assertIsInstance(res, ReplyResult)
+        self.assertTrue(res.handled)
+        self.assertEqual(res.text, 'Operación aprobada por Pixy')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
