@@ -45,7 +45,13 @@ Khai opera mediante órganos especializados con responsabilidades y límites est
 - **Mind / Brain:** Mind interpreta el lenguaje natural extrayendo la intención (`Intent`), la capacidad requerida y el proveedor opcional. Incorpora **Brain** (`app/mind/brain/`), que actúa como la fachada unificada de razonamiento, selección de modelos, controlador de VM Spot (`ModelController`) y orquestador de la cascada de inferencia (`high > mid > low > nano`).
 - **Hand:** Ciclo activo de herramientas persistente; investiga, genera código, valida esquemas y ejecuta órdenes en contenedores seguros.
 - **Pixy:** Custodia de gobernanza, autoridad, secretos y contratos; solicita confirmación binaria (`y`/`n`) y emite `DecisionReceipt`.
-- **Heart:** Diagnóstico objetivo de fallos reiterados apoyado en telemetría real y lectura de logs del contenedor vía `CoreEyes`.
+- **Heart:** Diagnóstico objetivo de fallos reiterados apoyado en telemetría real y lectura de logs del contenedor vía `CoreEyes`. Las consultas sobre transiciones de modelo no se vinculan a una tarea arbitraria; sin telemetría correlacionada se informa evidencia insuficiente sin generar un plan de reparación ajeno.
+
+La recuperación de tareas distingue postcondiciones verificadas, entrega de una respuesta conversacional confirmada y evidencia insuficiente. La entrega no verifica la calidad de la respuesta. Las plantillas de Hand son propuestas no aprobadas y el lector de Voice acepta solo URLs explícitas del propietario, con límites y contenido no confiable. El diseño pendiente de continuidad con nano está en `docs/MODEL_TRANSITIONS.md`.
+
+El candidato `skills/web-search` llama a `brave_search.search` mediante Voice y devuelve resultados estructurados. Incluye SkillSpec, código sin dependencias y descriptor para Brave Search API. Voice resuelve `BRAVE_SEARCH_API_KEY` y la envía mediante `X-Subscription-Token`; el worker no recibe el secreto. El catálogo requiere revisión, autorización y ejecución verificada antes de activar la skill.
+
+La investigación de infraestructura de Hand usa `config/research.yaml` mediante `ResearchSearch` y el transporte existente de `ExternalGateway`: DNS público fijado, TLS, límites de tiempo, tamaño y frecuencia. El proveedor se declara en configuración; no se sustituyen proveedores al fallar. No modifica la inferencia de nano ni las preferencias de búsqueda del usuario. El candidato anterior de Google y su plantilla de descriptor fueron retirados del código local; los registros históricos de producción permanecen pendientes de migración.
 - **Voice:** Concentrador único de conectividad externa con verificación TLS estricta, DNS pineado y aislamiento absoluto de secretos (`secrets.env`).
 - **Dreams:** Persiste notas de episodios (`episode_notes`), consolida experiencias y formula recomendaciones de evolución de catálogo.
 
@@ -141,6 +147,8 @@ Cada órgano accede a través de un puerto formal con operaciones de escritura r
   - `khai_docker_proxy` (controlador seguro del socket de Docker en `:8001`).
 
 ### Procedimiento de Despliegue:
+La transferencia de secretos actualiza exclusivamente la clave necesaria en `data/voice/secrets.env`, conservando las demás credenciales y sin incluir valores en comandos, Git, logs o imágenes. La imagen excluye `data/` y archivos `.env`. Tras reconstruir el Core, verificar `/health`, SQLite y una operación real del servicio configurado. Una skill candidata solo entra al catálogo después de revisión de Pixy, ejecución aislada y evidencia del resultado.
+
 1. Conectar por SSH a `carlos@20.237.211.250`.
 2. Actualizar código fuente: `cd /opt/khai && git pull origin main`.
 3. Reconstruir y reiniciar contenedores: `sudo docker compose up -d --build bot`.

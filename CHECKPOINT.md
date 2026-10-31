@@ -1,5 +1,23 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Despliegue autorizado del 31 de octubre de 2026
+- Preparación: suite local verificada con 273 pruebas y 22 subpruebas aprobadas. La clave de Brave fue configurada por el propietario en el archivo local ignorado por Git; se transfiere exclusivamente a Voice, sin incluirla en código o imágenes.
+- Alcance: integración Brave/web-search, herramientas básicas de Hand, diagnóstico acotado de Heart, verificación por evidencia y mensajes deterministas de Pixy. La continuidad mediante nano y transiciones cancelables sigue como diseño pendiente.
+- Validación prevista en producción: salud HTTPS, integridad SQLite, consulta real de Brave y ejecución aislada de la skill con recibos antes de promoverla. Estado del despliegue y evidencias por registrar al finalizar.
+
+## Trabajo local del 31 de octubre de 2026
+- Política acordada de continuidad: conservar el modelo activo cuando pueda servir, usar nano como puente cuando sea necesario; si nano falla, informar y solicitar al usuario un perfil alternativo. Diseño pendiente de implementación.
+- El candidato Google se eliminó del repositorio local y fue sustituido por `skills/web-search`, con Brave como proveedor explícito. Incluye código, SkillSpec y descriptor; pendiente clave, revisión de Pixy y búsqueda real verificada antes de activación.
+- El descriptor histórico `google_custom_search.list` v1 aprobado en producción permite `key` como parámetro y no contiene referencia de credencial. No usarlo para pasar claves desde el worker: contradice la frontera de secretos de Voice. Su propuesta local de reemplazo se retiró al elegir Brave; los registros históricos del servidor no se han modificado.
+- Diseño propuesto de continuidad con nano como puente y transiciones cancelables: `docs/MODEL_TRANSITIONS.md`; aún no implementado.
+- Heart distingue postcondición verificada, entrega de conversación confirmada y evidencia insuficiente; Pixy usa texto determinista de aprobación. El fallo de cascada notificado no repite el último error ni la conexión nano.
+- Hand incorpora comprobación sintáctica sin ejecutar, plantillas de descriptores no aprobadas y lectura acotada de URLs HTTPS proporcionadas por el propietario. Su búsqueda de infraestructura usa Brave mediante `config/research.yaml` y el transporte de Voice, con `BRAVE_SEARCH_API_KEY`. Se retiraron Grounding y los respaldos de buscadores del método `web_search`; Gemini sigue disponible como inferencia nano. No se han activado skills ni desplegado estos cambios en producción.
+- La plantilla de descriptor de Google se sustituyó por Brave. La configuración de búsqueda de infraestructura autorizada no convierte una skill instalada en predeterminada para el usuario. Los errores de clave, cuota o servicio se propagan sin cambiar de proveedor.
+- El gestor dinámico de dependencias y el parser multiformato aprobados como opcionales siguen pendientes. El comprobador actual usa la biblioteca estándar y no resuelve imports ni sustituye un analizador completo.
+- Heart no vincula consultas sobre cambios de modelo o conexión a una tarea reciente no relacionada. Sin telemetría de transición vinculada, informa evidencia insuficiente y no propone reparación; Pixy presenta ese resultado de forma determinista. Pendiente desplegar y validar en producción.
+- Producción consultada en solo lectura: catálogo `skills_library` vacío; `google-search-skill` v1 y v2 en borrador, con descriptores `google_custom_search` aprobados. Esto no acredita una skill activa o una búsqueda verificada.
+- Pendiente diseñar transiciones cancelables con servicio anterior disponible durante el arranque, telemetría correlacionada y control de costos. El acuerdo histórico de herramientas primitivas está en el checkpoint del commit `b183cd5`; varias quedaron pendientes.
+
 **Fecha de referencia:** 30 de octubre de 2026.  
 **Entorno de ejecución:** Windows PowerShell (Control y Desarrollo) / Linux Azure (Producción).  
 **Servidor Azure:**

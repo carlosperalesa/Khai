@@ -41,6 +41,47 @@ def skill(skill_id, inputs, outputs, services=None):
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_web_search_candidate_uses_voice_and_normalizes_results(self):
+        import contextlib
+        import io
+        import runpy
+        import sys
+        import types
+        root = Path(__file__).resolve().parents[1] / 'skills' / 'web-search'
+        descriptor = json.loads((root / 'service.json').read_text(encoding='utf-8'))
+        from app.voice.gateway.service_registry import validate_descriptor
+        validate_descriptor(descriptor)
+        validate_skill_spec(json.loads((root / 'skill.json').read_text(encoding='utf-8')))
+        gateway = types.ModuleType('khai_gateway')
+        gateway.request = Mock(return_value={'web': {'results': [
+            {'title': 'Ejemplo', 'url': 'https://example.org/', 'description': 'Descripción'},
+            {'title': 'Inválido', 'url': 'javascript:alert(1)'}]}})
+        inputs = types.ModuleType('khai_input')
+        inputs.params = {'query': 'ejemplo'}
+        output = io.StringIO()
+        with patch.dict(sys.modules, {'khai_gateway': gateway, 'khai_input': inputs}), contextlib.redirect_stdout(output):
+            runpy.run_path(str(root / 'app' / 'main.py'), run_name='__main__')
+        gateway.request.assert_called_once_with('brave_search', 'search',
+                                                {'q': 'ejemplo', 'count': 8})
+        self.assertEqual(json.loads(output.getvalue())['provider'], 'brave')
+        self.assertEqual(json.loads(output.getvalue())['results'], [
+            {'title': 'Ejemplo', 'url': 'https://example.org/', 'description': 'Descripción'}])
+
+    def test_offline_primitives_and_owner_url_boundary(self):
+        from app.hand.primitives import check_python, descriptor_seed
+        from app.voice.gateway.document_reader import read_public_document
+        self.assertFalse(check_python('def broken(')['valid'])
+        self.assertEqual(check_python('import requests')['external_imports'], ['requests'])
+        for name in ('brave', 'github', 'open_meteo'):
+            seed = descriptor_seed(name)
+            self.assertEqual(seed['status'], 'unreviewed_template')
+            from app.voice.gateway.service_registry import validate_descriptor
+            validate_descriptor(seed['descriptor'])
+        with self.assertRaises(PermissionError):
+            read_public_document('https://example.com', [])
+        with self.assertRaises(PermissionError):
+            read_public_document('http://localhost', ['http://localhost'])
+
     def test_network_task_waits_for_pixy_then_resumes_same_task(self):
         from app.bootstrap import ModuleManager
         from app.mind.coordinator import Coordinator

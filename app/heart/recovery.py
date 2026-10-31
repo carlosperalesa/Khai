@@ -235,11 +235,16 @@ class Recovery:
         requested_ids = re.findall(r'\btask_[a-f0-9]{32}\b', str(question))
         if requested_ids:
             candidates = [task for task in tasks if task.get('id') in requested_ids]
+        elif re.search(r'\b(?:modelo|modelos|modo|modos|conexi[oó]n|transici[oó]n|brain)\b', question, re.IGNORECASE):
+            candidates = []
+            evidence['incident_scope'] = 'model_transition'
         elif re.search(r'(?:[úu]ltim[oa].*(?:error|fallo|fallid)|(?:error|fallo|fallid).*[úu]ltim[oa])',
                        question, flags=re.IGNORECASE):
             candidates = [task for task in tasks if task.get('state') in {'FAILED', 'EXHAUSTED'}]
-        else:
+        elif re.search(r'\btarea\b', question, re.IGNORECASE):
             candidates = tasks
+        else:
+            candidates = []
         evidence['focus_task'] = max(candidates, key=lambda task: task.get('created_at') or 0) if candidates else None
         diagnosis = self.diagnose(evidence)
         case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, evidence=evidence, diagnosis=diagnosis)
@@ -339,6 +344,15 @@ class Recovery:
 
         latest_failed = None
         focus_task = evidence.get('focus_task')
+        if evidence.get('incident_scope') == 'model_transition' and not failure_override:
+            # Generic container health and unrelated task failures cannot establish
+            # the cause of a model transition. Do not propose an unrelated repair.
+            return {'status': 'unknown', 'findings': [{
+                'code': 'model_transition_unobserved', 'severity': 'warning',
+                'detail': ('No hay evidencia de transición de modelo vinculada a esta consulta; '
+                           'se requiere telemetría de Brain para identificar el incidente y su causa.'),
+                'remedy': None,
+            }]}
         if failure_override:
             cause_code = failure_override.get('cause_code', 'syntax_or_code')
             detail = failure_override.get('detail', '')
@@ -691,7 +705,7 @@ class Recovery:
                         break
             coord = getattr(self, 'coordinator', None) or (getattr(self.hand, 'coordinator', None) if hasattr(self, 'hand') else None)
             if not coord:
-                return self._move(case_id, 'FAILED', expected={'VERIFYING'}, error='Coordinador no disponible para verificación.')
+                return self._move(case_id, 'UNKNOWN', expected={'VERIFYING'}, error='Coordinador no disponible para verificación.')
             current_task = coord.store.get(tid)
             if not current_task:
                 return self._move(case_id, 'UNKNOWN', expected={'VERIFYING'}, error=f'Tarea {tid} no encontrada.')
@@ -704,6 +718,24 @@ class Recovery:
             is_new_attempt = curr_attempt > prev_attempt or (new_execution is not None and new_execution != prev_execution)
             v = current_task.get('verification') or current_task.get('machine_verification')
             v_success = isinstance(v, dict) and v.get('success') is True
+            v_failed = isinstance(v, dict) and v.get('success') is False
+            chat_delivery = False
+            if current_task.get('routing_action') == 'GENERAL_CHAT' and is_new_attempt:
+                reply = (current_task.get('routing_intent') or {}).get('reply')
+                sid = current_task.get('conversation_id')
+                if isinstance(reply, str) and reply.strip() and sid:
+                    with connection(self.path) as conn:
+                        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                        if {'voice_outbox', 'conversation_messages'} <= tables:
+                            row = conn.execute('''SELECT o.message_ids FROM conversation_messages m
+                                JOIN voice_outbox o ON o.delivery_id=m.source
+                                WHERE m.conversation_id=? AND m.task_id=? AND m.role='assistant'
+                                AND m.content=? AND m.created_at>=? AND o.status='delivered'
+                                ORDER BY m.created_at DESC LIMIT 1''',
+                                (sid, tid, reply, case['created_at'])).fetchone()
+                            if row:
+                                ids = json.loads(row['message_ids'] or '[]')
+                                chat_delivery = bool(ids) and all(type(i) is int for i in ids)
             checks = {
                 'task_state': t_state,
                 'verified_success': v_success,
@@ -711,13 +743,17 @@ class Recovery:
                 'is_new_attempt': is_new_attempt,
                 'attempt_number': curr_attempt,
                 'execution_id': new_execution,
+                'chat_delivery_confirmed': chat_delivery,
             }
-            if t_state == 'COMPLETED' and v_success and is_new_attempt:
+            if t_state == 'COMPLETED' and is_new_attempt and (v_success or (chat_delivery and not v_failed)):
+                checks['verification_scope'] = 'delivery_only' if chat_delivery and not v_success else 'postcondition'
                 outcome, error = 'RECOVERED', None
-            elif t_state == 'COMPLETED' and not v_success:
-                outcome, error = 'FAILED', f'Tarea {tid} completada pero la verificación de éxito falló o fue omitida.'
             elif t_state == 'COMPLETED' and not is_new_attempt:
-                outcome, error = 'FAILED', f'Tarea {tid} completada pero sin evidencia del nuevo intento de recuperación.'
+                outcome, error = 'UNKNOWN', f'Tarea {tid} completada pero sin evidencia del nuevo intento de recuperación.'
+            elif t_state == 'COMPLETED' and v_failed:
+                outcome, error = 'FAILED', f'Tarea {tid} completada pero no satisfizo la verificación de resultado.'
+            elif t_state == 'COMPLETED':
+                outcome, error = 'UNKNOWN', f'Tarea {tid} completada sin evidencia suficiente de entrega o de postcondiciones.'
             elif t_state in {'FAILED', 'EXHAUSTED', 'CANCELLED'}:
                 outcome, error = 'FAILED', f'Tarea {tid} terminó en estado {t_state}.'
             else:

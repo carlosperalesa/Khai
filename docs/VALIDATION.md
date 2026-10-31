@@ -9,6 +9,8 @@ La salud del sistema y las suites de pruebas unitarias acreditan integridad estr
 
 ## Recorrido Canónico en Producción
 
+Actualización del 31 de octubre: la nueva capacidad de búsqueda es el candidato `skills/web-search` con Brave. Para validar la nueva implementación: configurar `BRAVE_SEARCH_API_KEY` exclusivamente en Voice, revisar/aprobar su descriptor y código con Pixy, ejecutar una consulta real y verificar el recibo de Voice y los campos título, URL y descripción antes de promoverla al catálogo. Repetir la consulta debe reutilizar la skill; una falla de Brave no debe activar otro proveedor. La preferencia de búsqueda del usuario requiere aprobación aparte. Los pasos siguientes y la evidencia del 30 de octubre documentan el recorrido histórico de Google y no acreditan la nueva integración.
+
 1. **Paso 1 (Creación con Gobernanza):** Inyectar:  
    `crea una skill para conectarse a internet y buscar en Google. Cuando diga "busca en Google <consulta>", devuelve una lista con título, enlace y descripción de cada resultado`
 2. **Paso 2 (Observabilidad y Autorización):** Observar Mind, Hand, Pixy, Heart, Voice y Dreams. Ante secreto, permiso o decisión, detenerse y registrar texto exacto, motivo y opciones (`y`/`n`).

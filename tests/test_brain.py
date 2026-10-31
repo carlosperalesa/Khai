@@ -242,6 +242,20 @@ class BrainTests(unittest.TestCase):
             self.assertEqual(ctrl.get_active_mode(), 'nano')
             ctrl._delete_instance.assert_called_once_with(wait=True)
 
+    def test_failed_cascade_notifies_each_failure_and_nano_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctrl = DolphinController(tmp, {})
+            ctrl.start = MagicMock(side_effect=TimeoutError('cold start'))
+            ctrl._rollback_activation = MagicMock()
+            notify = MagicMock()
+            with self.assertRaises(ValueError) as raised:
+                ctrl.set_mode('mid', notifier=notify)
+            sent = [call.args[0] for call in notify.call_args_list]
+            self.assertEqual(sum('Modo mid falló' in s for s in sent), 1)
+            self.assertEqual(sum('Modo low falló' in s for s in sent), 1)
+            self.assertFalse(any('Modo nano conectado' in s for s in sent))
+            self.assertEqual(str(raised.exception), '[Modo nano conectado]')
+
     def test_dolphin_warmup_uses_minimal_inference(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctrl = DolphinController(tmp, {

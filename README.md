@@ -2,6 +2,14 @@
 
 Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente.
 
+Heart evita asociar consultas sobre transiciones de modelo a tareas no relacionadas; si falta telemetría vinculada, Pixy comunica que la evidencia es insuficiente.
+
+El diseño propuesto para conservar la conversación mediante nano durante cambios de VM está en [`docs/MODEL_TRANSITIONS.md`](./docs/MODEL_TRANSITIONS.md); todavía no está implementado. Hand dispone de herramientas locales de análisis sintáctico y plantillas no aprobadas, y de lectura de URLs HTTPS explícitas a través de Voice.
+
+La skill candidata [`web-search`](./skills/web-search/SKILL.md) usa Brave Search API mediante Voice y devuelve título, URL y descripción. Sustituye al candidato de Google, requiere `BRAVE_SEARCH_API_KEY` en `data/voice/secrets.env` y todavía necesita revisión y una ejecución real verificada para activarse. La investigación de Hand usa el mismo servicio declarado en `config/research.yaml`, sin respaldo automático a Google u otros buscadores. Esta configuración de infraestructura no establece una preferencia predeterminada del usuario.
+
+El despliegue autorizado del 31 de octubre incluye las mejoras de diagnóstico y verificación, las herramientas básicas de Hand y Brave. Sus comprobaciones y estado se registran en `CHECKPOINT.md` y `docs/VALIDATION.md`; las transiciones cancelables entre modelos permanecen pendientes de implementación.
+
 La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (264 pruebas unitarias), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
 
 ---

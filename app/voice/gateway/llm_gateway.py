@@ -4,6 +4,7 @@ import logging
 import requests
 import json
 import uuid
+import threading
 from typing import Dict
 from app.pixy.budget import current_budget
 
@@ -18,6 +19,10 @@ class LLMContentRejected(ValueError):
 
 class LLMManager:
     """Fachada global del sistema LLM con Unified Fallback."""
+
+    def read_document(self, url, allowed_urls):
+        from app.voice.gateway.document_reader import read_public_document
+        return read_public_document(url, allowed_urls)
     
     def __init__(self, config_dir: str, data_dir: str, memory=None, secrets=None, provider_db=None, dolphin=None):
         self.secrets = secrets
@@ -30,6 +35,7 @@ class LLMManager:
             from app.kernel.database import adopt_schema
             adopt_schema(provider_db,'provider-status',['provider_status'])
         self.config_dir = config_dir
+        self._research_lock = threading.RLock()
         self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
         if memory:
@@ -544,151 +550,14 @@ class LLMManager:
         return {'content': content, 'tool_calls': calls,
                 'provider': 'dolphin', 'model': payload['model']}
 
-    @staticmethod
-    def _fallback_web_search(query: str, limit: int = 8) -> list:
-        import urllib.request
-        import urllib.parse
-        import re
-        import html
-        import json
-
-        results = []
-
-        # 1. DuckDuckGo HTML
-        try:
-            url = 'https://html.duckduckgo.com/html/?q=' + urllib.parse.quote_plus(query)
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            })
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                if resp.status == 200:
-                    content = resp.read().decode('utf-8', errors='ignore')
-                    blocks = re.findall(
-                        r'<div[^>]*class="[^"]*(?:results_links|result\b)[^"]*"[^>]*>(.*?)(?=<div[^>]*class="[^"]*(?:results_links|result\b)|$)',
-                        content,
-                        re.DOTALL,
-                    )
-                    for b in blocks:
-                        m_a = re.search(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', b)
-                        if not m_a:
-                            continue
-                        raw_url = m_a.group(1)
-                        if 'uddg=' in raw_url:
-                            m_u = re.search(r'uddg=([^&]+)', raw_url)
-                            raw_url = urllib.parse.unquote(m_u.group(1)) if m_u else raw_url
-                        title = html.unescape(re.sub(r'<[^>]+>', '', m_a.group(2))).strip()
-                        m_s = re.search(r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', b)
-                        snippet = html.unescape(re.sub(r'<[^>]+>', '', m_s.group(1))).strip() if m_s else ''
-                        if raw_url.startswith('http') and title:
-                            results.append({'title': title, 'url': raw_url, 'description': snippet})
-                            if len(results) >= limit:
-                                break
-        except Exception:
-            pass
-
-        # Progressive candidate queries for Wikipedia and GitHub
-        clean_q = re.sub(r'\bsite:\S+', '', query).strip()
-        site_match = re.search(r'\bsite:([a-zA-Z0-9.-]+)', query)
-        site_terms = []
-        if site_match:
-            domain = site_match.group(1)
-            site_terms = [p for p in domain.split('.') if p not in {'com', 'org', 'net', 'io', 'gov', 'www'}]
-        candidates = []
-        if clean_q:
-            candidates.append(clean_q)
-        words = [w for w in (clean_q.split() if clean_q else []) if len(w) > 2]
-        if len(words) > 3:
-            candidates.append(' '.join(words[:3]))
-        if site_terms:
-            candidates.append(' '.join(site_terms + words[:2]))
-            candidates.append(' '.join(site_terms))
-        if words and words[0] not in candidates:
-            candidates.append(words[0])
-
-        # 2. Wikipedia Fulltext Search
-        for q_term in candidates:
-            if len(results) >= limit:
-                break
-            try:
-                wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote_plus(q_term)}&utf8=&format=json"
-                req_w = urllib.request.Request(wiki_url, headers={'User-Agent': 'Khai/1.0 (https://github.com/carlosperalesa/Khai)'})
-                with urllib.request.urlopen(req_w, timeout=6) as r_w:
-                    data = json.loads(r_w.read().decode('utf-8'))
-                    for item in data.get('query', {}).get('search', []):
-                        title = item.get('title')
-                        snippet = html.unescape(re.sub(r'<[^>]+>', '', item.get('snippet', ''))).strip()
-                        url = 'https://en.wikipedia.org/wiki/' + urllib.parse.quote(title.replace(' ', '_'))
-                        if title and url and not any(r['url'] == url for r in results):
-                            results.append({'title': title, 'url': url, 'description': snippet})
-                            if len(results) >= limit:
-                                break
-            except Exception:
-                pass
-
-        # 3. GitHub Search API
-        for q_term in candidates:
-            if len(results) >= limit:
-                break
-            try:
-                gh_url = f"https://api.github.com/search/repositories?q={urllib.parse.quote_plus(q_term)}&per_page={limit}"
-                req_gh = urllib.request.Request(gh_url, headers={'User-Agent': 'Khai/1.0', 'Accept': 'application/vnd.github.v3+json'})
-                with urllib.request.urlopen(req_gh, timeout=6) as r_gh:
-                    data = json.loads(r_gh.read().decode('utf-8'))
-                    for item in data.get('items', []):
-                        name = item.get('full_name') or item.get('name')
-                        url = item.get('html_url')
-                        desc = item.get('description') or ''
-                        if name and url and not any(r['url'] == url for r in results):
-                            results.append({'title': name, 'url': url, 'description': desc})
-                            if len(results) >= limit:
-                                break
-            except Exception:
-                pass
-
-        return results[:limit]
-
     def web_search(self, query, *, limit=8):
-        """Platform research. Responses without sources are failures."""
-        if not isinstance(query, str) or not query.strip() or len(query) > 500:
-            raise ValueError('Invalid research query')
-        status, now = self._load_status(), time.time()
-        gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini' and now > status.get(item['id'], 0)]
-        if not gemini_pool:
-            gemini_pool = [item for item in self.api_keys_pool if item['type'] == 'gemini']
-        if gemini_pool:
-            model = os.getenv('KHAI_RESEARCH_MODEL', DEFAULT_GEMINI_MODEL)
-            payload = {'contents': [{'parts': [{'text': query}]}], 'tools': [{'googleSearch': {}}],
-                       'generationConfig': {'maxOutputTokens': 2048, 'temperature': 0.1}}
-            for item in gemini_pool:
-                try:
-                    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={item["key"]}'
-                    response = requests.post(url, json=payload, timeout=60)
-                    response.raise_for_status()
-                    candidate = (response.json().get('candidates') or [{}])[0]
-                    results = []
-                    for chunk in (candidate.get('groundingMetadata') or {}).get('groundingChunks') or []:
-                        web = chunk.get('web') or {}
-                        if web.get('uri') and web.get('title'):
-                            results.append({'title': web['title'], 'url': web['uri'], 'description': ''})
-                    if results:
-                        return {'provider': 'google', 'query': query,
-                                'results': results[:max(1, min(10, int(limit)))]}
-                except Exception as exc:
-                    code = getattr(getattr(exc, 'response', None), 'status_code', None)
-                    if code in {401, 403}:
-                        self._mark_key_failed(item['id'], cooldown=300)
-
-        # Fallback de búsqueda web directa si Google Grounding falla o agota cuota
-        try:
-            results = self._fallback_web_search(query, limit=limit)
-            if results:
-                return {'provider': 'duckduckgo', 'query': query,
-                        'results': results[:max(1, min(10, int(limit)))]}
-        except Exception as exc_fb:
-            logger.warning('Búsqueda web de respaldo falló (%s)', type(exc_fb).__name__)
-
-        raise ValueError('El proveedor de investigación no entregó fuentes verificables')
+        """Platform research uses the configured Voice service without fallback."""
+        from app.voice.gateway.research_search import ResearchSearch
+        if not hasattr(self, '_research_search'):
+            with self._research_lock:
+                if not hasattr(self, '_research_search'):
+                    self._research_search = ResearchSearch(self.config_dir, self.secrets or os.environ)
+        return self._research_search.search(query, limit)
 
     def _generate_dolphin(self, prompt: str, endpoint: str, kwargs: Dict = None) -> str:
         """Ejecuta inferencia en el nodo privado Dolphin (Ollama) con soporte texto y JSON."""

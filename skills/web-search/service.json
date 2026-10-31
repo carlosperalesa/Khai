@@ -1,0 +1,17 @@
+{
+  "service_id": "brave_search",
+  "operation": "search",
+  "version": "v1",
+  "url": "https://api.search.brave.com/res/v1/web/search",
+  "method": "GET",
+  "parameters": ["q", "count"],
+  "content_types": ["application/json"],
+  "max_bytes": 262144,
+  "timeout": 15,
+  "per_minute": 10,
+  "effect": "read",
+  "credential_ref": "BRAVE_SEARCH_API_KEY",
+  "credential_header": "X-Subscription-Token",
+  "credential_prefix": "",
+  "effect_contract": null
+}

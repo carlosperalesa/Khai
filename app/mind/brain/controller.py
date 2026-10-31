@@ -433,7 +433,9 @@ class ModelController:
         self._rollback_activation()
         reason = _format_error_reason(last_exc) if last_exc else 'no disponible'
         if notifier is not None:
-            notifier("[Modo nano conectado]")
+            # Failures were already emitted above; the command reply is the
+            # single notification of the resulting mode.
+            raise ValueError("[Modo nano conectado]")
         raise ValueError(
             f"[Modo {mode} falló por: {reason}]\n[Modo nano conectado]\n"
             f"Khai continúa con Gemini."

@@ -1,0 +1,23 @@
+# Platform research provider selected explicitly by the owner.
+# This does not activate a catalog skill or set a user's default provider.
+provider: brave
+service: brave_search
+operation: search
+result_path: [web, results]
+services:
+  brave_search:
+    operations:
+      search:
+        version: v1
+        url: https://api.search.brave.com/res/v1/web/search
+        method: GET
+        parameters: [q, count]
+        content_types: [application/json]
+        max_bytes: 262144
+        timeout: 15
+        per_minute: 10
+        effect: read
+        credential: BRAVE_SEARCH_API_KEY
+        credential_header: X-Subscription-Token
+        credential_prefix: ''
+        effect_contract: null

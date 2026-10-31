@@ -29,6 +29,9 @@ class Brain:
     def web_search(self, query, **kwargs):
         return self._gateway.web_search(query, **kwargs)
 
+    def read_document(self, url, allowed_urls):
+        return self._gateway.read_document(url, allowed_urls)
+
     def test_all_connections(self):
         return self._gateway.test_all_connections()
 

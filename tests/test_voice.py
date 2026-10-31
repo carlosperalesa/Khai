@@ -1,5 +1,6 @@
 """Voice organ tests: mailbox durability, transport facts/HTTP receipts, Telegram gateway, and conversation routing."""
 import tempfile
+import json
 import threading
 import time
 import unittest
@@ -16,6 +17,48 @@ from app.voice.gateway.telegram_gateway import TelegramHandler
 from app.voice.help import HELP_BUTTONS, HELP_TEXT
 from app.voice.mailbox import VoiceMailbox
 from app.voice.voice import command, process_ordinary, urgent_command
+
+
+class ResearchSearchTests(unittest.TestCase):
+    def test_configured_search_uses_voice_and_has_no_provider_fallback(self):
+        from app.voice.gateway.research_search import ResearchSearch
+        root = Path(__file__).resolve().parents[1]
+        search = ResearchSearch(root / 'config', {'BRAVE_SEARCH_API_KEY': 'test-only'})
+        with patch.object(search.gateway, 'request', return_value={
+                'body': json.dumps({'web': {'results': [
+                    {'title': 'Fuente', 'url': 'https://example.org/', 'description': 'Texto'},
+                    {'title': 'Inválido', 'url': 'javascript:alert(1)'}]}}).encode()}) as request:
+            result = search.search('consulta', 3)
+            request.assert_called_once_with('brave_search', 'search', {'q': 'consulta', 'count': 3})
+            self.assertEqual(result['provider'], 'brave')
+            self.assertTrue(result['untrusted'])
+            self.assertEqual(len(result['results']), 1)
+        with patch.object(search.gateway, 'request', side_effect=RuntimeError('HTTP 429')) as request:
+            with self.assertRaisesRegex(RuntimeError, '429'):
+                search.search('consulta')
+            self.assertEqual(request.call_count, 1)
+
+    def test_missing_key_and_invalid_inputs_do_not_reach_transport(self):
+        from app.voice.gateway.research_search import ResearchSearch
+        search = ResearchSearch(Path(__file__).resolve().parents[1] / 'config', {})
+        with patch.object(search.gateway, 'request') as request:
+            with self.assertRaises(PermissionError):
+                search.search('consulta')
+            for query, limit in [('', 8), ('x ' * 76, 8), ('consulta', True), ('consulta', 21)]:
+                with self.subTest(query=query, limit=limit), self.assertRaises(ValueError):
+                    search.search(query, limit)
+            request.assert_not_called()
+
+    def test_search_configuration_matches_skill_descriptor(self):
+        from app.voice.gateway.research_search import ResearchSearch
+        root = Path(__file__).resolve().parents[1]
+        descriptor = json.loads((root / 'skills/web-search/service.json').read_text(encoding='utf-8'))
+        validate_descriptor(descriptor)
+        search = ResearchSearch(root / 'config', {})
+        op = search.gateway.services[descriptor['service_id']]['operations'][descriptor['operation']]
+        for key in ('url', 'method', 'version', 'parameters', 'credential_header', 'credential_prefix'):
+            self.assertEqual(op[key], descriptor[key])
+        self.assertEqual(op['credential'], descriptor['credential_ref'])
 
 
 class VoiceMailboxTests(unittest.TestCase):

@@ -1,0 +1,25 @@
+{
+  "skill_id": "web-search",
+  "description": "Busca en la web con Brave Search y devuelve título, URL y descripción.",
+  "use_cases": ["Buscar documentación o información pública actualizada con Brave"],
+  "capability": "web_search",
+  "provider": "brave",
+  "aliases": ["brave-search", "busqueda-web"],
+  "extraction_templates": ["busca en Brave {query:text}"],
+  "input_schema": {
+    "type": "object",
+    "properties": {"query": {"type": "string"}, "count": {"type": "integer"}},
+    "required": ["query"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {"provider": {"type": "string"}, "results": {"type": "array"}},
+    "required": ["provider", "results"],
+    "additionalProperties": false
+  },
+  "runtime": "SAFE",
+  "dependencies": [],
+  "services": [{"service_id": "brave_search", "operation": "search", "version": "v1"}],
+  "verifier": {"kind": "owner_criterion"}
+}

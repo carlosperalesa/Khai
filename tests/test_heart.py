@@ -175,6 +175,44 @@ class HeartRecoveryTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_task_verification_distinguishes_failure_and_missing_evidence(self):
+        case = {'plan': {'target': 'task', 'task_id': 'task_x',
+                         'task_binding': {'attempt_number': 1}},
+                'execution': {}, 'created_at': 0}
+        self.recovery.get = Mock(return_value=case)
+        self.recovery._move = Mock(side_effect=lambda cid, state, **kw: (state, kw))
+        self.recovery.coordinator = SimpleNamespace(store=Mock())
+        task = {'state': 'COMPLETED', 'attempt_number': 2}
+        self.recovery.coordinator.store.get.return_value = task
+        self.assertEqual(self.recovery.verify('case')[0], 'UNKNOWN')
+        task['verification'] = {'success': False}
+        self.assertEqual(self.recovery.verify('case')[0], 'FAILED')
+        task['verification'] = {'success': True}
+        result = self.recovery.verify('case')
+        self.assertEqual(result[0], 'RECOVERED')
+        self.assertEqual(result[1]['verification']['verification_scope'], 'postcondition')
+
+    def test_chat_verification_requires_matching_delivery_receipt(self):
+        from app.mind.conversation import ConversationStore
+        from app.voice.mailbox import VoiceMailbox
+        conversation = ConversationStore(self.recovery.path)
+        mailbox = VoiceMailbox(self.recovery.path)
+        sid = conversation.session('owner', 'chat')
+        task = {'state': 'COMPLETED', 'attempt_number': 2, 'routing_action': 'GENERAL_CHAT',
+                'routing_intent': {'reply': 'respuesta'}, 'conversation_id': sid}
+        self.recovery.coordinator = SimpleNamespace(store=Mock())
+        self.recovery.coordinator.store.get.return_value = task
+        self.recovery.get = Mock(return_value={'plan': {'target': 'task', 'task_id': 'task_x',
+            'task_binding': {'attempt_number': 1}}, 'execution': {}, 'created_at': 0})
+        self.recovery._move = Mock(side_effect=lambda cid, state, **kw: (state, kw))
+        delivery = mailbox.enqueue('respuesta')
+        self.assertEqual(self.recovery.verify('case')[0], 'UNKNOWN')
+        mailbox.deliver_one(lambda text, meta: {'result': {'message_id': 42}})
+        conversation.delivered(sid, delivery, 'respuesta', task_id='task_x', message_ids=[42])
+        result = self.recovery.verify('case')
+        self.assertEqual(result[0], 'RECOVERED')
+        self.assertEqual(result[1]['verification']['verification_scope'], 'delivery_only')
+
     def test_diagnosis_and_plan_generation(self):
         evidence = {
             'storage': {'vitals': {'ram_percent': 95, 'disk_free': 5 * 1024**3}, 'integrity': {'status': 'ok'}},
@@ -373,6 +411,18 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
         case = self.recovery.open_case('revisa el último error', 'owner:error')
         self.assertEqual(case['diagnosis']['task']['id'], failed_id)
         self.assertEqual(case['plan']['task_id'], failed_id)
+
+    def test_model_incident_does_not_repair_unrelated_failed_task(self):
+        self.senses.evidence.return_value['pixy']['recent_tasks'] = [
+            {'id': 'task_' + '1' * 32, 'request': 'roleplay', 'state': 'FAILED',
+             'created_at': 1, 'error': 'Invalid composition inputs'}]
+        for question in ('revisa los errores de conexión anteriores',
+                         'revisa el último error de cambio de modelo'):
+            case = self.recovery.open_case(question, 'owner:error')
+            self.assertIsNone(case['plan'])
+            self.assertEqual(case['diagnosis']['status'], 'unknown')
+            self.assertEqual(case['diagnosis']['findings'][0]['code'], 'model_transition_unobserved')
+            self.assertNotIn('task', case['diagnosis'])
 
     def test_incident_key_deduplication(self):
         task = {'id': 'task_00000000000000000000000000000001', 'execution_id': 'run_111'}

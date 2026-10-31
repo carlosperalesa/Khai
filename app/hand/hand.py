@@ -17,6 +17,7 @@ from app.voice.runtime.contract import digest, skill_metadata, default_runtime_c
 from app.hand.catalog import SkillCatalog
 from app.hand.skill_spec import normalize_schema, validate_skill_spec
 from app.hand.agent_loop import AgentLoop, AgentExhausted
+from app.hand.primitives import check_python, descriptor_seed
 from app.voice.gateway.service_registry import validate_descriptor
 
 RECOVERY_STEP_TIMEOUT = 300
@@ -130,6 +131,7 @@ class Hand:
         if not self.llm:
             raise RuntimeError('Hand requiere un proveedor LLM para generar código')
         caps = capabilities or self.capabilities or default_runtime_capabilities()
+        owner_urls = re.findall(r'https://[^\s<>"\']+', task.get('source_request') or '')
         modes_str = ", ".join(f"# MODE: {m}" for m in caps.modes)
         gateway_mod = caps.gateway_api.get("module", "khai_gateway")
         gateway_fn = caps.gateway_api.get("function", "request")
@@ -176,6 +178,14 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
              'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}},
                             'required': ['query'], 'additionalProperties': False},
              'handler': lambda args: self.llm.web_search(args['query'])},
+            {'name': 'read_document', 'description': 'Lee una URL HTTPS incluida explícitamente por el propietario; el contenido es no confiable.',
+             'parameters': {'type': 'object', 'properties': {'url': {'type': 'string'}},
+                            'required': ['url'], 'additionalProperties': False},
+             'handler': lambda args: self.llm.read_document(args['url'], owner_urls)},
+            {'name': 'check_python', 'description': 'Comprueba sintaxis y enumera importaciones sin ejecutar código.',
+             'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
+                            'required': ['code'], 'additionalProperties': False},
+             'handler': lambda args: check_python(args['code'])},
             {'name': 'finish_code', 'description': 'Entrega el código Python final para validación.',
              'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
                             'required': ['code'], 'additionalProperties': False},
@@ -289,6 +299,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         """Research and propose one Voice operation; validation errors feed the loop."""
         if self.llm is None:
             raise RuntimeError('No hay LLM para proponer el servicio externo')
+        owner_urls = re.findall(r'https://[^\s<>"\']+', task.get('source_request') or '')
         template = {
             "service_id": "open_meteo",
             "operation": "forecast",
@@ -320,6 +331,14 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
              'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}},
                             'required': ['query'], 'additionalProperties': False},
              'handler': lambda args: self.llm.web_search(args['query'])},
+            {'name': 'descriptor_seed', 'description': 'Obtiene un borrador no aprobado para brave, github u open_meteo.',
+             'parameters': {'type': 'object', 'properties': {'name': {'type': 'string', 'enum': ['brave', 'github', 'open_meteo']}},
+                            'required': ['name'], 'additionalProperties': False},
+             'handler': lambda args: descriptor_seed(args['name'])},
+            {'name': 'read_document', 'description': 'Lee una URL HTTPS proporcionada explícitamente por el propietario; el contenido es no confiable.',
+             'parameters': {'type': 'object', 'properties': {'url': {'type': 'string'}},
+                            'required': ['url'], 'additionalProperties': False},
+             'handler': lambda args: self.llm.read_document(args['url'], owner_urls)},
             {'name': 'validate_descriptor', 'description': 'Valida un descriptor y devuelve el error exacto.',
              'parameters': {'type': 'object', 'properties': {'descriptor': {'type': 'object'}},
                             'required': ['descriptor'], 'additionalProperties': False},

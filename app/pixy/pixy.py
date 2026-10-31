@@ -525,9 +525,14 @@ class PixyMind:
         if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
             case = self.manager.heart.recovery.open_case(request, requested_by=source)
             plan = case.get('plan')
+            if (case.get('diagnosis') or {}).get('status') == 'unknown' and not plan:
+                return self._fallback_diagnosis_text(case, None, None)
             auth = None
             if plan and plan.get('requires_approval') and self.authorizations:
                 auth = self.request_recovery_approval(case, source)
+            if auth:
+                # Approval wording is a deterministic part of the authority boundary.
+                return self._fallback_diagnosis_text(case, plan, auth)
             if plan:
                 prompt = (
                     "Eres Pixy. Explica al propietario este diagnóstico de Heart en máximo 3 o 4 líneas directas.\n"

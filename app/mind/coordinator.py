@@ -1537,6 +1537,8 @@ class Coordinator:
                     cid, state = case['case_id'], case['state']
                     self.manager.heart.recovery.mark_reported(cid)
                     err = f": {case['error']}" if case.get('error') else ""
+                    if (case.get('verification') or {}).get('verification_scope') == 'delivery_only':
+                        err += ': entrega confirmada; la calidad de la respuesta no fue verificada'
                     self.notify(f"Pixy: Caso de recuperación {cid} finalizado con estado {state}{err}.")
             except Exception:
                 logger.exception('Error en ciclo de recuperación de Heart')
