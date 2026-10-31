@@ -20,6 +20,17 @@ from app.voice.voice import command, process_ordinary, urgent_command
 
 
 class DependencyCacheTests(unittest.TestCase):
+    def test_metadata_timeout_is_a_pre_dispatch_failure_and_never_calls_proxy(self):
+        import requests
+        from app.voice.runtime.docker_runtime import DockerRuntime
+        from app.voice.runtime.dependencies import DependencyPreparationError
+        runtime = DockerRuntime()
+        runtime.wheels.prepare = Mock(side_effect=requests.ReadTimeout('fixture'))
+        with patch('app.voice.runtime.docker_runtime.requests.post') as post:
+            with self.assertRaises(DependencyPreparationError):
+                runtime.submit({'dependencies': ['demo==1'], 'network': False})
+        post.assert_not_called()
+
     def test_pinned_wheels_are_verified_reused_and_built_without_network(self):
         from types import SimpleNamespace
         import tarfile

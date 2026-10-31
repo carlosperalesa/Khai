@@ -4,6 +4,10 @@ Actualización del 31 de octubre, en validación: la invocación de búsqueda pa
 
 La migración autorizada del disco de modelos a `pd-balanced` conserva el original para volver atrás. GCP rechazó la creación en `us-west1-a` por falta de capacidad; el avance y las pruebas están en `CHECKPOINT.md`. Brain incorpora telemetría para Heart; la continuidad mediante nano y las transiciones cancelables siguen pendientes.
 
+La copia `pd-balanced` ya está configurada en `us-west1-b`. High sigue agotando la precarga, por lo que se medirán almacenamiento y GPU antes de cambiar el plazo. La recuperación de dependencias ahora distingue un fallo anterior al despacho y permite a Pixy/Heart reanudar el código ya aprobado, conservando la evidencia del intento anterior.
+
+Por decisión del propietario, Cloud Monitoring permanece deshabilitado; la revisión de modelos continúa solo con registros existentes.
+
 Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente.
 
 Heart evita asociar consultas sobre transiciones de modelo a tareas no relacionadas; si falta telemetría vinculada, Pixy comunica que la evidencia es insuficiente.

@@ -1,4 +1,6 @@
 import requests
+import subprocess
+from app.voice.runtime.dependencies import DependencyPreparationError
 from app.voice.runtime.runtime import Runtime
 from app.voice.runtime.contract import proxy_url, proxy_headers
 
@@ -13,7 +15,11 @@ class DockerRuntime(Runtime):
             raise PermissionError('Skills must use Voice Gateway')
         prepared = dict(payload, network=False)
         if payload.get('dependencies'):
-            prepared['dependency_lock'] = self.wheels.prepare(payload['dependencies'])
+            try:
+                prepared['dependency_lock'] = self.wheels.prepare(payload['dependencies'])
+            except (requests.RequestException, ValueError, OSError, subprocess.SubprocessError) as exc:
+                raise DependencyPreparationError('Voice dependency preparation failed before dispatch: '
+                                                 + type(exc).__name__) from exc
         return prepared
 
     def execute(self, payload):

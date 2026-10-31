@@ -15,6 +15,10 @@ PIN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+\-]*')
 MAX_BYTES = 128 * 1024 * 1024
 
 
+class DependencyPreparationError(RuntimeError):
+    """Preparation failed before runtime dispatch; no worker was submitted."""
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 

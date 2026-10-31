@@ -18,6 +18,7 @@ from app.pixy.budget import current_budget, current_goal_revision, current_quest
 from app.mind.conversation import ConversationStore, ReplyResult, current_turn
 from app.pixy.control import ControlStore, InstanceLock, BudgetExceeded, TERMINAL, INITIAL_TASK_BUDGET
 from app.voice.runtime.contract import digest, manifest_from_request, proxy_url, proxy_headers, skill_metadata
+from app.voice.runtime.dependencies import DependencyPreparationError
 from app.mind.verifier import verify_result
 from app.mind.recipe import RevisionPlanner, step_params, step_output
 from app.mind.result_presenter import present_recipe
@@ -2224,7 +2225,19 @@ class Coordinator:
             self.store.update(tid, expected={'READY'}, state='SUBMITTED', execution_id=execution_id,
                               runtime_status='queued', payload=payload)
         elif state == 'SUBMITTED':
-            result = self.proxy.submit(task['payload'])
+            try:
+                result = self.proxy.submit(task['payload'])
+            except DependencyPreparationError as exc:
+                failure = {'status': 'failed', 'stage': 'dependency_preparation',
+                           'dispatched': False, 'error': str(exc)}
+                recovery = getattr(getattr(self.manager, 'heart', None), 'recovery', None)
+                case = recovery.open_incident_case(task, failure) if recovery else None
+                self.store.update(tid, expected={'SUBMITTED'}, state='DIAGNOSING', feedback=failure,
+                                  result=failure, recovery_case_id=case['case_id'] if case else None)
+                self.store.event(tid, 'dependency_preparation_failure', failure)
+                self.notify(f'{tid}: falló la preparación de dependencias antes de lanzar el worker. '
+                            'Diagnóstico delegado a Heart; no se reintenta automáticamente.')
+                return
             self.store.update(tid, expected={'SUBMITTED'}, state='RUNNING', result=result,
                               runtime_status=result.get('status'))
         elif state == 'RUNNING':

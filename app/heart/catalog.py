@@ -13,6 +13,7 @@ ACTIONS = {
     'health_check': {'capability': 'HealthCheck', 'mutating': False, 'targets': {'core', 'proxy'}},
     'retry_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
     'remediate_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
+    'resume_prepared_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
     'create_skill': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
 }
 CAUSE_TAXONOMY = {
@@ -145,6 +146,9 @@ def validate_plan(plan):
                 or len(canonical(proposed)) > 16000):
             raise ValueError('Instrucciones de reparación fuera del contrato')
         core.update(corrective_instruction=instruction, proposed_steps=proposed)
+        if any(s['action'] == 'resume_prepared_task' for s in steps):
+            if steps != [{'action': 'resume_prepared_task', 'target': 'task'}] or proposed:
+                raise ValueError('Resume must preserve the approved artifact without additional actions')
     elif 'task_id' in plan:
         raise ValueError('task_id solo es válido para remediar tareas')
     return core

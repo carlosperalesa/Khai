@@ -578,6 +578,50 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
 
 
 class FullRecoveryCycleIntegrationTests(unittest.TestCase):
+    def test_pre_dispatch_dependency_failure_resumes_exact_approved_artifact(self):
+        from app.bootstrap import ModuleManager
+        from app.mind.coordinator import Coordinator
+        from app.mind.recovery_attempt import build_attempt
+        from app.heart.catalog import validate_plan
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'data'
+            (root/'memory').mkdir(parents=True)
+            (root/'memory'/'agent.md').write_text('Fixture identity', encoding='utf-8')
+            with patch.dict(os.environ, {'KHAI_RUNTIME':'local','TELEGRAM_BOT_TOKEN':'token','TELEGRAM_USER_ID':'owner'}):
+                manager = ModuleManager(data_dir=root)
+                coordinator = Coordinator(manager)
+                manager.coordinator = coordinator; manager.heart.recovery.coordinator = coordinator
+                manager.telegram = Mock()
+                manager.senses.evidence = Mock(return_value={
+                    'storage': {'vitals': {'ram_percent':30,'disk_free':20*1024**3}, 'integrity':{'status':'ok'}},
+                    'container_core':{'running':True},'container_proxy':{'running':True},'core_logs':{'text':'OK'}})
+                failure = {'status':'failed','stage':'dependency_preparation','dispatched':False,'error':'ReadTimeout'}
+                path, digest = manager.hand.snapshot('# MODE: SAFE\nprint(1)')
+                task = coordinator.store.create('fixture','read fixture',state='FAILED',result=failure,
+                    manifest={'purpose':'read fixture','capabilities':[]}, mode='SAFE',dependencies=['demo==1'],
+                    artifact=path,artifact_hash=digest,authorized_hash=digest,approval={'artifact_hash':digest},
+                    version_id='approved-version',params={'path':'fixture.csv'})
+                try:
+                    case = manager.heart.recovery.open_incident_case(task,failure)
+                    self.assertEqual(case['plan']['steps'],[{'action':'resume_prepared_task','target':'task'}])
+                    auth = manager.pixy.request_recovery_approval(case,'owner:resume')
+                    decision = manager.pixy.authorizations.decide(auth['authorization_id'],True,'owner:resume')
+                    manager.heart.recovery.receive_decision(case['case_id'],decision)
+                    manager.heart.recovery.advance(case['case_id'])
+                    resumed = coordinator.store.get(task['id'])
+                    self.assertEqual(resumed['state'],'READY')
+                    self.assertEqual(resumed['version_id'],'approved-version')
+                    self.assertEqual(resumed['authorized_hash'],digest)
+                    self.assertEqual(resumed['params'],{'path':'fixture.csv'})
+                    self.assertEqual(resumed['attempt_number'],2)
+                    self.assertEqual(resumed['generations'],0)
+                    uncertain = dict(task,result=dict(failure,dispatched=True))
+                    order={'plan':validate_plan(case['plan']),'header':{'authorization_id':'fixture','case_id':case['case_id'],'order_id':'fixture'}}
+                    with self.assertRaises(PermissionError):
+                        build_attempt(uncertain,order)
+                finally:
+                    coordinator._llm_executor.shutdown(wait=True);coordinator._mailbox_executor.shutdown(wait=True)
+
     def test_full_cycle_pixy_heart_senses_hand(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder) / 'data'

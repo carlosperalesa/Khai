@@ -383,6 +383,11 @@ class Recovery:
             action = 'retry_task' if cause_code == 'budget_exhausted' else 'remediate_task'
             remedy = f"{action}:{tid}" if tid else None
             override_task = failure_override.get('task') or (focus_task if focus_task and focus_task.get('id') == tid else None)
+            failure = (override_task or {}).get('result') or {}
+            if (cause_code == 'temporary_provider' and failure.get('stage') == 'dependency_preparation'
+                    and failure.get('dispatched') is False and override_task.get('artifact_hash')
+                    and override_task.get('authorized_hash') == override_task['artifact_hash']):
+                remedy = f'resume_prepared_task:{tid}'
             binding = task_binding(override_task if isinstance(override_task, dict) else None)
             add(cause_code, 'high', detail, remedy=remedy, task_binding_info=binding)
 
@@ -447,7 +452,8 @@ class Recovery:
                     task_binding_info=task_binding(latest_failed))
 
         scoped_evidence = {**evidence, 'core_logs': {**(evidence.get('core_logs') or {}), 'text': text}}
-        llm_diag = self._llm_analyze_incident(scoped_evidence, findings, latest_task=latest_failed)
+        prepared_resume = any(str(f.get('remedy') or '').startswith('resume_prepared_task:') for f in findings)
+        llm_diag = None if prepared_resume else self._llm_analyze_incident(scoped_evidence, findings, latest_task=latest_failed)
         if isinstance(llm_diag, dict):
             instr = str(llm_diag.get('corrective_instruction') or '').strip()
             root_cause = str(llm_diag.get('root_cause') or '').strip()
@@ -503,7 +509,7 @@ class Recovery:
             return None
 
         # Si el fallo corresponde a una tarea detenida/fallida o requiere crear skill reparadora
-        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:', 'create_skill:'))), None)
+        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:', 'create_skill:', 'resume_prepared_task:'))), None)
         if task_remedy:
             action, tid = task_remedy['remedy'].split(':', 1)
             steps = [{'action': action, 'target': 'task'}]

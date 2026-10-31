@@ -891,6 +891,23 @@ class ContractTests(Fixture):
         self.assertEqual(turn['thread_id'], 100)
 
 
+class DependencyPreparationFlowTests(Fixture):
+    def test_pre_dispatch_failure_goes_to_heart_without_transport_retry(self):
+        from app.voice.runtime.dependencies import DependencyPreparationError
+        recovery = Mock()
+        recovery.open_incident_case.return_value = {'case_id':'case-20261031dependency'}
+        self.manager.heart = SimpleNamespace(recovery=recovery)
+        task = self.artifact(state='SUBMITTED', dependencies=['demo==1'], payload={})
+        self.proxy.submit.side_effect = DependencyPreparationError('ReadTimeout before dispatch')
+        self.c.advance(task)
+        current = self.store.get(task['id'])
+        self.assertEqual(current['state'],'DIAGNOSING')
+        self.assertEqual(current['recovery_case_id'],'case-20261031dependency')
+        self.assertIs(current['result']['dispatched'],False)
+        self.assertEqual(current['result']['stage'],'dependency_preparation')
+        recovery.open_incident_case.assert_called_once()
+
+
 class ProxyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

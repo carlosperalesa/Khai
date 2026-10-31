@@ -11,6 +11,18 @@ def build_attempt(task, order):
     if task_binding(task) != plan['task_binding']:
         raise PermissionError('El objetivo o el intento cambió desde el diagnóstico de Heart')
     instruction = plan['corrective_instruction']
+    resume = plan['steps'] == [{'action': 'resume_prepared_task', 'target': 'task'}]
+    preserved = {}
+    if resume:
+        failure = (task or {}).get('result') or {}
+        if (failure.get('stage') != 'dependency_preparation' or failure.get('dispatched') is not False
+                or not task.get('dependencies') or not task.get('artifact_hash')
+                or task.get('authorized_hash') != task['artifact_hash']
+                or (task.get('approval') or {}).get('artifact_hash') != task['artifact_hash']
+                or plan['proposed_steps']):
+            raise PermissionError('Resume requires an approved artifact and a proven pre-dispatch preparation failure')
+        preserved = {key: copy.deepcopy(task.get(key)) for key in (
+            'artifact', 'artifact_hash', 'authorized_hash', 'approval', 'version_id', 'selected_version_id')}
     if task is None:
         task = ControlStore.document('heart:' + header['authorization_id'],
             instruction or 'Remediación autorizada por Heart', id=plan['task_id'], kind='objective')
@@ -51,4 +63,6 @@ def build_attempt(task, order):
     if reroute:
         task.update(manifest=None, recipe=None)
     task['recovery_plan_steps'] = copy.deepcopy(plan['proposed_steps'])
+    if resume:
+        task.update(preserved, state='READY', diagnosed=True)
     return task
