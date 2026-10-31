@@ -929,6 +929,30 @@ class ProxyTests(unittest.TestCase):
         self.assertIn('--pids-limit',args)
         self.assertIn('none',args)
 
+    def test_dependencies_build_from_voice_cache_with_network_disabled(self):
+        from app.voice.runtime.dependencies import WheelCache, sha
+        def download(args, **kwargs):
+            (Path(args[args.index('--dest')+1])/'demo-1-py3-none-any.whl').write_bytes(b'wheel')
+            return SimpleNamespace(returncode=0)
+        cache = WheelCache(self.root, download, lambda *_: [
+            {'filename': 'demo-1-py3-none-any.whl', 'digests': {'sha256': sha(b'wheel')}}])
+        self.p.update(dependencies=['demo==1'], dependency_lock=cache.prepare(['demo==1']))
+        self.engine.submit(self.p)
+        def docker(args, **kwargs):
+            if args[1:3] == ['image', 'inspect']:
+                return SimpleNamespace(returncode=int(args[3].startswith('khai-worker:')), stdout='', stderr='')
+            if args[1] == 'build':
+                self.assertIn('--network=none', args)
+                self.assertIn('--pull=false', args)
+                self.assertIsInstance(kwargs['input'], bytes)
+                self.assertFalse(kwargs['text'])
+                return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        self.run.side_effect = docker
+        self.engine.launch(self.p)
+        self.assertEqual(self.engine.get(self.p['execution_id'])['status'], 'running')
+        self.assertEqual(sum(call.args[0][1] == 'build' for call in self.run.call_args_list), 1)
+
     def test_restart_missing_container_not_replayed(self):
         self.engine.submit(self.p)
         self.engine.save(self.p['execution_id'],status='running',started_at=time.time())

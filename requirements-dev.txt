@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest
+pytest-subtests
+# Real fixtures for the worker document parser; not installed in the Core image.
+pypdf==6.21.4
+openpyxl==3.1.5
+defusedxml==0.7.1

@@ -158,7 +158,7 @@ class LLMManager:
                             self._notify(f"[Modo {profile} conectado]")
                             break
                         except Exception as exc:
-                            from app.voice.gateway.dolphin_controller import _format_error_reason
+                            from app.mind.brain.controller import _format_error_reason
                             reason = _format_error_reason(exc)
                             logger.warning('Dolphin %s falló (%s): %s', profile, type(exc).__name__, exc)
                             self._notify(f"[Modo {profile} falló por: {reason}]")

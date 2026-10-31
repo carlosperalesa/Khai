@@ -6,6 +6,9 @@ import os
 import subprocess
 import tempfile
 import time
+import uuid
+from contextvars import ContextVar
+from app.kernel.tracing import get_trace_id
 from urllib.parse import quote
 
 import requests
@@ -13,6 +16,7 @@ import requests
 from app.kernel.database import adopt_schema, connection
 
 logger = logging.getLogger(__name__)
+_attempt = ContextVar('model_activation_attempt', default='')
 
 PROFILES = {
     'low': {
@@ -130,6 +134,10 @@ class ModelController:
                 "VALUES (1, 'nano', 'nano')"
             )
         adopt_schema(self.db_path, 'dolphin-sessions', ['dolphin_sessions', 'dolphin_mode_state'])
+        with connection(self.db_path) as conn:
+            conn.execute('CREATE TABLE IF NOT EXISTS model_transition_events('
+                         'id INTEGER PRIMARY KEY, created_at REAL NOT NULL, document TEXT NOT NULL)')
+        adopt_schema(self.db_path, 'model-transition-events', ['model_transition_events'])
         self._token = None
         self._token_exp = 0.0
 
@@ -139,6 +147,22 @@ class ModelController:
             if val is not None and str(val).strip():
                 return str(val).strip()
         return os.getenv(key, default).strip()
+
+    def _transition_event(self, profile, phase, **detail):
+        event = dict(attempt_id=_attempt.get(), trace_id=get_trace_id(), profile=profile,
+                     phase=phase, created_at=time.time(), disk=self.disk,
+                     model=self.get_model_for_mode(profile), **detail)
+        with connection(self.db_path) as conn:
+            conn.execute('INSERT INTO model_transition_events(created_at,document) VALUES (?,?)',
+                         (event['created_at'], json.dumps(event)))
+            conn.execute('DELETE FROM model_transition_events WHERE id NOT IN '
+                         '(SELECT id FROM model_transition_events ORDER BY id DESC LIMIT 500)')
+
+    def transition_snapshot(self):
+        with connection(self.db_path) as conn:
+            rows = conn.execute('SELECT document FROM model_transition_events ORDER BY id DESC LIMIT 40').fetchall()
+        return {'active_mode': self.get_active_mode(), 'configured_disk': self.disk,
+                'recent_transitions': [json.loads(r['document']) for r in rows]}
 
     def get_active_mode(self) -> str:
         with connection(self.db_path) as conn:
@@ -365,9 +389,12 @@ class ModelController:
             raise RuntimeError('Ollama no devolvió respuesta durante la precarga')
 
     def _confirm_ready(self, profile: str = 'mid') -> None:
+        self._transition_event(profile, 'waiting_api')
         if not self._wait_ollama_ready(timeout_sec=90):
             raise TimeoutError('Ollama no abrió su API dentro del plazo de arranque (90s)')
+        self._transition_event(profile, 'warmup_started')
         self._warmup_model(profile)
+        self._transition_event(profile, 'warmup_completed')
 
     def _delete_instance(self, *, wait: bool = True) -> None:
         current = self.get_instance()
@@ -442,6 +469,21 @@ class ModelController:
         )
 
     def start(self, profile: str = 'mid') -> str:
+        token = _attempt.set(uuid.uuid4().hex)
+        started = time.monotonic()
+        try:
+            self._transition_event(profile, 'activation_started')
+            result = self._start(profile)
+            self._transition_event(profile, 'activation_completed', elapsed_seconds=time.monotonic()-started)
+            return result
+        except Exception as exc:
+            self._transition_event(profile, 'activation_failed', error_type=type(exc).__name__,
+                                   reason=_format_error_reason(exc), elapsed_seconds=time.monotonic()-started)
+            raise
+        finally:
+            _attempt.reset(token)
+
+    def _start(self, profile: str = 'mid') -> str:
         profile = (profile or 'mid').strip().lower()
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid', 'n': 'nano', 'off': 'nano'}
         profile = aliases.get(profile, profile)

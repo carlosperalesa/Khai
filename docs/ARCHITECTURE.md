@@ -2,6 +2,16 @@
 
 Este documento consolida la arquitectura del sistema, contratos, almacenamiento, seguridad, decisiones históricas (ADRs), procedimientos de operaciones, la infraestructura híbrida acelerada (Brain) y la arquitectura canónica de pruebas.
 
+Actualización de implementación del 31 de octubre (aceptación en curso): `busca <consulta>` usa el SkillSpec de `web-search`; el proveedor se resuelve por una preferencia aprobada y auditable, nunca por instalación implícita.
+
+Voice posee `WheelCache` (`app/voice/runtime/dependencies.py`). Después de la autorización de la tarea, prepara wheels de PyPI con raíces `nombre==versión`, resolución transitiva para CPython 3.10/Linux x86_64 y verificación de SHA-256 contra los metadatos oficiales de cada release no retirada. No admite fuentes, URLs de paquetes ni otro índice como respaldo. El lock incluye raíces, plataforma, nombres, versiones y hashes; el proxy verifica todo el contenido de la caché antes de construir una imagen sin red. Pip instala desde el contexto verificado mediante `--no-index --require-hashes --only-binary=:all:`. Se reutiliza la imagen por lock y su venv en `/opt/venv`; el `/tmp` del worker permanece `noexec`. La base `python:3.10-slim` debe estar aprovisionada durante el despliegue. No se exportan secretos al proceso de descarga.
+
+El parser `khai_documents` se monta de solo lectura dentro del worker. Admite PDF (`pypdf==6.21.4`), CSV UTF-8 y XLSX (`openpyxl==3.1.5`, `defusedxml==0.7.1`). Solo lee rutas relativas contenidas en `KHAI_SKILL_DATA`, sin enlaces. Limita el archivo a 8 MiB, la expansión XLSX a 32 MiB, 30 páginas PDF, 10 hojas, 500 filas y 50 columnas por hoja, y la salida a 16.000 caracteres. No calcula fórmulas, carga enlaces externos ni ejecuta macros. Un PDF sin texto devuelve `needs_ocr`; no incorpora OCR ni un flujo de adjuntos Telegram. La skill candidata `document-parser` requiere auditoría y ejecución verificable antes de activarse.
+
+Brain conserva hasta 500 eventos de activación en `model_transition_events`, con intento, traza, perfil, disco, etapa, duración y error tipado. Senses expone los 40 recientes a Heart cuando la consulta trata de modelos. Heart limita el diagnóstico al perfil pedido y a fallos recientes; distingue la etapa observada de la causa todavía desconocida y no propone una reparación de otra tarea. Esto no implementa aún transiciones asíncronas cancelables.
+
+Operación de disco: cambiar el tipo exige instantánea y disco nuevo, no una edición del volumen original. El 31 de octubre se autorizó `pd-balanced` 100 GiB; la instantánea quedó READY pero `us-west1-a` rechazó el nuevo disco por falta de capacidad. La evaluación de otras zonas de la misma región conserva la subred y exige verificar WireGuard, GPU y generación real antes de cambiar el modo activo. Conservar disco anterior y respaldo durante la aceptación; no eliminar recursos por falta de capacidad.
+
 ---
 
 ## 1. Visión General y Flujo de Órganos

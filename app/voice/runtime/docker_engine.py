@@ -9,6 +9,8 @@ from app.voice.runtime.contract import bundle_hash
 import subprocess
 import time
 import shutil
+import tempfile
+from app.voice.runtime.dependencies import dependency_plan, verify_cache, build_context
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -62,9 +64,9 @@ class Engine:
             raise ValueError('Payload demasiado grande')
         if not isinstance(payload.get('params', {}), dict) or len(json.dumps(payload.get('params', {}))) > 16000:
             raise ValueError('Parámetros de skill inválidos o demasiado grandes')
-        for dep in payload.get('dependencies', []):
-            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+-]*)?', dep):
-                raise ValueError('Dependencia inválida')
+        dependency_plan(payload.get('dependencies', []))
+        if payload.get('dependencies'):
+            verify_cache(self.root/'voice'/'dependencies', payload.get('dependency_lock'), payload['dependencies'])
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT * FROM executions WHERE id=?', (payload['execution_id'],)).fetchone()
@@ -110,7 +112,7 @@ class Engine:
         return result
 
     def docker(self, args, timeout=20, **kwargs):
-        return self.run(['docker'] + args, capture_output=True, text=True, timeout=timeout, **kwargs)
+        return self.run(['docker'] + args, capture_output=True, text=kwargs.pop('text', True), timeout=timeout, **kwargs)
 
     def inspect(self, name):
         result = self.docker(['inspect', name])
@@ -172,19 +174,44 @@ class Engine:
                 '-v', self.host_data + '/artifacts/' + p['artifact_hash'] + '.py:/skill/main.py:ro',
                 '-v', self.host_data + '/execution_inputs/' + p['execution_id'] + '.json:/skill/input.json:ro',
                 '-v', self.host_runtime + '/worker_runtime.py:/skill/runner.py:ro',
+                '-v', self.host_runtime + '/document_tools.py:/skill/khai_documents.py:ro',
                 *bundle_mounts, image, 'python', '/skill/runner.py']
 
     def launch(self, p):
         eid = p['execution_id']
         self.save(eid, status='starting', started_at=time.time())
+        try:
+            image = self.dependency_image(p)
+        except ValueError as exc:
+            self.save(eid, status='failed', returncode=1, stderr=str(exc))
+            return
+        self.launch_container(p, image)
+
+    def dependency_image(self, p):
         image = 'python:3.10-slim'
         if p.get('dependencies'):
-            image = 'khai-worker:' + fingerprint(p['dependencies'])[:24]
-            dockerfile = 'FROM python:3.10-slim\nRUN pip install --no-cache-dir ' + ' '.join(p['dependencies']) + '\n'
-            built = self.docker(['build', '-t', image, '-'], timeout=180, input=dockerfile)
-            if built.returncode:
-                self.save(eid, status='failed', returncode=1, stderr=built.stderr[-4000:])
-                return
+            lock_id = p.get('dependency_lock')
+            verify_cache(self.root/'voice'/'dependencies', lock_id, p['dependencies'])
+            image = 'khai-worker:' + lock_id
+            cached = self.docker(['image', 'inspect', image])
+            if cached.returncode:
+                base = self.docker(['image', 'inspect', 'python:3.10-slim'])
+                if base.returncode:
+                    raise ValueError('Worker base image must be provisioned by deployment')
+                with tempfile.NamedTemporaryFile(suffix='.tar', delete=False) as temp:
+                    context = Path(temp.name)
+                try:
+                    build_context(self.root/'voice'/'dependencies', lock_id, p['dependencies'], context)
+                    built = self.docker(['build', '--network=none', '--pull=false', '-t', image, '-'],
+                                        timeout=180, input=context.read_bytes(), text=False)
+                finally:
+                    context.unlink(missing_ok=True)
+                if built.returncode:
+                    raise ValueError('Offline dependency build failed: ' + built.stderr.decode(errors='replace')[-4000:])
+        return image
+
+    def launch_container(self, p, image):
+        eid = p['execution_id']
         if self._cancelled(eid) or time.time() >= p['deadline']:
             self.save(eid, status='cancelled')
             return

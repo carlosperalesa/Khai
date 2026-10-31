@@ -1,5 +1,9 @@
 # Khai
 
+Actualización del 31 de octubre, en validación: la invocación de búsqueda pasa a `busca <consulta>`, con Brave como preferencia autorizada y registrada. Voice prepara una caché reutilizable de wheels fijados y verificados; los workers instalan sin red. El nuevo parser extrae texto de PDF, CSV y XLSX ya incluidos en los datos de una skill; todavía no recibe adjuntos de Telegram ni hace OCR. Para ejecutar las pruebas con esos formatos: `pip install -r requirements-dev.txt` y `python -m pytest -q`.
+
+La migración autorizada del disco de modelos a `pd-balanced` conserva el original para volver atrás. GCP rechazó la creación en `us-west1-a` por falta de capacidad; el avance y las pruebas están en `CHECKPOINT.md`. Brain incorpora telemetría para Heart; la continuidad mediante nano y las transiciones cancelables siguen pendientes.
+
 Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente.
 
 Heart evita asociar consultas sobre transiciones de modelo a tareas no relacionadas; si falta telemetría vinculada, Pixy comunica que la evidencia es insuficiente.

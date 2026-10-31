@@ -114,7 +114,10 @@ class Recovery:
     @staticmethod
     def select_evidence_resources(question):
         """Heart solicita siempre el perfil basal completo de telemetría a Senses."""
-        return ['storage', 'container_state_core', 'container_state_proxy', 'core_logs', 'pixy']
+        resources = ['storage', 'container_state_core', 'container_state_proxy', 'core_logs', 'pixy']
+        if re.search(r'\b(?:modelo|modelos|modo|modos|conexi[oó]n|transici[oó]n|brain)\b', question, re.IGNORECASE):
+            resources.append('brain')
+        return resources
 
     # ------------------------------------------------------------- case intake
     # ------------------------------------------------------------- case intake
@@ -238,6 +241,8 @@ class Recovery:
         elif re.search(r'\b(?:modelo|modelos|modo|modos|conexi[oó]n|transici[oó]n|brain)\b', question, re.IGNORECASE):
             candidates = []
             evidence['incident_scope'] = 'model_transition'
+            match = re.search(r'\b(high|mid|low|nano)\b', question, re.IGNORECASE)
+            evidence['incident_profile'] = match.group(1).lower() if match else None
         elif re.search(r'(?:[úu]ltim[oa].*(?:error|fallo|fallid)|(?:error|fallo|fallid).*[úu]ltim[oa])',
                        question, flags=re.IGNORECASE):
             candidates = [task for task in tasks if task.get('state') in {'FAILED', 'EXHAUSTED'}]
@@ -345,6 +350,24 @@ class Recovery:
         latest_failed = None
         focus_task = evidence.get('focus_task')
         if evidence.get('incident_scope') == 'model_transition' and not failure_override:
+            brain = evidence.get('brain') or {}
+            events = brain.get('recent_transitions', []) if isinstance(brain, dict) else []
+            profile = evidence.get('incident_profile')
+            failed = [e for e in events if isinstance(e, dict) and e.get('phase') == 'activation_failed'
+                      and (not profile or e.get('profile') == profile)
+                      and time.time()-86400 <= e.get('created_at', 0) <= time.time()]
+            if failed:
+                last = max(failed, key=lambda e: e['created_at'])
+                stages = [e for e in events if e.get('attempt_id') == last.get('attempt_id')
+                          and e.get('phase') not in {'activation_failed', 'activation_started'}]
+                stage = max(stages, key=lambda e: e['created_at'])['phase'] if stages else 'activation_started'
+                detail = (f"Brain registró {last.get('error_type')} en modo {last.get('profile')}; "
+                          f"última etapa: {stage}; disco: {last.get('disk')}; "
+                          f"intento: {last.get('attempt_id')}; traza: {last.get('trace_id')}. "
+                          'Esta evidencia identifica dónde falló, pero no prueba la causa del proveedor. '
+                          'Se requiere medir la carga y revisar los registros de la VM antes de reintentar.')
+                return {'status': 'error', 'findings': [{'code': 'model_activation_failed',
+                        'severity': 'error', 'detail': detail, 'remedy': None}], 'model_transition': last}
             # Generic container health and unrelated task failures cannot establish
             # the cause of a model transition. Do not propose an unrelated repair.
             return {'status': 'unknown', 'findings': [{

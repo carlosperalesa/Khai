@@ -19,6 +19,79 @@ from app.voice.mailbox import VoiceMailbox
 from app.voice.voice import command, process_ordinary, urgent_command
 
 
+class DependencyCacheTests(unittest.TestCase):
+    def test_pinned_wheels_are_verified_reused_and_built_without_network(self):
+        from types import SimpleNamespace
+        import tarfile
+        from app.voice.runtime.dependencies import WheelCache, build_context, sha, verify_cache
+        with tempfile.TemporaryDirectory() as directory:
+            name, raw = 'demo-1.0-py3-none-any.whl', b'fixture wheel bytes'
+            def download(args, **kw):
+                self.assertNotIn('BRAVE_SEARCH_API_KEY', kw['env'])
+                self.assertIn('--only-binary=:all:', args)
+                (Path(args[args.index('--dest')+1])/name).write_bytes(raw)
+                return SimpleNamespace(returncode=0)
+            runner = Mock(side_effect=download)
+            releases = Mock(return_value=[{'filename': name, 'digests': {'sha256': sha(raw)}}])
+            cache = WheelCache(directory, runner, releases)
+            lock_id = cache.prepare(['demo==1.0'])
+            self.assertEqual(cache.prepare(['demo==1.0']), lock_id)
+            self.assertEqual(runner.call_count, 1)
+            target = Path(directory)/'build.tar'
+            build_context(cache.root, lock_id, ['demo==1.0'], target)
+            with tarfile.open(target) as archive:
+                dockerfile = archive.extractfile('Dockerfile').read().decode()
+                self.assertIn('--no-index', dockerfile)
+                self.assertIn('--require-hashes', dockerfile)
+                self.assertNotIn('https:', dockerfile)
+            with self.assertRaises(ValueError):
+                verify_cache(cache.root, lock_id, ['other==1.0'])
+            (cache.root/lock_id/name).write_bytes(b'corrupted')
+            with self.assertRaises(ValueError):
+                cache.prepare(['demo==1.0'])
+            self.assertEqual(runner.call_count, 1, 'Corrupt caches must not silently redownload')
+
+    def test_unpinned_url_and_yanked_artifacts_are_rejected(self):
+        from types import SimpleNamespace
+        from app.voice.runtime.dependencies import WheelCache, dependency_plan, sha
+        for roots in [['requests'], ['https://example.org/p.whl'], ['demo==1', 'Demo==2']]:
+            with self.subTest(roots=roots), self.assertRaises(ValueError):
+                dependency_plan(roots)
+        with tempfile.TemporaryDirectory() as directory:
+            def download(args, **kw):
+                (Path(args[args.index('--dest')+1])/'demo-1-py3-none-any.whl').write_bytes(b'x')
+                return SimpleNamespace(returncode=0)
+            releases = lambda *_: [{'filename': 'demo-1-py3-none-any.whl',
+                                    'digests': {'sha256': sha(b'x')}, 'yanked': True}]
+            with self.assertRaises(ValueError):
+                WheelCache(directory, download, releases).prepare(['demo==1'])
+
+
+class DocumentExtractionTests(unittest.TestCase):
+    def test_real_csv_pdf_and_xlsx_with_path_and_expansion_limits(self):
+        import zipfile
+        from pypdf import PdfWriter
+        from openpyxl import Workbook
+        from app.voice.runtime.document_tools import read_document
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'sample.csv').write_text('nombre;valor\nuno;2\n', encoding='utf-8')
+            self.assertIn('uno\t2', read_document('sample.csv', root)['text'])
+            writer = PdfWriter(); writer.add_blank_page(width=100, height=100)
+            writer.write(root/'scan.pdf')
+            self.assertTrue(read_document('scan.pdf', root)['needs_ocr'])
+            workbook = Workbook(); workbook.active.append(['value', 3]); workbook.active['A2'] = '=1+1'
+            workbook.save(root/'book.xlsx'); workbook.close()
+            result = read_document('book.xlsx', root)
+            self.assertIn('value\t3', result['text']); self.assertNotIn('=1+1', result['text'])
+            with self.assertRaises(ValueError):
+                read_document('../secret.csv', root)
+            with zipfile.ZipFile(root/'bomb.xlsx', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr('large.xml', b'x'*(8*1024*1024+1))
+            with self.assertRaisesRegex(ValueError, 'Expanded workbook'):
+                read_document('bomb.xlsx', root)
+
+
 class ResearchSearchTests(unittest.TestCase):
     def test_configured_search_uses_voice_and_has_no_provider_fallback(self):
         from app.voice.gateway.research_search import ResearchSearch

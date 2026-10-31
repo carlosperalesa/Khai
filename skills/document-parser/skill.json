@@ -1,0 +1,14 @@
+{
+  "skill_id": "document-parser",
+  "description": "Extrae texto de archivos PDF, CSV y XLSX incluidos en los datos de la skill.",
+  "use_cases": ["Leer un documento ya disponible en data de una skill"],
+  "capability": "document_read",
+  "aliases": ["leer-documento"],
+  "extraction_templates": ["lee documento {path:text}"],
+  "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false},
+  "output_schema": {"type": "object", "properties": {"path": {"type": "string"}, "format": {"type": "string"}, "text": {"type": "string"}, "truncated": {"type": "boolean"}, "untrusted": {"type": "boolean"}, "needs_ocr": {"type": "boolean"}}, "required": ["path", "format", "text", "truncated", "untrusted", "needs_ocr"], "additionalProperties": false},
+  "runtime": "SAFE",
+  "dependencies": ["pypdf==6.21.4", "openpyxl==3.1.5", "defusedxml==0.7.1"],
+  "services": [],
+  "verifier": {"kind": "owner_criterion"}
+}

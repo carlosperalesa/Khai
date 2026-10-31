@@ -14,6 +14,7 @@ from app.heart.catalog import FINAL_STEP, canonical, plan_hash, validate_case_id
 from app.pixy.control import InstanceLock
 from app.pixy.control import BudgetExceeded
 from app.voice.runtime.contract import digest, skill_metadata, default_runtime_capabilities
+from app.voice.runtime.dependencies import dependency_plan
 from app.hand.catalog import SkillCatalog
 from app.hand.skill_spec import normalize_schema, validate_skill_spec
 from app.hand.agent_loop import AgentLoop, AgentExhausted
@@ -146,6 +147,11 @@ usa los errores de herramientas para corregir el artefacto y termina únicamente
 Escribe Python autónomo para el objetivo: {task['request']}
 La primera línea debe ser una de {modes_str}.
 {deps_instruction} No uses shell ni instrucciones Docker.
+Las dependencias se resuelven desde PyPI por Voice como wheels verificados y se instalan sin red.
+Para leer PDF, CSV o XLSX ya presentes en los datos de la skill, usa
+`from khai_documents import read_document` y `read_document(ruta_relativa)`.
+PDF requiere pypdf==6.21.4; XLSX openpyxl==3.1.5 y defusedxml==0.7.1 en # PIP.
+No inventes documentos adjuntos ni rutas; la extracción es acotada y no incluye OCR.
 El entorno está aislado en contenedor; no uses subprocess, ctypes, multiprocessing ni librerías de escape del sistema.
 El worker no tiene red directa (network_mode: {caps.gateway_api.get('network_mode', 'none')}). Si el manifiesto declara 'Network', usa exclusivamente
 `from {gateway_mod} import {gateway_fn}` y `{gateway_fn}(service, operation, params)` con los
@@ -186,6 +192,10 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
              'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
                             'required': ['code'], 'additionalProperties': False},
              'handler': lambda args: check_python(args['code'])},
+            {'name': 'plan_dependencies', 'description': 'Valida versiones fijadas y describe la instalación offline; no descarga ni ejecuta paquetes.',
+             'parameters': {'type': 'object', 'properties': {'packages': {'type': 'array', 'items': {'type': 'string'}}},
+                            'required': ['packages'], 'additionalProperties': False},
+             'handler': lambda args: dependency_plan(args['packages'])},
             {'name': 'finish_code', 'description': 'Entrega el código Python final para validación.',
              'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
                             'required': ['code'], 'additionalProperties': False},

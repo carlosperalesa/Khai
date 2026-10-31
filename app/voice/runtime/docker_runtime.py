@@ -4,10 +4,17 @@ from app.voice.runtime.contract import proxy_url, proxy_headers
 
 
 class DockerRuntime(Runtime):
+    def __init__(self, data_dir='data'):
+        from app.voice.runtime.dependencies import WheelCache
+        self.wheels = WheelCache(data_dir)
+
     def prepare(self, payload):
         if payload.get('network'):
             raise PermissionError('Skills must use Voice Gateway')
-        return dict(payload,network=False)
+        prepared = dict(payload, network=False)
+        if payload.get('dependencies'):
+            prepared['dependency_lock'] = self.wheels.prepare(payload['dependencies'])
+        return prepared
 
     def execute(self, payload):
         response = requests.post(proxy_url('executions'),json=self.prepare(payload),headers=proxy_headers(),timeout=10)

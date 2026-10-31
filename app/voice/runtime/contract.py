@@ -60,8 +60,8 @@ def skill_metadata(code):
         if line.startswith("# PIP:"):
             deps = line[6:].split()
     for dep in deps:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+-]*)?", dep):
-            raise ValueError("Dependencia inválida: usar nombre o nombre==versión")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+-]*", dep):
+            raise ValueError("Dependencia inválida: usar nombre==versión")
     return modes[first], deps
 
 

@@ -35,6 +35,23 @@ class _Memory:
 
 
 class BrainTests(unittest.TestCase):
+    def test_activation_telemetry_correlates_failure_and_warmup_stage(self):
+        from app.kernel.tracing import trace_scope
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            def fail(profile):
+                controller._transition_event(profile, 'warmup_started')
+                raise TimeoutError('fixture')
+            with patch.object(controller, '_start', side_effect=fail), trace_scope('activation-test'):
+                with self.assertRaises(TimeoutError):
+                    controller.start('high')
+            events = controller.transition_snapshot()['recent_transitions']
+            self.assertEqual([e['phase'] for e in events],
+                             ['activation_failed', 'warmup_started', 'activation_started'])
+            self.assertEqual(len({e['attempt_id'] for e in events}), 1)
+            self.assertEqual(events[0]['trace_id'], 'activation-test')
+            self.assertEqual(events[0]['error_type'], 'TimeoutError')
+
     def test_unknown_intent_is_rejected_without_saving_a_promise(self):
         mem = _Memory()
         llm = MagicMock()

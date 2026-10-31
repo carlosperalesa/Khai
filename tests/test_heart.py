@@ -424,6 +424,22 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
             self.assertEqual(case['diagnosis']['findings'][0]['code'], 'model_transition_unobserved')
             self.assertNotIn('task', case['diagnosis'])
 
+    def test_model_failure_uses_correlated_brain_events_without_guessing_disk_cause(self):
+        self.senses.evidence.return_value['brain'] = {'recent_transitions': [
+            {'attempt_id': 'attempt-1', 'profile': 'high', 'phase': 'activation_failed',
+             'created_at': time.time(), 'error_type': 'ReadTimeout', 'disk': 'balanced', 'trace_id': 'trace-1'},
+            {'attempt_id': 'attempt-1', 'profile': 'high', 'phase': 'warmup_started',
+             'created_at': time.time()-90}]}
+        case = self.recovery.open_case('revisa el fallo del modo high', 'owner:error')
+        self.assertIsNone(case['plan'])
+        finding = case['diagnosis']['findings'][0]
+        self.assertEqual(finding['code'], 'model_activation_failed')
+        self.assertIn('warmup_started', finding['detail'])
+        self.assertIn('trace-1', finding['detail'])
+        self.assertIn('no prueba la causa', finding['detail'])
+        case = self.recovery.open_case('revisa el fallo del modo mid', 'owner:error')
+        self.assertEqual(case['diagnosis']['status'], 'unknown')
+
     def test_incident_key_deduplication(self):
         task = {'id': 'task_00000000000000000000000000000001', 'execution_id': 'run_111'}
         failure = {'stderr': 'SyntaxError: unexpected EOF while parsing', 'returncode': 1}

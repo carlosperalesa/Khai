@@ -52,6 +52,9 @@ class SkillContractTests(unittest.TestCase):
         from app.voice.gateway.service_registry import validate_descriptor
         validate_descriptor(descriptor)
         validate_skill_spec(json.loads((root / 'skill.json').read_text(encoding='utf-8')))
+        self.assertEqual(extract_params(json.loads((root / 'skill.json').read_text(encoding='utf-8')),
+                                       'busca documentación de Python'),
+                         {'query': 'documentación de Python'})
         gateway = types.ModuleType('khai_gateway')
         gateway.request = Mock(return_value={'web': {'results': [
             {'title': 'Ejemplo', 'url': 'https://example.org/', 'description': 'Descripción'},

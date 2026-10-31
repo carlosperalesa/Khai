@@ -92,7 +92,7 @@ class ModuleManager:
         choice = os.getenv('KHAI_RUNTIME','docker')
         if choice not in {'docker','local'}:
             raise ValueError('KHAI_RUNTIME must be docker or local')
-        self.runtime = LocalRuntime(self.data_dir) if choice=='local' else DockerRuntime()
+        self.runtime = LocalRuntime(self.data_dir) if choice=='local' else DockerRuntime(self.data_dir)
         self.hand.capabilities = self.runtime.capabilities
         self.assets = AssetGateway(self.data_dir.parent/'other',self.data_dir/'voice'/'voice.sqlite3',self.pixy,self.events,self.hand)
         self.dreams = Dreams(self.control_db, self.rules, self.events, memory=self.memory)
@@ -102,6 +102,8 @@ class ModuleManager:
         self.heart.recovery = Recovery(self.control_db,self.senses,self.hand,self.heart_control,self.events)
 
     def _domain_snapshot(self, name):
+        if name == 'brain':
+            return self.model_controller.transition_snapshot()
         if name in {'database','storage','heart'}:
             return self.heart.run_diagnostic_fast()
         if name in {'runtime','docker'}:

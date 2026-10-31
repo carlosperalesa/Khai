@@ -17,7 +17,7 @@ def check_python(code):
             imports.update(alias.name.split('.')[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.add(node.module.split('.')[0])
-    known = set(getattr(sys, 'stdlib_module_names', ())) | {'khai_gateway', 'khai_input', 'app'}
+    known = set(getattr(sys, 'stdlib_module_names', ())) | {'khai_gateway', 'khai_input', 'khai_documents', 'app'}
     return {'valid': True, 'imports': sorted(imports),
             'external_imports': sorted(imports - known),
             'note': 'Static check only; imports and runtime behavior are not verified.'}
