@@ -1,5 +1,17 @@
 # Validación Sintética y Protocolo de Evidencia
 
+## Despliegue y aceptación Brave — 31 de octubre de 2026
+
+- Código desplegado: `f4c845d`; 273 pruebas y 22 subpruebas locales aprobadas.
+- Core reconstruido en Azure; `/health` HTTP 200 con `{"status":"ok"}` y certificado validado contra el certificado del servidor. Integridad `ok` en `control.sqlite3` y `voice.sqlite3`.
+- Consulta de infraestructura real `Brave Search API documentation`, 3 resultados. La clave se mantuvo en Voice, sin valores en Git ni en la imagen.
+- Aprobación del descriptor `brave_search.search@v1` por el puerto de Pixy y auditoría real del artefacto: `382aa529279c48068c3b2d5924551351`.
+- Tarea: `task_b09af793c9b742a4979ccdd7b7df535d`; worker: `run_5f381e6200bd45c686ffd4f9ce422150`; versión: `c5ec15303ee848c1868be9a6611e0727`.
+- Recibo real de Voice: `run_5f381e6200bd45c686ffd4f9ce422150:.voice-a23f4ff05f774400b1938924054a7706.request.json`.
+- Verificación independiente: proceso finalizado con código 0, recibo completado ligado a la ejecución/operación, JSON del proveedor acorde al criterio fijado antes de ejecutar, salida de la skill con proveedor Brave y resultados con título, URL y descripción. Incluyó `https://brave.com/search/api/`, `https://api-dashboard.search.brave.com/documentation` y `https://api-dashboard.search.brave.com/api-reference/web/search/get`.
+- Resultado: tarea `COMPLETED`; versión y SkillSpec `active`. La aceptación de despliegue no establece una preferencia persistente del usuario. Se registró el episodio en Dreams; reporte operativo en `/opt/khai/data/voice/deployment-web-search.json`.
+- Respaldo previo: `/opt/khai/data/backups/deploy-20261031T204147Z`. Las transiciones cancelables de modelos y los escenarios conversacionales completos de Heart/Pixy siguen pendientes; esta prueba no acredita esos recorridos.
+
 La salud del sistema y las suites de pruebas unitarias acreditan integridad estructural, pero no sustituyen la autonomía conversacional. Por ello, la aceptación de Khai se rige por un protocolo de dos niveles:
 
 1. **Nivel 1 — Certificación de Integridad Local:** Ejecución limpia de las **8 suites canónicas** (264 pruebas unitarias en verde cubriendo Brain, Mind, Hand, Heart, Pixy, Voice, Dreams y Kernel).
