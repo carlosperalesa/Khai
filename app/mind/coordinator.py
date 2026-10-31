@@ -125,8 +125,13 @@ class Coordinator:
         self._notifications = queue.Queue()
         self.requirements = RequirementsPlanner(getattr(manager, 'llm', None))
         self.revision_planner = RevisionPlanner(getattr(manager, 'llm', None))
-        session_db = (getattr(manager, 'control_db', None) or getattr(self.store, 'db_path', None)
-                      or manager.state.db_path)
+        raw_db = getattr(manager, 'control_db', None)
+        if not isinstance(raw_db, (str, Path)):
+            raw_db = None
+        session_db = (raw_db or getattr(self.store, 'db_path', None)
+                      or getattr(getattr(manager, 'state', None), 'db_path', None))
+        if not isinstance(session_db, (str, Path)):
+            session_db = ':memory:' 
         self.conversations = ConversationStore(session_db)
         mailbox = getattr(manager, 'voice_mailbox', None)
         if mailbox is not None:

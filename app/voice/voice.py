@@ -394,6 +394,11 @@ def _command(manager, source, text):
     return None
 
 
+@app.get('/health')
+async def health():
+    return {'status': 'ok'}
+
+
 @app.post('/webhook')
 async def webhook(request: Request):
     configured = os.getenv('TELEGRAM_WEBHOOK_SECRET', '')

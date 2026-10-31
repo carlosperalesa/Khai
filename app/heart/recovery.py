@@ -154,6 +154,10 @@ class Recovery:
         if any(term in low for term in ('modulenotfounderror', 'importerror', 'no module named')):
             return 'dependency_error', err_str or 'Dependencia o módulo no disponible en el runtime'
 
+        # 5b. Colisión con borrador huérfano o bloqueo en espacio de trabajo
+        if any(term in low for term in ('unfinished draft', 'already exists', 'borrador huérfano', 'borrador huerfano', 'draft collision')):
+            return 'stale_draft_or_lock', err_str or 'Colisión con borrador huérfano o bloqueo residual en el espacio de trabajo'
+
         # 6. Sintaxis o excepción en código de skill
         if any(term in low for term in ('syntaxerror', 'indentationerror', 'nameerror', 'typeerror', 'attributeerror', 'zerodivisionerror', 'indexerror', 'keyerror')) or 'traceback (most recent call last)' in low or (returncode is not None and returncode != 0):
             return 'syntax_or_code', err_str or f'Error de sintaxis o excepción durante la ejecución (código {returncode})'
@@ -550,7 +554,7 @@ class Recovery:
             if not record or record['status'] in {'expired', 'superseded', 'denied'}:
                 self._move(row['case_id'], 'DENIED', expected={'WAITING_USER_APPROVAL'},
                            detail={'reason': (record or {}).get('status', 'missing')},
-                           error='Autorización ' + (record or {}).get('status', 'inexistente') + '; no se ejecutó nada.')
+                           error='Autorización ' + (record or {}).get('status', 'expirada') + '; plan médico de Heart cancelado por tiempo de espera.')
 
     # ------------------------------------------------------------- hand-off
     def _order(self, case):
@@ -769,7 +773,7 @@ class Recovery:
         with connection(self.path) as conn:
             ids = [r[0] for r in conn.execute(
                 'SELECT case_id FROM recovery_cases WHERE reported_at IS NULL AND state IN ("RECOVERED","FAILED","UNKNOWN","DENIED") '
-                'AND authorization_id IS NOT NULL ORDER BY created_at')]
+                'ORDER BY created_at')]
         return [self.get(i) for i in ids]
 
     def mark_reported(self, case_id):

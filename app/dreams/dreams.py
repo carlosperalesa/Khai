@@ -1,7 +1,13 @@
 """Version-scoped verified observations; learning only proposes guidance."""
 import json
+import logging
+from pathlib import Path
+import shutil
+import sqlite3
 import time
 from app.kernel.database import migrate, connection
+
+logger = logging.getLogger(__name__)
 
 
 class Dreams:
@@ -65,7 +71,7 @@ class Dreams:
                      json.dumps(evidence, ensure_ascii=False) if isinstance(evidence, (dict, list)) else str(evidence),
                      time.time())
                 )
-            except Exception:
+            except sqlite3.Error as exc:
                 pass
 
             # 2. Tracking de hipótesis en SQLite
@@ -88,7 +94,7 @@ class Dreams:
                         'UPDATE hypothesis_contexts SET successes=successes+?,failures=failures+? WHERE hypothesis_id=? AND context=?',
                         (int(success), int(not success), hypothesis, context)
                     )
-                except Exception:
+                except Exception as exc:
                     pass
 
             # 3. Tracking de uso de directrices y detección de retiro de degradadas
@@ -106,7 +112,7 @@ class Dreams:
                             "UPDATE dynamic_guidelines SET success_rate=?,confidence=?,last_used=?,status=CASE WHEN ? >= 3 AND ? <= 0.3 THEN 'deprecated' ELSE status END WHERE id=?",
                             (score_row[0], score_row[0], str(time.time()), score_row[1], score_row[0], rule_id)
                         )
-                except Exception:
+                except Exception as exc:
                     pass
 
             # 4. Consolidación de hipótesis basada en 3 objetivos distintos
@@ -115,13 +121,13 @@ class Dreams:
                     try:
                         tasks_rows = conn.execute('SELECT document FROM control_tasks').fetchall()
                         ids = {json.loads(r[0])['id'] for r in tasks_rows if str(json.loads(r[0]).get('hypothesis_id')) == str(hypothesis)}
-                    except Exception:
+                    except Exception as exc:
                         ids = {r[0] for r in conn.execute('SELECT DISTINCT task_id FROM task_observations').fetchall()}
 
                     verified = {r[0] for r in conn.execute('SELECT task_id FROM task_observations WHERE outcome=1').fetchall()}
                     try:
                         verified.update(r[0] for r in conn.execute('SELECT task_id FROM control_feedback WHERE success=1').fetchall())
-                    except Exception:
+                    except Exception as exc:
                         pass
 
                     hyp = conn.execute('SELECT * FROM hypotheses WHERE id=?', (hypothesis,)).fetchone()
@@ -135,9 +141,9 @@ class Dreams:
                             if self.rules and hasattr(self.rules, 'propose'):
                                 try:
                                     self.rules.propose(hyp['content'], f'dreams:hypothesis:{hypothesis}')
-                                except Exception:
+                                except Exception as exc:
                                     pass
-                except Exception:
+                except Exception as exc:
                     pass
 
             # 5. Registro de Skill reusable
@@ -168,7 +174,7 @@ class Dreams:
                         if self.rules and hasattr(self.rules, 'propose'):
                             try:
                                 rid = self.rules.propose(guidance, 'dreams:' + skill_name + ':' + version_id, conn=conn)
-                            except Exception:
+                            except Exception as exc:
                                 rid = None
                         conn.execute('INSERT INTO proposals VALUES (?,?,?)', (skill_name, version_id, rid or 'rule_prop'))
 
@@ -179,12 +185,12 @@ class Dreams:
             if self.rules and hasattr(self.rules, 'deprecate'):
                 try:
                     self.rules.deprecate(str_rid, reason=f'Degraded success rate {s_rate:.2f} after {s_uses} uses')
-                except Exception:
+                except Exception as exc:
                     pass
             if self.memory and hasattr(self.memory, 'deprecate_guideline'):
                 try:
                     self.memory.deprecate_guideline(int(str_rid) if str_rid.isdigit() else str_rid)
-                except Exception:
+                except Exception as exc:
                     pass
             if self.events and hasattr(self.events, 'emit'):
                 self.events.emit('dreams', 'rule_deprecated', correlation_id=tid, task_id=tid,
@@ -232,13 +238,13 @@ class Dreams:
                     conn.execute('CREATE TABLE IF NOT EXISTS control_commands(source TEXT PRIMARY KEY)')
                     if conn.execute('SELECT 1 FROM control_commands WHERE source=?', (source,)).fetchone():
                         return
-                except Exception:
+                except Exception as exc:
                     pass
 
             if self.rules and hasattr(self.rules, 'approve'):
                 try:
                     self.rules.approve(str(rule_id), source or 'dreams', str(supersedes) if supersedes else None)
-                except Exception:
+                except Exception as exc:
                     pass
 
             try:
@@ -258,7 +264,7 @@ class Dreams:
             if source:
                 try:
                     conn.execute('INSERT OR IGNORE INTO control_commands VALUES (?)', (source,))
-                except Exception:
+                except Exception as exc:
                     pass
 
     def rollback(self, rule_id, source=None):
@@ -269,13 +275,13 @@ class Dreams:
                     conn.execute('CREATE TABLE IF NOT EXISTS control_commands(source TEXT PRIMARY KEY)')
                     if conn.execute('SELECT 1 FROM control_commands WHERE source=?', (source,)).fetchone():
                         return
-                except Exception:
+                except Exception as exc:
                     pass
 
             if self.rules and hasattr(self.rules, 'rollback'):
                 try:
                     self.rules.rollback(str(rule_id), source or 'dreams')
-                except Exception:
+                except Exception as exc:
                     pass
 
             try:
@@ -293,5 +299,26 @@ class Dreams:
             if source:
                 try:
                     conn.execute('INSERT OR IGNORE INTO control_commands VALUES (?)', (source,))
-                except Exception:
+                except Exception as exc:
                     pass
+
+
+    def housekeeping(self, hand_root=None, max_age_sec=3600):
+        """Higiene periodica de Dreams: audita y purga borradores huerfanos y temporales."""
+        cleaned = []
+        if hand_root is None:
+            hand_root = Path(self.path).parent.parent / 'data' / 'hand'
+        hand_path = Path(hand_root) if not isinstance(hand_root, Path) else hand_root
+        if hand_path.exists():
+            now = time.time()
+            for draft_dir in hand_path.glob('.*'):
+                if draft_dir.is_dir():
+                    try:
+                        mtime = draft_dir.stat().st_mtime
+                        if (now - mtime) > max_age_sec:
+                            shutil.rmtree(draft_dir, ignore_errors=True)
+                            cleaned.append(draft_dir.name)
+                            logger.info("Dreams housekeeping: purgado borrador huerfano %s", draft_dir.name)
+                    except OSError as exc:
+                        logger.debug("Dreams housekeeping error en %s: %s", draft_dir, exc)
+        return cleaned

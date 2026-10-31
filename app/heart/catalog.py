@@ -16,6 +16,11 @@ ACTIONS = {
     'create_skill': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
 }
 CAUSE_TAXONOMY = {
+    'stale_draft_or_lock': {
+        'description': 'Colisión con borrador huérfano o bloqueo en el espacio de trabajo',
+        'remediable': True,
+        'requires_new_version': False,
+    },
     'syntax_or_code': {
         'description': 'Error sintáctico o excepción de ejecución en la skill',
         'remediable': True,

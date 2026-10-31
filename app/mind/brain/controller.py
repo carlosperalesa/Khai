@@ -17,18 +17,21 @@ logger = logging.getLogger(__name__)
 PROFILES = {
     'low': {
         'machine_type': 'e2-standard-8',
+        'fallback_machine_types': ['e2-standard-4', 'n2-standard-8'],
         'label': 'low (Dolphin CPU Spot e2-standard-8, 8 vCPU / 32 GB RAM)',
         'rate_clp_per_hour': 152.0,
         'model': 'dolphin3:8b',
     },
     'mid': {
         'machine_type': 'g2-standard-4',
+        'fallback_machine_types': ['g2-standard-8'],
         'label': 'mid (Dolphin 8B GPU Spot g2-standard-4, NVIDIA L4 24 GB VRAM)',
         'rate_clp_per_hour': 418.0,
         'model': 'dolphin3:8b',
     },
     'high': {
         'machine_type': 'g2-standard-8',
+        'fallback_machine_types': ['g2-standard-4', 'g2-standard-12'],
         'label': 'high (Qwen 32B Abliterated GPU Spot g2-standard-8, NVIDIA L4 24 GB VRAM)',
         'rate_clp_per_hour': 550.0,
         'model': 'qwen2.5-32b-abliterated',
@@ -476,46 +479,55 @@ class ModelController:
                 del_resp.raise_for_status()
                 self._wait_operation(del_resp.json()['name'])
 
-        body = {
-            'name': self.instance,
-            'machineType': f'zones/{self.zone}/machineTypes/{target_mt}',
-            'scheduling': {
-                'provisioningModel': 'SPOT',
-                'instanceTerminationAction': 'STOP',
-                'onHostMaintenance': 'TERMINATE',
-                'automaticRestart': False,
-            },
-            'disks': [
-                {
-                    'boot': True,
-                    'autoDelete': False,
-                    'source': f'projects/{self.project}/zones/{self.zone}/disks/{self.disk}',
-                }
-            ],
-            'networkInterfaces': [
-                {
-                    'network': 'global/networks/default',
-                    'accessConfigs': [{'name': 'External NAT', 'type': 'ONE_TO_ONE_NAT'}],
-                }
-            ],
-        }
-        ins_resp = requests.post(
-            self._gce_url('instances'),
-            headers=self._headers(),
-            json=body,
-            timeout=20,
-        )
-        if not ins_resp.ok:
-            raise RuntimeError(f'No se pudo crear instancia Spot ({target_mt}): {ins_resp.text[:300]}')
-        try:
-            self._wait_operation(ins_resp.json()['name'])
-        except RuntimeError as op_err:
-            raise
-
-        self._record_start(profile, target_mt, spec['rate_clp_per_hour'])
-        self._confirm_ready(profile)
-        self._set_mode_state(profile, mark_notified=True)
-        return f"[Modo {label} conectado]"
+        target_candidates = [target_mt] + spec.get('fallback_machine_types', [])
+        last_create_err = None
+        for candidate_mt in target_candidates:
+            body = {
+                'name': self.instance,
+                'machineType': f'zones/{self.zone}/machineTypes/{candidate_mt}',
+                'scheduling': {
+                    'provisioningModel': 'SPOT',
+                    'instanceTerminationAction': 'STOP',
+                    'onHostMaintenance': 'TERMINATE',
+                    'automaticRestart': False,
+                },
+                'disks': [
+                    {
+                        'boot': True,
+                        'autoDelete': False,
+                        'source': f'projects/{self.project}/zones/{self.zone}/disks/{self.disk}',
+                    }
+                ],
+                'networkInterfaces': [
+                    {
+                        'network': 'global/networks/default',
+                        'accessConfigs': [{'name': 'External NAT', 'type': 'ONE_TO_ONE_NAT'}],
+                    }
+                ],
+            }
+            ins_resp = requests.post(
+                self._gce_url('instances'),
+                headers=self._headers(),
+                json=body,
+                timeout=20,
+            )
+            if not ins_resp.ok:
+                last_create_err = RuntimeError(f'No se pudo crear instancia Spot ({candidate_mt}): {ins_resp.text[:300]}')
+                logger.warning('Spot %s rechazado; intentando alternativa...', candidate_mt)
+                continue
+            try:
+                self._wait_operation(ins_resp.json()['name'])
+                self._record_start(profile, candidate_mt, spec['rate_clp_per_hour'])
+                self._confirm_ready(profile)
+                self._set_mode_state(profile, mark_notified=True)
+                return f"[Modo {label} conectado]"
+            except RuntimeError as op_err:
+                last_create_err = op_err
+                logger.warning('Operación Spot %s falló (%s)', candidate_mt, op_err)
+                continue
+        if last_create_err:
+            raise last_create_err
+        raise RuntimeError(f'No se pudo activar ningún tipo de máquina para {profile}')
 
     def stop(self) -> str:
         current = self.get_instance()

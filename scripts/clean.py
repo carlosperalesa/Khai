@@ -35,7 +35,7 @@ def clean(days=7, include_venv=False, dry_run=False):
                 cleaned_items += 1
 
     # 2. Test temp & test caches
-    for target in (".pytest_cache", ".coverage", ".test-temp"):
+    for target in (".pytest_cache", ".coverage", ".test-temp", "MagicMock", "other/scratch"):
         p = ROOT / target
         if p.exists():
             print(f"  [Eliminando] {target}")

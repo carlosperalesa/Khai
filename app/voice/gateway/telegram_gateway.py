@@ -170,8 +170,8 @@ class TelegramHandler:
                     response = requests.post(f"{self.base_url}/editMessageText", json=payload, timeout=10)
                     response.raise_for_status()
                     return response.json()
-                except:
-                    pass
+                except requests.RequestException as err:
+                    logger.debug("Reintento de edicion de mensaje %s fallo: %s", message_id, err)
             logger.warning(f"Error editando mensaje {message_id}: {type(e).__name__}")
             return {}
         except Exception as e:

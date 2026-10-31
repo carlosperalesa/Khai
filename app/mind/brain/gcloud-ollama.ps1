@@ -14,11 +14,11 @@ $ErrorActionPreference = 'Stop'
 $BrainDir = $PSScriptRoot
 $KhaiRoot = (Get-Item $BrainDir).Parent.Parent.Parent.FullName
 $env:CLOUDSDK_PYTHON = Join-Path $KhaiRoot '.venv\Scripts\python.exe'
-$env:CLOUDSDK_CONFIG = Join-Path $DolphinDir '.gcloud'
-$GcloudCmd = Join-Path $DolphinDir '.tools\google-cloud-sdk\bin\gcloud.cmd'
+$env:CLOUDSDK_CONFIG = Join-Path $BrainDir '.gcloud'
+$GcloudCmd = Join-Path $KhaiRoot '.tools\google-cloud-sdk\bin\gcloud.cmd'
 if (-not (Test-Path -LiteralPath $GcloudCmd)) {
     $globalGcloud = Get-Command 'gcloud' -ErrorAction SilentlyContinue
-    if (-not $globalGcloud) { throw 'gcloud CLI no encontrado en Dolphin/.tools ni en PATH.' }
+    if (-not $globalGcloud) { throw 'gcloud CLI no encontrado en .tools ni en PATH.' }
     $GcloudCmd = $globalGcloud.Source
 }
 
@@ -79,4 +79,3 @@ switch ($Command) {
         & $GcloudCmd compute disks list --project=$Project --filter="name=$Disk"
     }
 }
-

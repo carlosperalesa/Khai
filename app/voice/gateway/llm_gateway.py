@@ -302,6 +302,42 @@ class LLMManager:
         status, now = self._load_status(), time.time()
         pool = [item for item in self.api_keys_pool if now > status.get(item['id'], 0)]
         last_error = None
+
+        dolphin_ctrl = getattr(self, 'dolphin', None)
+        active_mode = (dolphin_ctrl.get_active_mode()
+                       if dolphin_ctrl is not None
+                       else os.getenv('KHAI_DOLPHIN_MODE', 'nano').strip().lower())
+        endpoint = self._dolphin_endpoint()
+
+        # Si el modo activo es high, mid o low, priorizar el nodo acelerado en cascada estricta (high > mid > low)
+        if endpoint and active_mode in {'high', 'mid', 'low'}:
+            ladder = ['high', 'mid', 'low'] if active_mode == 'high' else (['mid', 'low'] if active_mode == 'mid' else ['low'])
+            for profile in ladder:
+                if dolphin_ctrl is not None:
+                    try:
+                        self._notify(f"[Conectando con Modo {profile}]")
+                        dolphin_ctrl.start(profile)
+                        res = self._complete_dolphin(messages, tools, endpoint, kwargs)
+                        self._notify(f"[Modo {profile} conectado]")
+                        return res
+                    except Exception as exc:
+                        last_error = exc
+                        from app.mind.brain.controller import _format_error_reason
+                        reason = _format_error_reason(exc)
+                        logger.warning('Brain tool-calling %s falló (%s): %s', profile, type(exc).__name__, exc)
+                        self._notify(f"[Modo {profile} falló por: {reason}]")
+                else:
+                    try:
+                        return self._complete_dolphin(messages, tools, endpoint, kwargs)
+                    except Exception as exc:
+                        last_error = exc
+                        logger.warning('Brain tool-calling falló (%s)', type(exc).__name__)
+            # Si se agotó la cascada acelerada, degradar a nano
+            if dolphin_ctrl is not None:
+                dolphin_ctrl.mark_fallback_to_nano()
+            self._notify("[Modo nano conectado]")
+
+        # Fallback a pool de Cloud API (Gemini / modo nano)
         for current in pool:
             try:
                 turn = getattr(self, '_complete_' + current['type'])(
@@ -313,24 +349,7 @@ class LLMManager:
                 logger.warning('Tool-calling provider %s failed (%s)', current['id'], type(exc).__name__)
                 code = getattr(getattr(exc, 'response', None), 'status_code', None)
                 self._mark_key_failed(current['id'], cooldown=300 if code in {401, 403, 429} else None)
-        endpoint = self._dolphin_endpoint()
-        dolphin_ctrl = getattr(self, 'dolphin', None)
-        if endpoint:
-            if dolphin_ctrl is not None:
-                for profile in ('high', 'mid', 'low'):
-                    try:
-                        self._notify(f"Conectando con Dolphin {profile.capitalize()}")
-                        dolphin_ctrl.start(profile)
-                        return self._complete_dolphin(messages, tools, endpoint, kwargs)
-                    except Exception as exc:
-                        last_error = exc
-                        logger.warning('Dolphin tool-calling %s unavailable (%s)', profile, type(exc).__name__)
-            else:
-                try:
-                    return self._complete_dolphin(messages, tools, endpoint, kwargs)
-                except Exception as exc:
-                    last_error = exc
-                    logger.warning('Dolphin tool-calling unavailable (%s)', type(exc).__name__)
+
         raise ValueError('Ningún LLM disponible soportó el turno con herramientas') from last_error
 
     @staticmethod

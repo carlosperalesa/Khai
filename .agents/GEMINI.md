@@ -7,7 +7,7 @@ Khai convierte objetivos conversacionales en resultados verificables. Busca la s
 ## 1. Los Tres Pilares
 
 1. **Crear:** Hand investiga, construye, valida y prueba mediante un ciclo de herramientas persistente; una llamada aislada al LLM nunca constituye creación.
-2. **Reparar:** Error, evidencia y trayectoria vuelven al ciclo. Repetir sin cambio está estrictamente prohibido; dos errores equivalentes escalan a Heart (diagnóstico obligatorio apoyado en CoreEyes y logs reales) y, si falta autoridad o información, a Pixy.
+2. **Reparar:** Error, evidencia y trayectoria vuelven al ciclo. Repetir sin cambio está estrictamente prohibido; ante el primer fallo de tarea se escala a Heart (diagnóstico obligatorio apoyado en CoreEyes, deduplicación por huella y logs reales) y, si falta autoridad o información, a Pixy.
 3. **Aprender:** Todo éxito verificado y fallo técnico útil deja una nota recuperable en Dreams. Una experiencia puede mejorar una skill candidata; cambiar políticas exige tres objetivos independientes y 80 % de éxito verificado.
 
 ---

@@ -6,7 +6,9 @@ services:
     env_file:
       - .env
     ports:
+      # Puerto 8000: Inspeccion y monitoreo interno en localhost (filtrado externamente por Azure NSG)
       - "8000:8000"
+      # Puerto 8443: Ingress publico TLS exclusivo para webhook de Telegram
       - "8443:8443"
     volumes:
       - ./data:/app/data

@@ -286,7 +286,7 @@ class ActionPlanner:
         validate_recipe(recipe, specs)
         inputs = proposal.get('inputs') if isinstance(proposal.get('inputs'), dict) else {}
         if not validate_params(recipe['input_schema'], inputs, allow_missing=True):
-            raise ValueError('Invalid composition inputs')
+            return None
         for correction in correction_context or []:
             ref = {key: correction[key] for key in ('service_id', 'operation', 'version')}
             matched = next((step for step in recipe['steps']

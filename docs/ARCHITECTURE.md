@@ -1,12 +1,12 @@
 # Manual Técnico y Arquitectura de Khai
 
-Este documento consolida la arquitectura del sistema, contratos, almacenamiento, seguridad, decisiones históricas (ADRs), procedimientos de operaciones y la infraestructura híbrida acelerada.
+Este documento consolida la arquitectura del sistema, contratos, almacenamiento, seguridad, decisiones históricas (ADRs), procedimientos de operaciones, la infraestructura híbrida acelerada (Brain) y la arquitectura canónica de pruebas.
 
 ---
 
 ## 1. Visión General y Flujo de Órganos
 
-Khai opera mediante seis órganos especializados con responsabilidades y límites estrictos:
+Khai opera mediante órganos especializados con responsabilidades y límites estrictos:
 
 ```text
                   +-------------------------------------------------+
@@ -20,8 +20,8 @@ Khai opera mediante seis órganos especializados con responsabilidades y límite
                                           |
                                           v
                                 +-------------------+
-                                |       Mind        | (Intención, capacidad, proveedor)
-                                +---------+---------+
+                                |   Mind / Brain    | (Intención, capacidad, razonamiento,
+                                +---------+---------+  cascada de inferencia y modos VM)
                                           |
                      +--------------------+--------------------+
                      |                                         |
@@ -40,6 +40,14 @@ Khai opera mediante seis órganos especializados con responsabilidades y límite
                                |      Dreams       | (Aprendizaje y notas de episodios)
                                +-------------------+
 ```
+
+### Roles y Responsabilidades:
+- **Mind / Brain:** Mind interpreta el lenguaje natural extrayendo la intención (`Intent`), la capacidad requerida y el proveedor opcional. Incorpora **Brain** (`app/mind/brain/`), que actúa como la fachada unificada de razonamiento, selección de modelos, controlador de VM Spot (`ModelController`) y orquestador de la cascada de inferencia (`high > mid > low > nano`).
+- **Hand:** Ciclo activo de herramientas persistente; investiga, genera código, valida esquemas y ejecuta órdenes en contenedores seguros.
+- **Pixy:** Custodia de gobernanza, autoridad, secretos y contratos; solicita confirmación binaria (`y`/`n`) y emite `DecisionReceipt`.
+- **Heart:** Diagnóstico objetivo de fallos reiterados apoyado en telemetría real y lectura de logs del contenedor vía `CoreEyes`.
+- **Voice:** Concentrador único de conectividad externa con verificación TLS estricta, DNS pineado y aislamiento absoluto de secretos (`secrets.env`).
+- **Dreams:** Persiste notas de episodios (`episode_notes`), consolida experiencias y formula recomendaciones de evolución de catálogo.
 
 ### Ciclo de Vida de una Solicitud:
 1. **Interpretación (Mind):** Convierte el mensaje en un `Intent` (objetivo, capacidad requerida y proveedor opcional).
@@ -72,7 +80,7 @@ Khai opera mediante seis órganos especializados con responsabilidades y límite
 Todo el estado transaccional del Core se consolida en una base de datos SQLite común: **`data/control.sqlite3`**.
 
 ### Puertos Acotados y Propietarios Lógicos:
-Cada órgano accede a través de un puerto con operaciones de escritura restringidas:
+Cada órgano accede a través de un puerto formal con operaciones de escritura restringidas:
 
 | Puerto | Escrituras Permitidas | Propietario Lógico |
 | --- | --- | --- |
@@ -86,6 +94,7 @@ Cada órgano accede a través de un puerto con operaciones de escritura restring
 - **Transacciones atómicas:** La aprobación en Pixy y la habilitación de la orden en Hand ocurren en una transacción atómica. Hand consume la orden de forma idempotente.
 - **Archivos excluidos de `control.sqlite3`:**
   - `data/voice/secrets.env`: Administrado exclusivamente por Voice.
+  - `data/voice/dolphin_usage.sqlite3`: Sesiones y estado de modo de inferencia local administrado por Brain (`ModelController`).
   - `data/mind/identity.yaml`: Identidad estática del agente.
   - Recibos externos de gateways de red.
 
@@ -93,7 +102,7 @@ Cada órgano accede a través de un puerto con operaciones de escritura restring
 
 ## 4. Aislamiento de Red y Modelo de Seguridad
 
-- **Workers Desconectados:** Los contenedores de ejecución de skills carecen de acceso a interfaces de red externas.
+- **Workers Desconectados:** Los contenedores de ejecución de skills carecen de acceso a interfaces de red externas (`--network none`).
 - **Pasarela Centralizada (Voice):** Cualquier salida HTTP pasa por Voice mediante descriptores de servicio validados que definen dominios, rutas, métodos y esquemas de parámetros autorizados.
 - **Aislamiento de Secretos:** Las claves de API y credenciales residen en el host y se inyectan en tiempo de ejecución en Voice. Nunca se graban en imágenes de Docker, historiales de chat, prompts ni descriptores de skills.
 
@@ -145,9 +154,14 @@ Cada órgano accede a través de un puerto con operaciones de escritura restring
 
 ---
 
-## 7. Infraestructura Conversacional Acelerada (Dolphin)
+## 7. Infraestructura Acelerada de Inferencia y Razonamiento (Brain)
 
 Khai cuenta con una arquitectura híbrida para inferencia local privada de alta velocidad y razonamiento avanzado sin depender exclusivamente de APIs comerciales externas.
+
+### Unificación en Brain (`app/mind/brain/`):
+- `Brain` consolida la fachada de razonamiento, selección de modelos, controlador de infraestructura (`ModelController`) y soporte de scripting en un único subsistema cohesivo.
+- Se eliminó el directorio raíz obsoleto `/Dolphin/`, consolidando sus herramientas de aprovisionamiento en `app/mind/brain/gcloud-ollama.ps1`.
+- Para preservar compatibilidad con código existente, `DolphinController` permanece definido como un alias directo de `ModelController`.
 
 ### Topología de Red e Infraestructura:
 ```text
@@ -163,14 +177,42 @@ Khai cuenta con una arquitectura híbrida para inferencia local privada de alta 
 ```
 
 ### Perfiles de Inferencia:
-1. **Modo Nano (`nano`):** Gemini Cloud API ($0 cómputo GCE). La VM Spot se elimina de inmediato conservando el disco persistente en reposo.
-2. **Modo Low (`low`):** GCE Spot `e2-standard-8` (8 vCPU, 32 GB RAM, CPU). Modelo: `dolphin3:8b` (~$152 CLP/hora).
-3. **Modo Mid (`mid`):** GCE Spot `g2-standard-4` (4 vCPU, 16 GB RAM + 1x NVIDIA L4 24 GB VRAM). Modelo: `dolphin3:8b` (~$418 CLP/hora).
-4. **Modo High (`high`):** GCE Spot `g2-standard-8` (8 vCPU, 32 GB RAM + 1x NVIDIA L4 24 GB VRAM). Modelo: `qwen2.5-32b-abliterated` (19 GB, 32B parámetros, ~$550 CLP/hora).
+1. **Modo High (`high`):** GCE Spot `g2-standard-8` (8 vCPU, 32 GB RAM + 1x NVIDIA L4 24 GB VRAM). Modelo: `qwen2.5-32b-abliterated` (19 GB, 32B parámetros, ~$550 CLP/hora). Perfil prioritario para razonamiento técnico y generación estructurada.
+2. **Modo Mid (`mid`):** GCE Spot `g2-standard-4` (4 vCPU, 16 GB RAM + 1x NVIDIA L4 24 GB VRAM). Modelo: `dolphin3:8b` (~$418 CLP/hora). Respuestas rápidas aceleradas por GPU.
+3. **Modo Low (`low`):** GCE Spot `e2-standard-8` (8 vCPU, 32 GB RAM, CPU). Modelo: `dolphin3:8b` (~$152 CLP/hora). Inferencia privada en CPU de respaldo.
+4. **Modo Nano (`nano`):** Gemini Cloud API ($0 cómputo GCE). La VM Spot se apaga/elimina conservando el disco persistente en reposo. Modo de coordinación general y fallback.
 
 ### Cascada y Resiliencia:
 - Cascada automática en orden estricto: `high > mid > low > nano`.
-- Si una instancia Spot de GPU no está disponible por stockout zonal (`ZONE_RESOURCE_POOL_EXHAUSTED`), el sistema conmuta automáticamente al siguiente perfil informando con claridad: `[Modo high falló por: spot no disponible]`.
-- Al agotar la escala local, conmuta a Gemini con `[Modo nano conectado]`.
-- Temporizador `systemd` y control de inactividad que apaga la VM tras 10 minutos sin tráfico para minimizar costos.
+- Mensajes limpios y concisos durante transiciones:
+  - Al iniciar conexión o cambio de modo: `[Conectando con Modo <nombre>]`
+  - Al completar la conexión exitosamente: `[Modo <nombre> conectado]`
+  - Al fallar un perfil: `[Modo <nombre> falló por: <motivo>]` (ej. `spot no disponible`) continuando inmediatamente con el siguiente perfil.
+  - Al agotar la escala local y entrar a Gemini: `[Modo nano conectado]`
+- Inactividad controlada: temporizador que apaga la VM tras 10 minutos sin tráfico para minimizar costos.
 - Control de presupuestos en GCP con alarmas escalonadas cada $1.000 CLP.
+
+---
+
+## 8. Arquitectura Canónica de Pruebas y Certificación
+
+Toda modificación al código fuente puede ser certificada localmente antes de cualquier despliegue por peticion del usuario mediante las **8 suites canónicas** (`tests/test_*.py`):
+
+| Suite de Prueba | Órgano / Componente | Foco de Validación |
+| --- | --- | --- |
+| **`test_brain.py`** | Mind / Brain | Enrutamiento LLM, cascada `high>mid>low>nano`, ModelController, ciclo de VM Spot, banners y timeouts. |
+| **`test_dreams.py`** | Dreams | Aprendizaje experiencial, registro de `episode_notes` y políticas de promoción de skills. |
+| **`test_hand.py`** | Hand | Ciclo de construcción de código, orden de trabajo, validación de esquemas, recetas y aislamiento Docker. |
+| **`test_heart.py`** | Heart | Detección de fallos repetidos, diagnóstico con `CoreEyes` y logs reales, y planes de recuperación. |
+| **`test_kernel.py`** | Control Store / Kernel | Almacén transaccional `control.sqlite3`, atomicidad de autorizaciones, puertos y buzón de voz. |
+| **`test_mind.py`** | Mind | Extracción de intenciones (`Intent`), resolución de capacidades y proveedores, y flujo conversacional. |
+| **`test_pixy.py`** | Pixy | Gobernanza estricta, confirmación binaria (`y`/`n`), emisión de `DecisionReceipt` y revisión de contratos. |
+| **`test_voice.py`** | Voice | Restricción de red externa, DNS pineado, validación TLS, gestión de `secrets.env` y cliente Telegram. |
+
+**Ejecución estándar:**
+```bash
+python -m pytest -v
+# o bien
+make test
+```
+**Resultado canónico actual:** 264 pruebas pasando al 100% (0 errores, 0 fallos).
