@@ -61,4 +61,5 @@ Khai convierte objetivos conversacionales en resultados verificables. Busca la s
 
 - **Evidencia observable obligatoria:** Los artefactos deben ser reproducibles, los errores completos y las afirmaciones de éxito respaldadas por evidencia verificable directa (logs reales de contenedores, estados de bases de datos, salidas de comandos o suites de pruebas).
 - **Validación previa:** Toda modificación de código debe ser verificada mediante la ejecución de pruebas unitarias (`pytest`) antes de confirmar su finalización.
+- **Actualización documental previa obligatoria:** Toda modificación técnica, funcional o de comportamiento exige actualizar la documentación del proyecto (`CHECKPOINT.md`, `docs/ARCHITECTURE.md` y `README.md`) SIEMPRE antes de realizar cualquier commit en Git. Ningún cambio se comitea ni despliega con documentación desactualizada.
 - **Higiene operativa:** La limpieza rutinaria utiliza `make clean`; la instrucción `clean-all` elimina el entorno virtual `.venv` y no forma parte del flujo normal.

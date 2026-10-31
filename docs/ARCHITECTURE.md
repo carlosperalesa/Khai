@@ -55,7 +55,7 @@ Khai opera mediante órganos especializados con responsabilidades y límites est
 3. **Creación o Reparación (Hand):** Si la capacidad no existe o falló, abre un `agent_run` durable con herramientas persistentes (LLM, análisis de código, tests locales).
 4. **Gobernanza y Autorización (Pixy):** Revisa descriptores de servicio y artefactos. Si se requieren permisos externos, secretos o costos, solicita confirmación binaria (`y`/`n`) al usuario y emite un `DecisionReceipt`.
 5. **Ejecución Segura (Voice + Worker):** Voice procesa llamadas externas mediante servicios declarativos. El worker ejecuta la skill en un contenedor Docker con red directa deshabilitada (`--network none`).
-6. **Verificación y Aprendizaje (Dreams):** Evalúa postcondiciones observables. Si el resultado es exitoso, promueve la skill en el catálogo y registra notas en `episode_notes`. Si falla de forma idéntica dos veces, transfiere el diagnóstico a Heart.
+6. **Verificación y Aprendizaje (Dreams):** Evalúa postcondiciones observables. Si el resultado es exitoso, promueve la skill en el catálogo y registra notas en `episode_notes`. Ante el primer fallo de tarea, transfiere el diagnóstico a Heart con deduplicación por huella de incidente.
 
 ---
 
