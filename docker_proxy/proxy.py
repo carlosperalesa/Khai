@@ -56,6 +56,8 @@ class RunRequest(BaseModel):
     artifact_hash: str
     mode: Literal['SAFE', 'AGENT', 'GOD']
     dependencies: list[str] = Field(default_factory=list, max_length=30)
+    dependency_lock: str | None = Field(default=None, pattern=r'^[a-f0-9]{64}$')
+    goal_revision: int = Field(default=0, ge=0)
     request: str = Field(max_length=64000)
     params: dict = Field(default_factory=dict, max_length=32)
     network: bool = False
@@ -69,7 +71,13 @@ class RunRequest(BaseModel):
 @app.post('/executions')
 def submit(req: RunRequest):
     try:
-        return app.state.engine.submit(req.model_dump())
+        payload = req.model_dump()
+        # Preserve fingerprints of receipts created before these fields existed.
+        if payload['dependency_lock'] is None:
+            payload.pop('dependency_lock')
+        if payload['goal_revision'] == 0:
+            payload.pop('goal_revision')
+        return app.state.engine.submit(payload)
     except (ValueError, PermissionError, FileNotFoundError) as exc:
         raise HTTPException(409, str(exc)) from exc
 

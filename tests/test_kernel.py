@@ -907,6 +907,29 @@ class DependencyPreparationFlowTests(Fixture):
         self.assertEqual(current['result']['stage'],'dependency_preparation')
         recovery.open_incident_case.assert_called_once()
 
+    def test_proxy_http_preserves_dependency_lock_and_recovery_revision(self):
+        from docker_proxy.proxy import app as proxy_app
+        engine = Mock()
+        engine.submit.return_value = {'status':'queued'}
+        token = 't'*32
+        payload = {'execution_id':'run_'+'a'*32,'task_id':'task_'+'b'*32,'artifact_hash':'c'*64,
+                   'mode':'SAFE','dependencies':['demo==1'],'dependency_lock':'d'*64,
+                   'goal_revision':1,'request':'fixture','deadline':time.time()+60}
+        async def check():
+            with patch.object(proxy_app.state,'engine',engine,create=True), patch.dict(os.environ,{'PROXY_TOKEN':token}):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=proxy_app),base_url='http://proxy') as client:
+                    response = await client.post('/executions',json=payload,headers={'Authorization':'Bearer '+token})
+                    self.assertEqual(response.status_code,200,response.text)
+                    received=engine.submit.call_args.args[0]
+                    self.assertEqual(received['dependency_lock'],'d'*64)
+                    self.assertEqual(received['goal_revision'],1)
+                    legacy={k:v for k,v in payload.items() if k not in {'dependency_lock','goal_revision'}}
+                    response=await client.post('/executions',json=legacy,headers={'Authorization':'Bearer '+token})
+                    self.assertEqual(response.status_code,200)
+                    received=engine.submit.call_args.args[0]
+                    self.assertNotIn('dependency_lock',received);self.assertNotIn('goal_revision',received)
+        asyncio.run(check())
+
 
 class ProxyTests(unittest.TestCase):
     def setUp(self):
