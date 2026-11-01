@@ -22,6 +22,110 @@ from unittest.mock import patch
 
 
 class ConversationFlowTests(Fixture):
+    def test_recipe_keyerror_is_recorded_before_heart_and_never_dispatches(self):
+        case = {'case_id': 'case-20261101recipefailure', 'state': 'DIAGNOSED',
+                'plan': None, 'diagnosis': {'findings': []}}
+        recovery = SimpleNamespace(open_incident_case=Mock(return_value=case),
+                                   get=Mock(return_value=case), tick=lambda: [])
+        self.manager.heart = SimpleNamespace(recovery=recovery)
+        task = self.store.create('fixture:recipe-keyerror', 'busca una referencia', state='RECIPE_STEP',
+            recipe={'steps': [{'id': 'search', 'version_id': 'missing-search'}]}, recipe_step_index=0,
+            recipe_outputs={'input': {'query': 'reference'}}, recipe_missing_specs={'search': {
+                'skill_id': 'search', 'description': 'Search reference', 'use_cases': [],
+                'input_schema': {'type': 'object'}, 'output_schema': {'type': 'object'},
+                'capabilities': [], 'services': []}})
+        with patch('app.mind.coordinator.step_params', side_effect=KeyError('count')), \
+             patch.object(self.manager.pixy, 'preflight', return_value={'safe': True}):
+            self.c._run_task(task)
+        failed = self.store.get(task['id'])
+        self.assertEqual(failed['state'], 'DIAGNOSING')
+        self.assertEqual(failed['result'], {'status': 'failed', 'stage': 'routing_recipe',
+                                         'dispatched': False, 'error': 'KeyError', 'error_type': 'KeyError'})
+        self.assertEqual(failed['executions'], 0)
+        self.proxy.submit.assert_not_called()
+        self.c._run_task(failed)
+        recovery.open_incident_case.assert_called_once()
+        diagnosed_task, evidence = recovery.open_incident_case.call_args.args
+        self.assertEqual(diagnosed_task['id'], task['id'])
+        self.assertEqual(evidence, failed['result'])
+        self.assertEqual(self.store.get(task['id'])['recovery_case_id'], case['case_id'])
+        with connection(self.state.db_path) as db:
+            note = db.execute('SELECT stage,evidence_json FROM episode_notes WHERE task_id=?', (task['id'],)).fetchone()
+        self.assertEqual(note['stage'], 'routing_recipe')
+        self.assertEqual(json.loads(note['evidence_json'])['error_type'], 'KeyError')
+
+    def test_permission_rejection_cannot_become_an_automatic_generation_retry(self):
+        case = {'case_id': 'case-20261101permission', 'state': 'SOLUTION_PROPOSED', 'diagnosis': {},
+                'plan': {'target': 'task', 'requires_approval': False, 'reason': 'Retry'}}
+        recovery = SimpleNamespace(open_incident_case=Mock(return_value=case), get=Mock(return_value=case))
+        self.manager.heart = SimpleNamespace(recovery=recovery)
+        task = self.store.create('fixture:permission-rejected', 'Use a restricted skill', state='GENERATING')
+        with patch.object(self.c, '_advance_scoped', side_effect=PermissionError('authorization rejected')):
+            self.c._run_task(task)
+        rejected = self.store.get(task['id'])
+        self.assertEqual(rejected['state'], 'DIAGNOSING')
+        self.assertEqual(rejected['recovery_blocked'], 'authorization')
+        self.c._run_task(rejected)
+        self.assertEqual(self.store.get(task['id'])['state'], 'FAILED')
+        self.assertEqual(self.store.get(task['id'])['generations'], 0)
+        recovery.open_incident_case.assert_called_once()
+        self.proxy.submit.assert_not_called()
+
+    def test_exception_after_execution_id_is_diagnosed_as_uncertain_without_replay(self):
+        case = {'case_id': 'case-20261101uncertain', 'state': 'SOLUTION_PROPOSED', 'diagnosis': {},
+                'plan': {'target': 'task', 'requires_approval': False, 'reason': 'Retry'}}
+        recovery = SimpleNamespace(open_incident_case=Mock(return_value=case), get=Mock(return_value=case))
+        self.manager.heart = SimpleNamespace(recovery=recovery)
+        task = self.store.create('fixture:uncertain-execution', 'Apply an external effect', state='RUNNING',
+                                 execution_id='run_' + 'a' * 32)
+        with patch.object(self.c, '_advance_scoped', side_effect=ValueError('malformed runtime receipt')):
+            self.c._run_task(task)
+        uncertain = self.store.get(task['id'])
+        self.assertEqual(uncertain['state'], 'DIAGNOSING')
+        self.assertEqual(uncertain['result']['status'], 'unknown')
+        self.assertTrue(uncertain['result']['dispatched'])
+        self.c._run_task(uncertain)
+        self.assertEqual(self.store.get(task['id'])['state'], 'UNKNOWN')
+        self.assertEqual(self.store.get(task['id'])['execution_id'], task['execution_id'])
+        self.proxy.submit.assert_not_called()
+        recovery.open_incident_case.assert_called_once()
+
+    def test_pixy_authorization_exception_does_not_restart_or_reopen_repair(self):
+        case = {'case_id': 'case-20261101authorization', 'state': 'SOLUTION_PROPOSED', 'diagnosis': {},
+                'plan': {'target': 'task', 'requires_approval': True, 'summary': 'Repair this task'}}
+        recovery = SimpleNamespace(get=Mock(return_value=case), open_incident_case=Mock(), tick=lambda: [])
+        self.manager.heart = SimpleNamespace(recovery=recovery)
+        task = self.store.create('fixture:pixy-authorization-fails', 'Repair the original failure',
+            state='DIAGNOSING', recovery_case_id=case['case_id'],
+            result={'status': 'failed', 'stage': 'routing_recipe', 'dispatched': False, 'error': 'KeyError'})
+        with patch.object(self.manager.pixy, 'request_recovery_approval', side_effect=PermissionError('denied')) as approve:
+            self.c._run_task(task)
+            self.c.tick()
+        closed = self.store.get(task['id'])
+        self.assertEqual(closed['state'], 'FAILED')
+        self.assertEqual(closed['diagnosis_error'], 'PermissionError')
+        self.assertEqual(closed['result']['error'], 'KeyError')
+        approve.assert_called_once()
+        recovery.open_incident_case.assert_not_called()
+        self.proxy.submit.assert_not_called()
+
+    def test_heart_failure_closes_diagnosis_without_recursive_case_creation(self):
+        import requests
+        for failure in (KeyError('bad diagnostic'), requests.ReadTimeout('Heart timeout')):
+            with self.subTest(failure=type(failure).__name__):
+                recovery = SimpleNamespace(open_incident_case=Mock(side_effect=failure), tick=lambda: [])
+                self.manager.heart = SimpleNamespace(recovery=recovery)
+                task = self.store.create('fixture:heart-fails-' + type(failure).__name__, 'Diagnose this failure',
+                    state='DIAGNOSING', result={'status': 'failed', 'stage': 'routing_recipe',
+                                                'dispatched': False, 'error': 'KeyError'})
+                self.c._run_task(task)
+                closed = self.store.get(task['id'])
+                self.assertEqual(closed['state'], 'FAILED')
+                self.assertEqual(closed['diagnosis_error'], type(failure).__name__)
+                self.assertEqual(closed['result']['error'], 'KeyError')
+                self.c.tick()
+                recovery.open_incident_case.assert_called_once()
+
     def test_pre_dispatch_transport_timeout_stops_generation_for_heart_diagnosis(self):
         import requests
         task = self.store.create('fixture:pre-dispatch-timeout', 'Create fixture capability',

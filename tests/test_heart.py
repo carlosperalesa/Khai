@@ -417,6 +417,100 @@ class HeartRecoveryTests(unittest.TestCase):
         self.hand.create_recovery.assert_not_called()
 
 
+class RecipeBindingDiagnosisTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name)/'heart.sqlite3'
+        self.senses, self.hand = Mock(), Mock()
+        self.recovery = Recovery(self.db, self.senses, self.hand, Mock())
+        self.senses.evidence.return_value = {
+            'storage': {'vitals': {'ram_percent': 30}, 'integrity': {'status': 'ok'}},
+            'core_logs': {'text': 'ERROR historical network timeout'},
+            'container_core': {'running': True}, 'container_proxy': {'running': True}}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def task():
+        # Reproduce the production structure without claiming a catalog lookup.
+        inputs = {'query': 'Brave Search API web search endpoint and authentication documentation'}
+        return {'id': 'task_04735224fdd64cfab3dbadcce5b3c8bd', 'state': 'FAILED',
+                'attempt_number': 1, 'goal_revision': 0, 'execution_id': None,
+                'error': "'count'", 'result': None, 'recipe_step_index': 0,
+                'recipe_receipts': [], 'recipe_input': dict(inputs),
+                'recipe_outputs': {'input': dict(inputs)},
+                'recipe': {'recipe_id': 'plan-compuesto', 'input_schema': {
+                    'type': 'object', 'properties': {'query': {'type': 'string'},
+                                                       'count': {'type': 'integer'}},
+                    'required': ['query'], 'additionalProperties': False},
+                    'steps': [{'id': 'paso_1', 'version_id': '79a56e394b684224b1d84b990ed5f998',
+                               'bindings': {'query': 'input.query', 'count': 'input.count'}}],
+                    'output': 'paso_1.provider'}}
+
+    def test_typed_binding_failure_persists_exact_finding_without_invented_plan(self):
+        task = self.task()
+        failure = {'status': 'failed', 'stage': 'routing_recipe', 'dispatched': False,
+                   'error_type': 'KeyError', 'error': 'KeyError'}
+        task['result'] = failure
+        with patch.object(self.recovery, '_llm_analyze_incident') as analyze:
+            case = self.recovery.open_incident_case(task, failure)
+        self.assertEqual(case['cause_code'], 'invalid_result')
+        self.assertEqual(case['state'], 'DIAGNOSED')
+        self.assertIsNone(case['plan'])
+        finding = case['diagnosis']['findings'][0]
+        self.assertEqual(finding['code'], 'recipe_binding_unavailable')
+        self.assertIsNone(finding['remedy'])
+        self.assertIn('contrato de resolución del Core', finding['detail'])
+        observed = case['evidence']['recipe_binding_failure']
+        self.assertEqual(observed['version_id'], task['recipe']['steps'][0]['version_id'])
+        self.assertEqual(observed['catalog_status'], 'unobserved')
+        self.assertEqual(observed['missing_optional_bindings'], [{'field': 'count', 'binding': 'input.count'}])
+        analyze.assert_not_called()
+        self.hand.create_recovery.assert_not_called()
+        restarted = Recovery(self.db, self.senses, self.hand, Mock())
+        self.assertEqual(restarted.get(case['case_id'])['diagnosis'], case['diagnosis'])
+
+    def test_historical_quoted_key_is_only_possible_binding_failure(self):
+        task = self.task()
+        self.senses.evidence.return_value['pixy'] = {'recent_tasks': [task]}
+        with patch.object(self.recovery, '_llm_analyze_incident') as analyze:
+            case = self.recovery.open_case('repara ' + task['id'], 'owner:historical-binding')
+        self.assertEqual(case['diagnosis']['status'], 'unknown')
+        self.assertEqual(case['diagnosis']['findings'][0]['code'], 'possible_binding_unavailable')
+        self.assertIsNone(case['plan'])
+        self.assertIsNone(case['evidence']['recipe_binding_failure']['error_type'])
+        self.assertIsNone(case['evidence']['recipe_binding_failure']['dispatched'])
+        analyze.assert_not_called()
+
+    def test_other_recipe_failures_keep_deep_diagnosis(self):
+        scenarios = ('authorization', 'inactive_version', 'required_input', 'present_optional', 'dispatched')
+        for revision, scenario in enumerate(scenarios):
+            with self.subTest(scenario=scenario):
+                task = self.task()
+                task['goal_revision'] = revision
+                failure = {'status': 'failed', 'stage': 'routing_recipe', 'dispatched': False,
+                           'error_type': 'KeyError', 'error': 'KeyError'}
+                if scenario == 'authorization':
+                    failure.update(error_type='PermissionError', error='PermissionError')
+                elif scenario == 'inactive_version':
+                    failure.update(error_type='ValueError', error='Pinned recipe version is no longer active')
+                elif scenario == 'required_input':
+                    task['recipe']['input_schema']['required'].append('count')
+                elif scenario == 'present_optional':
+                    task['recipe_outputs']['input']['count'] = 3
+                elif scenario == 'dispatched':
+                    failure['dispatched'] = True
+                    task['execution_id'] = 'run_'+'a'*32
+                task['result'] = failure
+                with patch.object(self.recovery, '_llm_analyze_incident', return_value={
+                    'root_cause': 'Inspect the specific observed failure',
+                    'corrective_instruction': 'Validate the actual failing contract', 'steps': []}) as analyze:
+                    case = self.recovery.open_incident_case(task, failure)
+                analyze.assert_called_once()
+                self.assertNotIn('recipe_binding_failure', case['diagnosis'])
+
+
 class HandRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

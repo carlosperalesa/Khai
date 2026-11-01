@@ -1,5 +1,23 @@
 # Revisión de tiempos de activación — 31 de octubre de 2026
 
+## Nueva medición con transiciones cancelables
+
+Sin Monitoring, sin otro disco y con la misma precarga de 90 s:
+
+| Perfil | Activación total | Precarga | Resultado |
+|---|---:|---:|---|
+| low | 72,068 s | 32,645 s | Conectado en CPU |
+| mid | 141,445 s | 35,792 s | Conectado, residencia completa en GPU |
+| high | 201,089 s | 90,128 s | ReadTimeout durante tensores |
+
+Fuentes: low `telegram:1793499059227`, mid `telegram:1793499535847`, high `telegram:1793499776616`. Informe privado `/opt/khai/data/voice/load-probes-20261101/comparison-low-mid-high.json`, capturas por intento y `analysis.json` en cada carpeta. La precarga es la misma petición autorizada; no se generó otra respuesta para medir.
+
+Ollama en mid informó load_duration 35,505 s y prompt_eval_duration 0,2086 s para 29 tokens. `/api/ps` confirmó size_vram igual a size (5.280.114.933 bytes), contexto 4096. En low: carga 30,515 s y prompt 2,050 s. El router usa contexto 8192: un éxito mínimo con 4096 no acredita el tiempo del turno completo.
+
+High llegó a mmap de tensores sin evidencia de construcción del contexto ni modelo residente antes del timeout. El serial registró HTTP 499 tras 1m30s, consistente con cancelación del cliente. El watchdog CUDA también aparece en mid exitoso y no demuestra una causa fatal. Sin contadores de disco/RAM/GPU no se identifica el recurso limitante.
+
+La hostkey SSH cambió. Se detuvo la captura del huésped sin renovar confianza; serial autenticado y guestAttributes no contenían una huella verificable. El propietario autorizó después validar la identidad en consola GCP y medir sin cambiar costos ni plazo; esa comprobación está en curso. Los datos siguientes conservan la ronda histórica, donde también falló mid.
+
 La migración dejó operativo un disco `pd-balanced` de 100 GiB en `us-west1-b`.
 Low respondió; high y mid agotaron la precarga. No hay causa raíz demostrada
 para los perfiles GPU y no se autorizaron cambios de plazo ni de APIs de métricas.

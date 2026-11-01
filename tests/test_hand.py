@@ -1393,7 +1393,12 @@ class RecipeExecutionTests(unittest.TestCase):
         self.manager.action_planner.propose.side_effect = ValueError('Plan inválido')
         task = self.coordinator.intake('owner:bad-plan', 'Consulta los datos actuales')
         self.coordinator._run_task(task)
-        self.assertEqual(self.coordinator.store.get(task['id'])['state'], 'FAILED')
+        failed = self.coordinator.store.get(task['id'])
+        self.assertEqual(failed['state'], 'DIAGNOSING')
+        self.assertEqual(failed['result']['error_type'], 'ValueError')
+        self.assertFalse(failed['result']['dispatched'])
+        self.coordinator._run_task(failed)
+        self.manager.action_planner.propose.assert_called_once()
         self.manager.memory.append_long_term.assert_not_called()
         self.assertFalse(any('Ya estoy ejecutando' in call.args[0]
                              for call in self.coordinator.notify.call_args_list))

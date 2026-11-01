@@ -1,8 +1,10 @@
 # Khai
 
+Continuidad ya comprobada en el servidor: Nano respondió durante la carga de low y una cancelación real invalidó el cambio en ~146 ms. Mid cargó en 35,8 s; high sigue agotando los 90 s durante tensores. La búsqueda reveló un binding opcional ausente y un plan incorrecto de Heart, que fue rechazado. Las correcciones y su nueva aceptación se registran en CHECKPOINT; no se declara reparado high ni completada la búsqueda sin sus recibos.
+
 Continuidad de modelos implementada y en validación: `/mode <perfil>` devuelve un ID y prepara el cambio en segundo plano; `/mode cancel` o `/stop` lo cancelan. Brain conserva el servicio actual o confirma Nano antes de reemplazar la VM compartida. Si Nano falla, solicita elegir un perfil; no arranca otros automáticamente. El contrato de Mind usa el esquema nativo de Ollama y separa la orden actual del historial. Estado real de despliegue y pruebas en [CHECKPOINT](./CHECKPOINT.md).
 
-Validación local de esta continuación: 345 pruebas y 30 subpruebas; revisión posterior de Brain/contrato, 43 pruebas y 2 subpruebas. Todas aprobadas; los fixtures de modelos no sustituyen la aceptación real.
+Validación local consolidada: 360 pruebas y 39 subpruebas aprobadas (318,21 s). Todas aprobadas; los fixtures de modelos no sustituyen la aceptación real.
 
 El propietario aprobó el [diario común de interacciones](./docs/COMMON_JOURNAL.md). La implementación enlaza modelos, chat, Hand, Pixy, Heart, informes y uso de skills mediante ciclos y eventos persistentes; `/p informe <ID>` consulta una rama sin iniciar reparación. Validación y despliegue de esta continuación se registran en CHECKPOINT.
 
@@ -30,7 +32,7 @@ La skill [`web-search`](./skills/web-search/SKILL.md) usa Brave Search API media
 
 El código `f4c845d`, desplegado el 31 de octubre, incluye mejoras de diagnóstico y verificación, herramientas básicas de Hand y Brave. La suite local pasó 273 pruebas y 22 subpruebas; la salud HTTPS, SQLite y ejecución real de búsqueda se verificaron en producción. Las evidencias están en `CHECKPOINT.md` y `docs/VALIDATION.md`; las transiciones cancelables entre modelos permanecen pendientes de implementación.
 
-La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (264 pruebas unitarias), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
+La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (360 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
 
 ---
 
@@ -73,7 +75,7 @@ Khai opera bajo un esquema desacoplado y complementario:
 ```bash
 make start      # Inicia el sistema Khai
 make stop       # Detiene el sistema Khai
-make test       # Ejecuta las 8 suites de pruebas unitarias canónicas (264 pruebas)
+make test       # Ejecuta las 8 suites de pruebas unitarias canónicas (360 pruebas)
 make stats      # Verifica la integridad de las bases de datos SQLite
 make clean      # Limpia archivos temporales y logs respetando .venv
 ```

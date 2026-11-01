@@ -44,7 +44,15 @@ class ModelContractTests(unittest.TestCase):
         self.assertIn('MENSAJE_ACTUAL', kwargs['system_instruction'])
         self.assertEqual(kwargs['response_schema'], AssistantTurn.model_json_schema())
         self.assertEqual(kwargs['temperature'], 0)
+        self.assertNotIn('"$defs"', kwargs['system_instruction'])
         self.assertFalse(result['creation_requested'])
+
+    def test_transport_type_error_after_submission_does_not_replay(self):
+        gateway = self.gateway()
+        gateway._generate_dolphin = Mock(side_effect=TypeError('response decoding failed'))
+        with self.assertRaises(TypeError):
+            gateway._call_dolphin('prompt', 'http://10.200.0.2:11434', {})
+        gateway._generate_dolphin.assert_called_once()
 
     def test_ollama_receives_schema_system_and_exact_model_with_metrics(self):
         gateway = self.gateway()

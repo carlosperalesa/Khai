@@ -307,24 +307,62 @@ class Coordinator:
         except (requests.RequestException, ConnectionError) as exc:
             self.store.event(task['id'], 'transport_error', {'type': type(exc).__name__})
             current = self.store.get(task['id'])
-            if not current.get('execution_id') and current['state'] not in TERMINAL:
+            if current['state'] == 'DIAGNOSING':
+                self._coordination_failure(task, exc)
+            elif not current.get('execution_id') and current['state'] not in TERMINAL:
                 failure = {'status': 'failed', 'stage': current['state'].lower(),
                            'dispatched': False, 'error': type(exc).__name__}
                 self.store.update(task['id'], expected={current['state']}, state='DIAGNOSING',
                                   result=failure, feedback=failure)
         except Exception as exc:
-            current = self.store.get(task['id'])
-            if (current['state'] not in {'CANCELLED', 'CANCELLING'}
-                    and current.get('goal_revision', 0) == task.get('goal_revision', 0)):
-                self.store.update(task['id'], state='FAILED', error=str(exc)[:1000])
-                self.notify(f"{task['id']}: detenido: {str(exc)[:700]}")
-                logger.exception('Error de coordinación')
+            try:
+                self._coordination_failure(task, exc)
+            except StaleGoalRevision:
+                logger.info('Fallo de una revisión obsoleta descartado para %s', task['id'])
+            logger.exception('Error de coordinación')
         finally:
             typing_stop.set()
             if typing_thread is not None:
                 typing_thread.join(timeout=0.2)
             current_budget.reset(token)
             current_goal_revision.reset(goal_token)
+
+    def _coordination_failure(self, snapshot, exc):
+        """Stop the failing step before asking Heart; never replay an uncertain effect."""
+        current = self.store.get(snapshot['id'])
+        if (not current or current['state'] in TERMINAL | {'CANCELLING'}
+                or current.get('goal_revision', 0) != snapshot.get('goal_revision', 0)):
+            return
+        tid, state = current['id'], current['state']
+        if state == 'DIAGNOSING':
+            # An error inside Heart (including a failed authorization handoff) is
+            # evidence about this diagnosis, never another request to diagnose it.
+            uncertain = (current.get('result') or {}).get('status') == 'unknown'
+            self.store.update(tid, expected={'DIAGNOSING'}, state='UNKNOWN' if uncertain else 'FAILED',
+                              diagnosed=True, diagnosis_error=type(exc).__name__)
+            self.store.event(tid, 'diagnosis_failed', {'error_type': type(exc).__name__})
+            self.notify(f'{tid}: el diagnóstico no pudo completarse; evidencia conservada para Pixy.')
+            return
+        dispatched = bool(current.get('execution_id'))
+        stage = 'routing_recipe' if state == 'RECIPE_STEP' else state.lower()
+        failure = {'status': 'unknown' if dispatched else 'failed', 'stage': stage,
+                   'dispatched': dispatched, 'error': type(exc).__name__,
+                   'error_type': type(exc).__name__}
+        if dispatched:
+            failure['execution_id'] = current['execution_id']
+        blocked = ('uncertain_execution' if dispatched else
+                   'authorization' if isinstance(exc, PermissionError) else None)
+        failed = self.store.update(tid, expected={state}, state='DIAGNOSING',
+                                   result=failure, feedback=failure, error=type(exc).__name__,
+                                   recovery_blocked=blocked)
+        self.store.event(tid, 'coordination_failure', failure)
+        learning = getattr(self.learning, 'record_failure', None)
+        if not dispatched and callable(learning):
+            try:
+                learning(failed, stage, failure)
+            except Exception as learning_error:
+                self.store.event(tid, 'failure_learning_error', {'error_type': type(learning_error).__name__})
+        self.notify(f'{tid}: fallo registrado; Heart revisará la evidencia antes de continuar.')
 
     def _collect_llm_jobs(self):
         for task_id, future in list(self._llm_jobs.items()):
@@ -2408,9 +2446,21 @@ class Coordinator:
                         case = None
                 if not case and not task.get('diagnosed'):
                     case = self.manager.heart.recovery.open_incident_case(task, task.get('feedback') or task.get('result') or {})
+                if case and case.get('case_id') != task.get('recovery_case_id'):
+                    self.store.update(tid, expected={'DIAGNOSING'}, recovery_case_id=case['case_id'])
 
             plan = case.get('plan') if case else None
             diagnosis = case.get('diagnosis') if case else None
+            blocked = task.get('recovery_blocked')
+            if blocked and not (blocked == 'authorization' and plan and plan.get('requires_approval')):
+                self.store.update(tid, expected={'DIAGNOSING'},
+                                  state='UNKNOWN' if blocked == 'uncertain_execution' else 'FAILED',
+                                  diagnosed=True)
+                self.store.event(tid, 'recovery_requires_owner_decision', {'reason': blocked})
+                self.notify(f'{tid}: evidencia diagnosticada; Pixy debe revisar '
+                            + ('los recibos de la ejecución incierta antes de autorizar otro intento.'
+                               if blocked == 'uncertain_execution' else 'la autorización rechazada antes de continuar.'))
+                return
 
             # Si Heart formuló un plan de autoreparación de tarea
             if plan and plan.get('target') == 'task':

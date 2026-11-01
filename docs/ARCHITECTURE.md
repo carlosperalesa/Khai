@@ -1,8 +1,12 @@
 # Manual Técnico y Arquitectura de Khai
 
+Aceptación de continuidad con `dd00b6d`: un chat real se resolvió mediante Nano mientras low cargaba; cancelación real en ~146 ms sin activar el intento anulado. Mid cargó en 35,792 s; high agotó 90,128 s en tensores. No se cambió el plazo ni se habilitó Monitoring. Medición interna por SSH pendiente de identidad verificada; serial/API conservados en el servidor.
+
+La búsqueda conversacional descubrió un error del Core: resolver un binding opcional `input.count` ausente. La resolución ahora omite solo entradas opcionales ausentes; nunca oculta resultados previos ni valores requeridos ausentes. Los errores genéricos pasan a DIAGNOSING con etapa/tipo/despacho; resultados inciertos conservan execution_id y no se reejecutan. Un fallo de Heart/Pixy durante DIAGNOSING se registra sin abrir otro bucle. El diagnóstico acotado distingue evidencia tipada de una hipótesis histórica y no propone recrear la skill ni reparar red por ese binding. Son correcciones en validación; aceptación final en CHECKPOINT.
+
 Continuidad de modelos implementada localmente y en validación: [`MODEL_TRANSITIONS.md`](./MODEL_TRANSITIONS.md). La composición de producción conecta `TransitionManager` con Brain y Voice: genera solicitudes durables, cancela mediante generación y publica el modo efectivo en el SQLite de control. La inferencia no arranca VMs ni cambia perfiles automáticamente; confirma Nano antes de publicar un fallback. Los métodos legacy de mutación rechazan llamadas fuera del propietario de transición. Mind entrega esquema nativo a Ollama y separa mensaje actual del historial. Aceptación y limitaciones operativas en CHECKPOINT.
 
-Suite conjunta de esta continuación: 345 pruebas y 30 subpruebas aprobadas (332,95 s); después de los últimos ajustes concurrentes, Brain/contrato aprobó 43 pruebas y 2 subpruebas. No son conteos acumulables. Las pruebas reales se documentan por sus fuentes y recibos.
+Suite consolidada de esta continuación: 360 pruebas y 39 subpruebas aprobadas (318,21 s). Incluye la verificación de bindings opcionales en recetas y el blindaje de la cascada estricta high>mid>low>nano. Las pruebas reales se documentan por sus fuentes y recibos.
 
 El diario común fue aprobado por el propietario. Implementación y contrato en [`COMMON_JOURNAL.md`](./COMMON_JOURNAL.md): ciclos con raíz/padre, eventos inmutables, enlaces y consulta por ID en el SQLite de control. La auditoría anterior describe el estado previo; sus propuestas pendientes se resuelven según esta implementación. La aceptación conjunta y en servidor se registra en CHECKPOINT.
 
@@ -267,4 +271,4 @@ python -m pytest -v
 # o bien
 make test
 ```
-**Resultado canónico actual:** 264 pruebas pasando al 100% (0 errores, 0 fallos).
+**Resultado canónico actual:** 360 pruebas y 39 subpruebas pasando al 100% (0 errores, 0 fallos en 318,21 s).

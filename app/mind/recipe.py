@@ -131,9 +131,19 @@ class RevisionPlanner:
 def step_params(recipe, index, outputs, spec):
     step = recipe['steps'][index]
     params = {}
+    required = set(spec['input_schema'].get('required', []))
     for field, binding in step['bindings'].items():
         source, name = binding.split('.', 1)
-        params[field] = outputs[source][name]
+        if source not in outputs:
+            raise ValueError('Recipe binding references an unavailable step output')
+        values = outputs[source]
+        if name not in values:
+            # Optional recipe inputs remain absent; the skill owns their defaults.
+            # A missing upstream result is a contract failure, even for optional fields.
+            if source == 'input' and field not in required:
+                continue
+            raise ValueError('Recipe binding is missing a required value')
+        params[field] = values[name]
     if not validate_params(spec['input_schema'], params):
         raise ValueError('Recipe step inputs no longer match the pinned contract')
     return params

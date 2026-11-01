@@ -1,14 +1,24 @@
 # CHECKPOINT - PROYECTO KHAI
 
-## Continuidad de modelos y contrato de low — trabajo autorizado
+## Continuidad de modelos, contratos y validación de producción — trabajo autorizado
+
+- **Reanudación y despliegue autorizados por el propietario:** Se ejecutan las 5 acciones prioritarias acordadas: consolidar documentación, commit y push a `origin/main`, despliegue en Azure (`carlos@20.237.211.250`), repetición conversacional de `busca` con Brave en Telegram y verificación de hostkey SSH / telemetría GPU Spot.
+- La suite completa canónica consolidada aprobó localmente: **360 pruebas y 39 subpruebas aprobadas en 318,21 s (0 errores, 0 fallos)**. Incluye el nuevo test de bindings de receta `tests/test_recipe_bindings.py` y el blindaje de cascada estricta (`high > mid > low > nano`).
+- `dd00b6d` desplegado en Core/proxy; HTTPS 200 validado y cuatro quick_check ok. Las 43 pruebas de Brain/contrato pasaron también dentro de la imagen aislada sin red ni datos/secretos de producción.
+- Continuidad real: `/mode low`, fuente `telegram:1793499059227`, transición `transition_7c24cd28985c4c839c4ad626b73aaa64`, completada. Durante su precarga, el chat `telegram:1793499080747` terminó con Gemini `gemini-3.5-flash-lite` en 0,785 s de inferencia, entregado en mensaje 1709. Ramas separadas y acuses persistidos.
+- La búsqueda `telegram:1793499157785`, tarea `task_04735224fdd64cfab3dbadcce5b3c8bd`, agotó 180 s de inferencia CPU y usó Nano con fallback registrado. El JSON de Nano extrajo la consulta actual correctamente, pero no acredita el contrato de low. La receta posterior falló antes del worker: `input.count` opcional no estaba suministrado. No se repitió sin cambios.
+- Pixy recibió primero un informe (`telegram:1793499429488`) y luego una orden explícita de reparación (`telegram:1793499581411`). Heart abrió `case-20261031b9e7bfd0`, pero propuso recrear web-search pese al pin existente: propuesta incorrecta, rechazada mediante `n` a la pregunta entregada 1716 (`telegram:1793499745187`). No se autorizó esa reparación.
+- Correcciones en validación: bindings opcionales ausentes se omiten, conservando defaults de la skill; bindings requeridos o resultados previos ausentes fallan explícitamente. Excepciones genéricas de coordinación pasan a Heart con evidencia tipada, sin replay de efectos inciertos ni bucles si falla el diagnóstico. Heart reconoce la evidencia acotada del binding y no inventa una skill ausente ni una reparación de red; el caso histórico sin etapa conserva incertidumbre. Mind evita duplicar el esquema completo en el prompt de Ollama; el esquema nativo y la validación siguen completos. TypeError tras un transporte no provoca un segundo envío.
+- Medición nueva sin Monitoring ni ampliación de plazo: low 72,068 s total / 32,645 s precarga; mid (`telegram:1793499535847`) 141,445 / 35,792 s, conectado con residencia GPU completa; high (`telegram:1793499776616`) 201,089 / 90,128 s, ReadTimeout durante tensores. El watchdog también apareció en mid exitoso; no prueba causa fatal. Informe `/opt/khai/data/voice/load-probes-20261101/comparison-low-mid-high.json`. Faltan contadores internos de disco/RAM/GPU porque cambió la hostkey SSH; serial y guestAttributes no permitieron verificarla, no se renovó confianza ni se habilitó ninguna API.
+- Cancelación real: fuentes `telegram:1793500058066` y `telegram:1793500058153`; `transition_fd239fc06b3c439bb5d73bf93a0f1a93` quedó cancelled en unos 146 ms, sin operaciones remotas pendientes ni publicación tardía. Nuevo low solicitado `telegram:1793500106708` para la aceptación del arreglo; no constituye un resultado de búsqueda todavía.
 
 - El propietario autorizó corregir low, repetir `busca` real, implementar Nano/cancelación y medir high/mid sin ampliar 90 s ni habilitar Monitoring.
 - Mind separa sistema, historial de referencia y mensaje actual; Ollama recibe `AssistantTurn.model_json_schema()` en `format`, temperatura cero y contexto 8192. Se mantienen validación, hash y evidencia de rechazo, sin envolver respuestas mal formadas ni reintentar sin cambios.
 - `TransitionManager` usa control.sqlite3 como autoridad de generación/modo efectivo. `/mode` devuelve ID sin esperar GCP, `/mode cancel` y `/stop` invalidan el intento; las respuestas tardías no publican perfiles obsoletos. Nano se prueba antes de retirar un servicio. Si no existe VM activa, una elección local explícita puede arrancar sin Nano. No hay cascada de perfiles desde inferencia.
 - Las mutaciones remotas conservan intención y nombre de operación; un recibo ausente bloquea nuevas mutaciones, los nombres pendientes se consultan por GET. Reiniciar marca unknown sin replay. Ver `docs/MODEL_TRANSITIONS.md` para límites.
-- Validación específica: 38 pruebas de Mind/contrato aprobadas; suite Brain final 35 pruebas y 2 subpruebas aprobadas. Suite conjunta en curso; despliegue y aceptación real todavía pendientes en este punto.
+- Validaciones parciales anteriores: 38 pruebas de Mind/contrato y 35 pruebas más 2 subpruebas de Brain. La validación final posterior está registrada arriba; no sumar los conteos parciales.
 - Respaldo previo verificado: `/opt/khai/data/backups/model-continuity-20261101T020711Z`, cuatro bases SQLite con quick_check ok. VM observada TERMINATED; no arrancada durante la preparación. Medición preparada por SSH con clave y hostkey existentes, sin gcloud SSH, agentes ni nuevas APIs.
-- Validación consolidada: 345 pruebas y 30 subpruebas aprobadas en 332,95 s. Los últimos ajustes del agente se validaron después con las suites completas de Brain/contrato: 43 pruebas y 2 subpruebas aprobadas en 26,52 s. No sumar esos conteos como pruebas distintas. Código listo para despliegue; aceptación real aún pendiente.
+- Validación consolidada previa: 345 pruebas y 30 subpruebas aprobadas en 332,95 s; luego Brain/contrato, 43 pruebas y 2 subpruebas en 26,52 s. No sumar estos conteos, que preceden a la suite final de 360/39 registrada arriba.
 
 ## Diario común aprobado — continuación del 31 de octubre
 
@@ -81,98 +91,3 @@
 - La inspección inicial encontró el catálogo legado vacío y `google-search-skill` v1/v2 en borrador, con descriptores históricos de Google aprobados. Al finalizar este despliegue, el catálogo canónico `skill_specs` contiene `web-search` activa y verificada; los registros históricos de Google se conservan.
 - Pendiente diseñar transiciones cancelables con servicio anterior disponible durante el arranque, telemetría correlacionada y control de costos. El acuerdo histórico de herramientas primitivas está en el checkpoint del commit `b183cd5`; varias quedaron pendientes.
 
-**Fecha de referencia:** 30 de octubre de 2026.  
-**Entorno de ejecución:** Windows PowerShell (Control y Desarrollo) / Linux Azure (Producción).  
-**Servidor Azure:**
-- Host / Usuario: `carlos@20.237.211.250` (`/opt/khai`)
-- Clave SSH: `.ssh/id_rsa`
-- Contenedores Docker: `khai_core` (puertos 8443 TLS público y 8000 inspección interna), `khai_docker_proxy` (puerto 8001 red privada)
-
----
-
-## 1. OBJETIVO GENERAL Y CONSTITUCIÓN
-
-Khai convierte objetivos conversacionales en resultados verificables manteniendo la autoridad y la seguridad:
-1. **Crear:** Hand investiga, construye, valida y prueba mediante herramientas persistentes; una llamada aislada al LLM nunca constituye creación.
-2. **Reparar:** Error, evidencia y trayectoria vuelven al ciclo. Ante el primer fallo de tarea se escala a Heart (diagnóstico obligatorio apoyado en CoreEyes, deduplicación por huella y logs reales).
-3. **Aprender:** Todo éxito verificado y fallo técnico útil deja una nota recuperable en Dreams.
-4. **Gobierno y Límite:**
-   - Pixy custodia decisiones, permisos y contratos; confirmación obligatoria binaria (`y`/`n`).
-   - Voice posee el acceso a la red y los secretos; los workers corren en contenedores aislados sin red directa (`--network none`).
-   - Ninguna decisión sobre proveedores externos, costos o secretos se toma silenciosamente.
-5. **Principio Rector de Inferencia:** `llm = brain`. Brain es el único órgano de inferencia y razonamiento; selecciona y enruta internamente entre modelos (`high`, `mid`, `low`, `nano`) según la cascada estricta.
-6. **Regla Operativa Obligatoria:** Actualización documental previa obligatoria: la documentación (`CHECKPOINT.md`, `docs/ARCHITECTURE.md`, `README.md`) se actualiza SIEMPRE antes de realizar cualquier commit o push a Git.
-
----
-
-## 2. SITUACIÓN ACTUAL DEL PROYECTO (Última Sesión)
-
-### Commits Desplegados en Azure (`origin/main`)
-- `8218c27`: `feat(brain): cascada estricta high>mid>low>nano en complete/generation, fallback de maquinas spot y recuperacion en heart/dreams`
-- `de55ee7`: `refactor(tests): consolidar suites en los 8 organos canonicos y kernel (264 pruebas verificadas)`
-- `3a79c88`: `refactor(brain): unificar controlador de modelos e inferencia en Brain y migrar scripts de soporte`
-- `fb6de23`: `docs(curation): sistematizar documentacion en manual unico y centralizar reglas en GEMINI.md`
-- `c69be09`: `docs(checkpoint): registrar despliegue de cascada y optimizacion de dolphin`
-- `1225dc4`: `feat(dolphin): cascada high>mid>low>nano, timeouts optimizados y notificaciones concisas`
-
----
-
-### Hitos Técnicos Implementados y Verificados
-
-1. **Unificación Conceptual `llm = brain` y Cascada Estricta:**
-   - `Brain` es la fachada exclusiva de razonamiento e inferencia.
-   - Cascada estricta implementada y verificada tanto en `generate_content()` como en `complete()` (ciclo de herramientas de Hand):
-     - `high` (`qwen2.5-32b-abliterated` en GPU L4 Spot)
-     - `mid` (`dolphin3:8b` en GPU L4 Spot)
-     - `low` (`dolphin3:8b` en CPU Spot 8 vCPU)
-     - `nano` (Gemini API Cloud Serverless)
-   - El sistema **nunca se salta escalones** ni degrada directo a nano si los nodos acelerados están en la secuencia.
-   - Notificaciones concisas y sin marcas: `[Conectando con Modo <nombre>]`, `[Modo <nombre> conectado]`, `[Modo <nombre> falló por: <motivo>]`, `[Modo nano conectado]`.
-
-2. **Redundancia de Máquinas Spot para Modo High:**
-   - Para evitar fallos por stockout en `us-west1-a`, el controlador intenta automáticamente en caliente tres máquinas con la misma GPU NVIDIA L4 de 24 GB y el mismo disco persistente de 100 GB:
-     - `g2-standard-8` (primaria: 8 vCPU, 32 GB RAM)
-     - `g2-standard-4` (alternativa 1: 4 vCPU, 16 GB RAM)
-     - `g2-standard-12` (alternativa 2: 12 vCPU, 48 GB RAM)
-   - Brinda 3 oportunidades consecutivas de levantar Qwen 32B antes de descender a `mid`.
-
-3. **Higiene Periódica en Dreams y Autorreparación en Heart:**
-   - **Dreams (`housekeeping`):** Audita periódicamente el espacio de trabajo (`data/hand`) purgando borradores huérfanos o carpetas ocultas inactivas de tareas ya finalizadas.
-   - **Heart (`stale_draft_or_lock`):** Clasifica automáticamente colisiones por borradores residuales y ejecuta planes de remediación autorizados sin requerir reinicio del servidor.
-   - **Mind (`ActionPlanner`):** Ante metas complejas con inputs ambiguos, degrada graciosamente a una meta atómica directa en Hand en lugar de abortar la coordinación.
-
-4. **Blindaje de Secretos y Frontera de Red:**
-   - Secretos duplicados (`secrets.env` y `GEMINI_API.txt`) eliminados de la raíz del proyecto; las credenciales residen exclusivamente en `data/voice/secrets.env`.
-   - Endpoint público `@app.get('/health')` desplegado y verificado en Azure respondiendo `{"status":"ok"}`.
-   - Excepciones de red acotadas en `telegram_gateway.py` y manejo de SQLite protegido en `dreams.py`.
-
-5. **Consolidación de Pruebas Canónicas (264 Pruebas en Verde):**
-   - 8 suites canónicas mapeadas 1:1 a los órganos de Khai:
-     - `tests/test_brain.py`: 18 tests
-     - `tests/test_dreams.py`: 6 tests
-     - `tests/test_hand.py`: 51 tests
-     - `tests/test_heart.py`: 24 tests
-     - `tests/test_kernel.py`: 86 tests
-     - `tests/test_mind.py`: 20 tests
-     - `tests/test_pixy.py`: 26 tests
-     - `tests/test_voice.py`: 33 tests
-   - **Total:** 264 passed en 153s (0 errores, 0 fallos).
-
----
-
-## 3. ESTADO DE PRODUCCIÓN (AZURE `20.237.211.250`)
-- Contenedor `khai_core` activo y saludable (`Uvicorn running on https://0.0.0.0:8443`).
-- Endpoint `/health` verificado respondiendo `{"status":"ok"}`.
-- Webhook `/webhook` activo y protegido por HMAC (`HTTP 401 Unauthorized` ante peticiones no autenticadas).
-- Disco persistente de inferencia: `dolphin-boot-disk` de 100 GB en GCP `us-west1-a` listo para montarse en Modo High.
-
----
-
-## 4. PRÓXIMO PASO INMEDIATO (Validación Sintética en Telegram)
-Reanudar el recorrido sintético de producción según [`docs/VALIDATION.md`](./docs/VALIDATION.md):
-1. **Comando de Inicio en Telegram:**
-   `/mode high` -> Verificar que Brain conecte con GCE Spot GPU L4 (`qwen2.5-32b-abliterated`) y emita `[Modo high conectado]`.
-2. **Paso 1 y 2:**
-   Enviar: `crea una skill para conectarse a internet y buscar en Google. Cuando diga “busca en Google <consulta>”, devuelve una lista con título, enlace y descripción de cada resultado`
-3. **Paso 3:**
-   Aprobar en Pixy con `y` y verificar que Hand redacte el `ServiceDescriptor` y construya la skill en Modo High sin timeouts.

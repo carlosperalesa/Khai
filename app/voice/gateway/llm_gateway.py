@@ -126,10 +126,12 @@ class LLMManager:
         return ''
 
     def _call_dolphin(self, prompt: str, endpoint: str, kwargs: Dict) -> str:
+        import inspect
         try:
-            return self._generate_dolphin(prompt, endpoint, kwargs)
+            inspect.signature(self._generate_dolphin).bind(prompt, endpoint, kwargs)
         except TypeError:
             return self._generate_dolphin(prompt, endpoint)
+        return self._generate_dolphin(prompt, endpoint, kwargs)
 
     def _dolphin_model(self) -> str:
         env_model = os.getenv('KHAI_DOLPHIN_MODEL', '').strip()
@@ -708,7 +710,10 @@ class LLMManager:
             
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         if kwargs.get('system_instruction'):
-            payload['systemInstruction'] = {'parts': [{'text': kwargs['system_instruction']}]}
+            system = kwargs['system_instruction']
+            if kwargs.get('response_schema'):
+                system += '\nEsquema: ' + json.dumps(kwargs['response_schema'], ensure_ascii=False)
+            payload['systemInstruction'] = {'parts': [{'text': system}]}
         if 'temperature' in kwargs:
             generation_config['temperature'] = kwargs['temperature']
         if generation_config:

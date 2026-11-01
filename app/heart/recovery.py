@@ -246,11 +246,75 @@ class Recovery:
 
         return 'syntax_or_code', err_str or 'Fallo no especificado durante la ejecución'
 
+    @staticmethod
+    def _recipe_binding_evidence(task, failure_info=None):
+        """Recognize the narrow absent-optional-input contract, not any recipe error.
+
+        A pin proves the selected version's identity, not its current availability.
+        Keep those observations separate from claims about the skill catalog.
+        """
+        if not isinstance(task, dict) or task.get('execution_id'):
+            return None
+        recipe = task.get('recipe')
+        if not isinstance(recipe, dict):
+            return None
+        steps, index = recipe.get('steps'), task.get('recipe_step_index')
+        if (not isinstance(steps, list) or type(index) is not int
+                or not 0 <= index < len(steps) or not isinstance(steps[index], dict)):
+            return None
+        step = steps[index]
+        version_id = step.get('version_id')
+        if not isinstance(version_id, str) or not version_id or version_id.startswith('missing-'):
+            return None
+        schema, bindings = recipe.get('input_schema'), step.get('bindings')
+        outputs = task.get('recipe_outputs')
+        if (not isinstance(schema, dict) or not isinstance(bindings, dict)
+                or not isinstance(outputs, dict) or not isinstance(outputs.get('input'), dict)):
+            return None
+        properties, required = schema.get('properties'), schema.get('required', [])
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return None
+        values = outputs['input']
+        if set(required) - set(values):
+            return None  # Missing required owner input has a different recovery path.
+        missing = []
+        for field, binding in bindings.items():
+            if not isinstance(binding, str) or not binding.startswith('input.'):
+                continue
+            name = binding[len('input.'):]
+            if name in properties and name not in required and name not in values:
+                missing.append({'field': field, 'binding': binding})
+        if not missing:
+            return None
+        failure = failure_info if isinstance(failure_info, dict) else task.get('result')
+        failure = failure if isinstance(failure, dict) else {}
+        error_type = failure.get('error_type') or failure.get('error')
+        error = str(failure.get('error') or task.get('error') or '')
+        exact_stage = failure.get('stage') == 'routing_recipe' and failure.get('dispatched') is False
+        binding_value_error = error_type == 'ValueError' and 'recipe binding' in error.lower()
+        confirmed = exact_stage and (error_type == 'KeyError' or binding_value_error)
+        # Historical failures lack stage/type. A quoted missing key plus the
+        # untouched first step is only a hypothesis, never a fabricated traceback.
+        historical = (not failure.get('stage') and index == 0 and not task.get('recipe_receipts')
+                      and any(error in {repr(m['binding'][6:]), m['binding'][6:]}
+                              for m in missing))
+        if not confirmed and not historical:
+            return None
+        return {'task_id': task.get('id'), 'goal_revision': task.get('goal_revision', 0),
+                'attempt_number': task.get('attempt_number', 1), 'step_id': step.get('id'),
+                'version_id': version_id, 'catalog_status': 'unobserved',
+                'missing_optional_bindings': missing, 'stage_observed': confirmed,
+                'error_type': error_type if confirmed else None,
+                'dispatched': False if confirmed else None}
+
     def open_incident_case(self, task, failure_info, requested_by='system'):
         """Heart abre o deduplica un caso de incidente ante un fallo tipado, evitando bucles."""
         task_id = task.get('id') if isinstance(task, dict) else str(task)
         run_id = task.get('execution_id') if isinstance(task, dict) else None
         cause_code, detail = self.classify_cause(failure_info)
+        binding_evidence = self._recipe_binding_evidence(task, failure_info)
+        if binding_evidence and binding_evidence['stage_observed']:
+            cause_code, detail = 'invalid_result', 'Recipe input binding resolution failed before dispatch'
         fprint = cause_fingerprint(cause_code, detail)
         attempt = (f"attempt-{task.get('attempt_number', 1)}:revision-{task.get('goal_revision', 0)}"
                    if isinstance(task, dict) else 'none')
@@ -315,6 +379,8 @@ class Recovery:
             if isinstance(evidence.get('brain'), dict):
                 evidence['brain']['model_rejections'] = ([evidence['model_rejection']]
                     if evidence['model_rejection'] is not None else [])
+        if binding_evidence:
+            evidence['recipe_binding_failure'] = binding_evidence
         self._scoped_journal(evidence, task)
         # Evidence is durable before the potentially slow diagnosis/model call.
         self._move(case_id, 'COLLECTING_EVIDENCE', expected={'COLLECTING_EVIDENCE'}, evidence=evidence)
@@ -389,6 +455,9 @@ class Recovery:
             candidates = []
         evidence['focus_task'] = max(candidates, key=lambda task: task.get('created_at') or 0) if candidates else None
         focus = evidence['focus_task'] or {}
+        binding_evidence = self._recipe_binding_evidence(focus)
+        if binding_evidence:
+            evidence['recipe_binding_failure'] = binding_evidence
         self._scoped_journal(evidence, focus)
         self._move(case_id, 'COLLECTING_EVIDENCE', expected={'COLLECTING_EVIDENCE'}, evidence=evidence,
                    task_id=focus.get('id'), run_id=focus.get('execution_id'))
@@ -494,6 +563,22 @@ class Recovery:
         from app.heart.catalog import task_binding
         rejection = evidence.get('model_rejection')
         target = (failure_override or {}).get('task') or evidence.get('focus_task') or {}
+        binding = evidence.get('recipe_binding_failure') or self._recipe_binding_evidence(target)
+        if binding:
+            confirmed = binding['stage_observed']
+            paths = ', '.join(m['binding'] for m in binding['missing_optional_bindings'])
+            detail = (('La resolución de bindings falló antes de despachar un worker. ' if confirmed else
+                       'Posible fallo de resolución de bindings; no se conservó la etapa ni el tipo de la excepción. ')
+                      + f"El paso {binding.get('step_id')} está pinneado a {binding['version_id']} y referencia "
+                      + paths + ', ausentes y opcionales según el esquema de entrada de la receta. '
+                      'Se requiere corregir y validar el contrato de resolución del Core antes de repetir. '
+                      'El pin no acredita el estado actual del catálogo; esta evidencia no demuestra '
+                      'que falte la skill ni justifica recrearla o reparar una conexión.')
+            return {'status': 'degraded' if confirmed else 'unknown', 'findings': [{
+                'code': 'recipe_binding_unavailable' if confirmed else 'possible_binding_unavailable',
+                'severity': 'high' if confirmed else 'warning', 'remedy': None, 'detail': detail}],
+                'recipe_binding_failure': binding, 'observed_task': target,
+                'task_binding': task_binding(target)}
         failure = target.get('result') or {}
         if failure.get('stage') == 'routing' and failure.get('diagnostic') and not rejection:
             return {'status': 'unknown', 'findings': [{
