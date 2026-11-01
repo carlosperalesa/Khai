@@ -27,6 +27,12 @@ class Dreams:
             '''CREATE TABLE IF NOT EXISTS rule_proposals(hypothesis_id TEXT PRIMARY KEY, rule_id TEXT UNIQUE)''',
         ]], component='dreams')
 
+    def record_failure(self, task, stage, evidence):
+        """A technical failure before execution is useful without inventing a run receipt."""
+        if self.memory and hasattr(self.memory, 'record_episode'):
+            self.memory.record_episode(task['id'], None, task.get('request', ''), 'failure', stage,
+                                       'Fallo técnico anterior al despacho; evidencia conservada para Heart.', evidence)
+
     def record(self, task, success, evidence):
         run = task.get('execution_id')
         tid = task.get('id')

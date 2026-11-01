@@ -578,6 +578,44 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
 
 
 class FullRecoveryCycleIntegrationTests(unittest.TestCase):
+    def test_invalid_model_json_reaches_heart_pixy_and_dreams_with_persisted_evidence(self):
+        from app.bootstrap import ModuleManager
+        from app.mind.coordinator import Coordinator
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'data';(root/'memory').mkdir(parents=True)
+            (root/'memory'/'agent.md').write_text('Fixture identity',encoding='utf-8')
+            with patch.dict(os.environ,{'KHAI_RUNTIME':'local','TELEGRAM_BOT_TOKEN':'token','TELEGRAM_USER_ID':'owner'}):
+                manager=ModuleManager(data_dir=root);c=Coordinator(manager)
+                manager.coordinator=c;manager.heart.recovery.coordinator=c;manager.telegram=Mock()
+                manager.senses.adapters['storage']=lambda: {'vitals':{'ram_percent':30,'disk_free':20*1024**3},'integrity':{'status':'ok'}}
+                manager.senses.legacy_gateway=Mock()
+                manager.senses.legacy_gateway.observe.return_value=json.dumps({'status':'running','running':True,'text':'Fixture healthy'})
+                bad='{"tool_calls":[{"name":"set_default_provider","arguments":{"provider":"brave"}}]}'
+                manager.brain._gateway.generate_content=Mock(return_value=bad)
+                task=c.store.create('fixture:rejection','Set the search provider',state='ROUTING',kind='turn')
+                try:
+                    c.advance(task);failed=c.store.get(task['id'])
+                    self.assertEqual(failed['state'],'DIAGNOSING')
+                    case=manager.heart.recovery.get(failed['recovery_case_id'])
+                    self.assertEqual(case['cause_code'],'invalid_result')
+                    evidence=case['evidence']['model_rejection']
+                    self.assertEqual(evidence['response_excerpt'],bad)
+                    self.assertEqual(evidence['task_id'],task['id'])
+                    self.assertEqual(evidence['contract'],'AssistantTurn')
+                    self.assertTrue(any('capability' in e['loc'] for e in evidence['errors']))
+                    with connection(root/'control.sqlite3') as db:
+                        episode=db.execute('SELECT outcome,stage,run_id FROM episode_notes WHERE task_id=?',(task['id'],)).fetchone()
+                    self.assertEqual(tuple(episode),('failure','routing',None))
+                    c.advance(failed)
+                    self.assertEqual(manager.heart.recovery.get(case['case_id'])['state'],'WAITING_USER_APPROVAL')
+                    self.assertIsNotNone(manager.pixy.authorizations.pending())
+                    original_id=case['case_id']
+                    task2=dict(failed,attempt_number=2,goal_revision=1)
+                    case2=manager.heart.recovery.open_incident_case(task2,failed['result'])
+                    self.assertNotEqual(original_id,case2['case_id'])
+                finally:
+                    c._llm_executor.shutdown(wait=True);c._mailbox_executor.shutdown(wait=True)
+
     def test_pre_dispatch_dependency_failure_resumes_exact_approved_artifact(self):
         from app.bootstrap import ModuleManager
         from app.mind.coordinator import Coordinator

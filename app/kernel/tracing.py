@@ -14,7 +14,7 @@ BOOT_ID: str = secrets.token_hex(4)
 
 LOG_ERROR_RE = re.compile(r'\b(ERROR|CRITICAL)\b|Traceback \(most recent call last\)')
 LOG_TIMESTAMP_RE = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?)')
-LOG_TRACE_RE = re.compile(r'\[((?:req|trace|tr|task|case)-[a-zA-Z0-9_-]+)\]')
+LOG_TRACE_RE = re.compile(r'\[((?:req|trace|tr|task|case)[_-][a-zA-Z0-9_-]+)\]')
 
 
 def new_trace_id(prefix: str = 'req') -> str:

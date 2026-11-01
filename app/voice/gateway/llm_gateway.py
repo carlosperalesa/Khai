@@ -5,6 +5,7 @@ import requests
 import json
 import uuid
 import threading
+from contextvars import ContextVar
 from typing import Dict
 from app.pixy.budget import current_budget
 
@@ -28,6 +29,9 @@ class LLMManager:
         self.secrets = secrets
         self.provider_db = provider_db
         self.dolphin = dolphin
+        from app.voice.model_diagnostics import ModelDiagnostics
+        self.model_diagnostics = ModelDiagnostics(provider_db or os.path.join(data_dir, 'model-diagnostics.sqlite3'), secrets)
+        self._response_meta = ContextVar('model_response_metadata', default={})
         if provider_db:
             from app.kernel.database import connection
             with connection(provider_db) as conn:
@@ -66,6 +70,12 @@ class LLMManager:
                 
         if not self.api_keys_pool:
             logger.warning("No se encontraron API keys en el entorno (Gemini, Azure, OpenAI).")
+
+    def record_contract_failure(self, contract, raw, errors, schema):
+        return self.model_diagnostics.record(contract, raw, errors, schema, self._response_meta.get())
+
+    def diagnostic_snapshot(self):
+        return {'model_rejections': self.model_diagnostics.recent()}
 
     def _load_status(self) -> Dict:
         if getattr(self, 'provider_db', None):
@@ -125,6 +135,8 @@ class LLMManager:
 
     def generate_content(self, prompt: str, **kwargs) -> str:
         """Genera contenido en cascada según el modo activo (mid/high -> Dolphin -> Cloud; low -> Cloud -> Dolphin)."""
+        if hasattr(self, '_response_meta'):
+            self._response_meta.set({})
         rf = kwargs.get('response_format')
         is_json = isinstance(rf, dict) and rf.get('type') == 'json_object'
         dolphin_ctrl = getattr(self, 'dolphin', None)
@@ -586,7 +598,13 @@ class LLMManager:
             payload['format'] = 'json'
         response = requests.post(endpoint + '/api/generate', json=payload, timeout=timeout, allow_redirects=False)
         response.raise_for_status()
-        answer = response.json()['response']
+        body = response.json()
+        if hasattr(self, '_response_meta'):
+            self._response_meta.set({'provider': 'ollama', 'model': payload['model'],
+                **{k: body[k] for k in ('total_duration', 'load_duration', 'prompt_eval_duration',
+                    'eval_duration', 'prompt_eval_count', 'eval_count', 'done_reason')
+                   if k in body and isinstance(body[k], (str, int, float))}})
+        answer = body['response']
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError('Dolphin devolvió una respuesta vacía')
         return answer.strip()

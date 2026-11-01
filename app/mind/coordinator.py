@@ -1761,7 +1761,24 @@ class Coordinator:
                           self.manager.mind.process_message(request, task_context=task_context, persist=False,
                                                            conversation_history=history, questions=questions))
             if intent.get('error'):
-                self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']))
+                failure = {'status': 'failed', 'stage': 'routing', 'dispatched': False,
+                           'error': str(intent['error']), 'diagnostic': intent.get('diagnostic')}
+                if intent['error'] == 'ContentRejected':
+                    self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']), result=failure)
+                    self.store.event(tid, 'routing_rejection', failure)
+                    if intent.get('reply'):
+                        self.notify(intent['reply'])
+                    return
+                failed = self.store.update(tid, expected={'ROUTING'}, state='DIAGNOSING',
+                                           error=str(intent['error']), result=failure, feedback=failure)
+                self.store.event(tid, 'routing_failure', failure)
+                recovery = getattr(getattr(self.manager, 'heart', None), 'recovery', None)
+                if recovery:
+                    case = recovery.open_incident_case(failed, failure)
+                    self.store.update(tid, expected={'DIAGNOSING'}, recovery_case_id=case['case_id'])
+                learning = getattr(self.learning, 'record_failure', None)
+                if callable(learning) and intent.get('error') not in {'ContentRejected', 'AllLLMsBusy'}:
+                    learning(failed, 'routing', failure)
                 if intent.get('reply') is not None and intent['reply'].strip():
                     self.notify(intent['reply'])
                 elif intent.get('reply') is None:

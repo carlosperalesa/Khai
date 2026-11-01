@@ -1055,6 +1055,13 @@ class DynamicSkill(BaseSkill):
 
 
 class TracingAndManifestTests(unittest.TestCase):
+    def test_telegram_trace_with_underscore_is_visible_to_heart_log_parser(self):
+        trace='req_1793482754879-20261031183914-beb2d8'
+        result=parse_log_errors('2026-10-31 18:41:59,382 ERROR ['+trace+'] Mind Contrato rechazado',
+                                boot_time=0,target_trace_id=trace)
+        self.assertEqual(len(result),1)
+        self.assertEqual(result[0]['trace_id'],trace)
+
     def test_normalize_manifest_markdown(self):
         raw = "```json\n{\"purpose\": \"Consultar el clima de mañana\", \"capabilities\": [\"Network\"]}\n```"
         norm = normalize_manifest(raw, default_purpose="clima")

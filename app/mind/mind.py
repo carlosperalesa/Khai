@@ -1,6 +1,7 @@
 """Single conversational router; tool calls are validated before Core dispatch."""
 import json
 import logging
+from pydantic import ValidationError
 from app.mind.turn import AssistantTurn
 from app.pixy.control import BudgetExceeded
 
@@ -45,6 +46,7 @@ class Mind:
             + "\nPreguntas entregadas pendientes: " + json.dumps(questions or [], ensure_ascii=False)
             + "\nMensaje nuevo: " + json.dumps(message, ensure_ascii=False)
         )
+        raw = None
         try:
             raw = self.llm.generate_content(prompt, response_format={"type": "json_object"})
             turn = self._validate_response(raw)
@@ -58,12 +60,25 @@ class Mind:
             raise
         except Exception as exc:
             logger.warning('No se pudo interpretar el turno (%s)', type(exc).__name__)
+            evidence = None
+            if raw is not None:
+                errors = exc.errors(include_url=False, include_input=False, include_context=False) if isinstance(exc, ValidationError) else [{'type': type(exc).__name__, 'loc': []}]
+                record = getattr(self.llm, 'record_contract_failure', None)
+                if callable(record):
+                    try:
+                        evidence = record('AssistantTurn', raw, errors, AssistantTurn.model_json_schema())
+                    except Exception:
+                        logger.exception('No se pudo persistir evidencia del rechazo de Mind')
+                if isinstance(evidence, dict) and evidence.get('id'):
+                    logger.error('Contrato AssistantTurn rechazado; evidencia=%s tipos=%s',
+                                 evidence['id'], ','.join(e['type'] for e in errors[:10]))
             if type(exc).__name__ == 'LLMContentRejected':
                 return {'action': 'ROUTING_ERROR', 'reply': str(exc), 'error': 'ContentRejected'}
             if "Todos los LLM están ocupados" in str(exc):
                 return {'action': 'ROUTING_ERROR', 'reply': '', 'error': 'AllLLMsBusy'}
             return {'action': 'ROUTING_ERROR', 'reply': 'No pude interpretar el mensaje; no ejecute ninguna accion.',
-                    'error': type(exc).__name__}
+                    'error': type(exc).__name__,
+                    **({'diagnostic': evidence} if isinstance(evidence, dict) and evidence.get('id') else {})}
 
     @staticmethod
     def _validate_response(raw):

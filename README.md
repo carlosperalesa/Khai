@@ -1,16 +1,12 @@
 # Khai
 
-Actualización del 31 de octubre, en validación: la invocación de búsqueda pasa a `busca <consulta>`; Brave fue autorizado y falta aceptar su preferencia en el recorrido conversacional. Voice prepara una caché reutilizable de wheels fijados y verificados; los workers instalan sin red. El nuevo parser extrae texto de PDF, CSV y XLSX ya incluidos en los datos de una skill; todavía no recibe adjuntos de Telegram ni hace OCR. Para ejecutar las pruebas con esos formatos: `pip install -r requirements-dev.txt` y `python -m pytest -q`.
-
-La migración autorizada del disco de modelos a `pd-balanced` conserva el original para volver atrás. GCP rechazó la creación en `us-west1-a` por falta de capacidad; el avance y las pruebas están en `CHECKPOINT.md`. Brain incorpora telemetría para Heart; la continuidad mediante nano y las transiciones cancelables siguen pendientes.
-
-La copia `pd-balanced` ya está configurada en `us-west1-b`. High sigue agotando la precarga, por lo que se medirán almacenamiento y GPU antes de cambiar el plazo. La recuperación de dependencias ahora distingue un fallo anterior al despacho y permite a Pixy/Heart reanudar el código ya aprobado, conservando la evidencia del intento anterior.
-
-Por decisión del propietario, Cloud Monitoring permanece deshabilitado; la revisión de modelos continúa solo con registros existentes.
-
-Low conectó con una precarga de30,81 s; high y mid siguen pendientes de diagnóstico. La corrección del contrato del proxy conserva el lock de dependencias y la revisión del objetivo al despachar recuperaciones.
-
 Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente.
+
+Estado al 31 de octubre: `web-search` y el parser PDF/CSV/XLSX están activos y verificados. Voice prepara wheels fijados y comprobados; los workers reutilizan un entorno sin red. La recuperación real del parser cerró RECOVERED en Heart. La invocación `busca <consulta>` está preparada; su aceptación conversacional sigue pendiente porque low devolvió un JSON inválido. El propietario eligió investigar ese rechazo antes de continuar con otro modelo.
+
+Se está validando el registro durable de rechazos del modelo y su derivación automática a Heart/Pixy/Dreams: evidencia por tarea, esquema y errores, con secretos redactados y sin prompts. El disco de modelos está en `pd-balanced`, `us-west1-b`, conservando el original. High y mid siguen fallando; low conectó en 30,81 s de precarga. Cloud Monitoring permanece deshabilitado por decisión del propietario. Mediciones e hipótesis en [`docs/LOAD_TIMES.md`](./docs/LOAD_TIMES.md).
+
+Para probar el parser localmente: `pip install -r requirements-dev.txt` y `python -m pytest -q`. La ingesta de adjuntos Telegram y OCR siguen pendientes.
 
 Heart evita asociar consultas sobre transiciones de modelo a tareas no relacionadas; si falta telemetría vinculada, Pixy comunica que la evidencia es insuficiente.
 

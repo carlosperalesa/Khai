@@ -103,7 +103,7 @@ class ModuleManager:
 
     def _domain_snapshot(self, name):
         if name == 'brain':
-            return self.model_controller.transition_snapshot()
+            return {**self.model_controller.transition_snapshot(), **self.brain.diagnostic_snapshot()}
         if name in {'database','storage','heart'}:
             return self.heart.run_diagnostic_fast()
         if name in {'runtime','docker'}:

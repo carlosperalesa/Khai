@@ -104,6 +104,32 @@ class DocumentExtractionTests(unittest.TestCase):
 
 
 class ResearchSearchTests(unittest.TestCase):
+    def test_model_rejection_journal_redacts_bounds_and_survives_restart(self):
+        import sqlite3
+        from app.voice.model_diagnostics import ModelDiagnostics
+        from app.kernel.database import connection
+        from app.kernel.tracing import trace_scope
+        from app.pixy.budget import current_goal_revision
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'voice.sqlite3'
+            journal=ModelDiagnostics(path,{'BRAVE_SEARCH_API_KEY':'dummy-secret-value'})
+            token=current_goal_revision.set(('task_fixture',2))
+            try:
+                with trace_scope('trace-fixture'):
+                    ref=journal.record('AssistantTurn','dummy-secret-value '+('x'*20000),
+                        [{'type':'missing','loc':['tool_calls',0,'arguments','capability'],'input':'must not persist'}],
+                        {'type':'object'},{'provider':'ollama','model':'fixture'})
+            finally:
+                current_goal_revision.reset(token)
+            row=ModelDiagnostics(path).recent()[0]
+            self.assertEqual(row['id'],ref['id']);self.assertEqual(row['task_id'],'task_fixture')
+            self.assertEqual(row['trace_id'],'trace-fixture');self.assertTrue(row['truncated'])
+            self.assertNotIn('dummy-secret-value',json.dumps(row))
+            self.assertNotIn('must not persist',json.dumps(row))
+            self.assertLessEqual(len(row['response_excerpt']),16000)
+            with connection(path) as conn, self.assertRaises(sqlite3.IntegrityError):
+                conn.execute('DELETE FROM model_rejections')
+
     def test_configured_search_uses_voice_and_has_no_provider_fallback(self):
         from app.voice.gateway.research_search import ResearchSearch
         root = Path(__file__).resolve().parents[1]

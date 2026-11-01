@@ -32,6 +32,12 @@ class Brain:
     def read_document(self, url, allowed_urls):
         return self._gateway.read_document(url, allowed_urls)
 
+    def record_contract_failure(self, contract, raw, errors, schema):
+        return self._gateway.record_contract_failure(contract, raw, errors, schema)
+
+    def diagnostic_snapshot(self):
+        return self._gateway.diagnostic_snapshot()
+
     def test_all_connections(self):
         return self._gateway.test_all_connections()
 
