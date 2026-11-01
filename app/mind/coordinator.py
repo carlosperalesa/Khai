@@ -129,10 +129,33 @@ def _humanize_missing_question(missing, schema=None):
     return f"¿Podrías indicarme los siguientes datos necesarios: {', '.join(items)}?"
 
 
-def humanize_worker_output(raw_text: str) -> str:
+def humanize_worker_output(raw_text: str, request: str = None, llm = None) -> str:
     text = str(raw_text or '').strip()
     if not text:
         return ""
+
+    # Principio constitucional de mínimo hardcoding:
+    # Si hay un LLM disponible y el usuario hizo una pregunta/objetivo concreto,
+    # el LLM sintetiza y formatea la respuesta adaptándose a la naturaleza de la solicitud.
+    if llm is not None and request and len(text) > 10:
+        try:
+            prompt = (
+                f'Eres Khai, el asistente personal del usuario.\n'
+                f'El usuario solicitó: "{request}".\n'
+                f'El resultado técnico devuelto por la herramienta interna es:\n{text[:4000]}\n\n'
+                'Instrucciones:\n'
+                '- Formatea y redacta la respuesta en español adaptándote con naturalidad a la pregunta del usuario (por ejemplo, si pidió un resumen, haz un resumen fluido y ordenado; si pidió un dato, entrégalo con claridad).\n'
+                '- No reproduzcas sintaxis JSON, llaves {{}}, etiquetas HTML ni estructuras de diccionarios; extrae la información sustantiva y útil.\n'
+                '- Traduce al español lo que esté en inglés u otro idioma.\n'
+                '- Mantén un tono cercano, profesional y humano, sin inventar datos que no estén en la salida técnica.'
+            )
+            llm_result = llm.generate_content(prompt)
+            if isinstance(llm_result, str) and llm_result.strip():
+                return llm_result.strip()
+        except Exception as exc:
+            logger.warning('Fallo en síntesis con LLM en humanize_worker_output: %s', exc)
+
+    # Fallback determinista limpio
     if text.startswith('```'):
         lines = text.splitlines()
         if len(lines) >= 2 and lines[-1].strip() == '```':
@@ -2483,7 +2506,7 @@ class Coordinator:
                 if success is None or success is True:
                     self.store.update(tid, expected={'RUNNING'}, state='UNVERIFIED', result=result,
                                       machine_verification={'success': success, 'evidence': evidence})
-                    stdout_text = humanize_worker_output(result.get('stdout', ''))
+                    stdout_text = humanize_worker_output(result.get('stdout', ''), request=task.get('original_request') or task.get('request'), llm=getattr(self.manager, 'llm', None))
                     if stdout_text:
                         msg = f"{stdout_text}\n\n¿Es este el resultado esperado? (y/n)"
                     else:
@@ -2536,7 +2559,7 @@ class Coordinator:
             self.store.update(tid, expected={'VERIFYING'}, state='COMPLETED' if v['success'] else 'DIAGNOSING', feedback=v, recovery_case_id=case_id)
             if v['success']:
                 stdout = (task.get('result') or {}).get('stdout', '')
-                clean_stdout = humanize_worker_output(stdout)
+                clean_stdout = humanize_worker_output(stdout, request=task.get('original_request') or task.get('request'), llm=getattr(self.manager, 'llm', None))
                 out_msg = f"\nResultado:\n{clean_stdout[:2000]}" if clean_stdout else ""
                 if task.get('mode') == 'AGENT':
                     self.notify('Resultado aceptado. Estado actual del servicio: '

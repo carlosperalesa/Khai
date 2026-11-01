@@ -123,9 +123,10 @@ Mind opera como la capa cognitiva y el envoltorio humano (*Human Interface Wrapp
    - En el enrutamiento y planificación de recetas (`ActionPlanner`), infiere y enlaza automáticamente entidades y parámetros requeridos presentes en el mensaje del usuario o en su perfil de preferencias, suprimiendo turnos y preguntas redundantes de alcance.
    - Si un parámetro obligatorio falta y no existe en el perfil, formula preguntas en español natural y empático (ej. *"¿Podrías indicarme la ciudad para continuar?"*) erradicando consultas técnicas de variables como `¿Qué valores corresponden a city?`.
 
-2. **Outbound Wrapper (Traducción a Humano):**
+2. **Outbound Wrapper (Traducción a Humano y Síntesis Contextual):**
    - Intercepta y normaliza toda salida previa a su notificación en Voice (`Coordinator.notify()`):
-     - Desempaqueta objetos JSON estructurados devueltos por workers y skills (claves estándar como `weather_info`, `result`, `message`), extrayendo el contenido sustantivo y formateando atributos complejos en viñetas limpias sin exponer sintaxis `{}` ni comillas crudas.
+     - Aplica el principio de mínimo hardcoding mediante prompts libres al LLM: toma el objetivo o pregunta del usuario (`task['request']`) y el resultado técnico crudo de la herramienta para generar una respuesta conversacional, fluida y adaptada al objetivo formulado (ej. si el usuario pidió un resumen de noticias, redacta un resumen fluido; si pidió un dato puntual, lo entrega con precisión).
+     - Desempaqueta y limpia objetos JSON estructurados devueltos por workers y skills (claves estándar como `weather_info`, `result`, `message`), suprimiendo sintaxis `{}` y comillas crudas en el fallback determinista.
      - Suprime prefijos mecánicos de pipelines y recetas (`Paso X:`, `\w+ info:`, `Resultado:`).
      - Traduce términos residuales de APIs internacionales (ej. descripciones meteorológicas en inglés) a español claro.
    - Convierte los diagnósticos y avisos de recuperación de Heart en explicaciones comprensibles, evitando la exposición de números de caso, firmas o trazas internas al usuario.

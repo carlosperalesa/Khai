@@ -36,6 +36,27 @@ class HumanInterfaceTests(unittest.TestCase):
         self.assertNotIn("{", result)
         self.assertNotIn("}", result)
 
+    def test_humanize_worker_output_with_llm_synthesis(self):
+        # Principio de mínimo hardcoding: el LLM sintetiza de acuerdo a la pregunta
+        mock_llm = MagicMock()
+        mock_llm.generate_content.return_value = "Esta semana destacan las tensiones en el G20 y la crisis en Haití."
+        raw_news = '[{"title": "G20", "description": "Tensiones"}, {"title": "Haití", "description": "Crisis"}]'
+        user_question = "Hazme un resumen de las noticias más importantes de la semana"
+        
+        result = humanize_worker_output(raw_news, request=user_question, llm=mock_llm)
+        self.assertEqual(result, "Esta semana destacan las tensiones en el G20 y la crisis en Haití.")
+        mock_llm.generate_content.assert_called_once()
+        prompt_called = mock_llm.generate_content.call_args[0][0]
+        self.assertIn("Hazme un resumen de las noticias más importantes de la semana", prompt_called)
+        self.assertIn("Formatea y redacta la respuesta en español adaptándote con naturalidad a la pregunta", prompt_called)
+
+    def test_humanize_worker_output_llm_fallback_on_error(self):
+        mock_llm = MagicMock()
+        mock_llm.generate_content.side_effect = RuntimeError("API error")
+        raw = '{"weather_info": "Paso 1: 18 °C en Santiago"}'
+        result = humanize_worker_output(raw, request="clima", llm=mock_llm)
+        self.assertEqual(result, "18 °C en Santiago")
+
     def test_humanize_missing_question_single(self):
         q = _humanize_missing_question(['city'])
         self.assertIn("la ciudad", q)

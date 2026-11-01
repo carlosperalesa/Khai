@@ -6,15 +6,14 @@
   1. *Inbound Wrapper (Contexto y Perfil de Usuario):* `MemoryEngine` (`app/mind/memory.py`) implementa la gestión persistente del perfil de usuario (`DEFAULT_USER_PROFILE`), configurando idioma (`es`), ciudad base (`Santiago`), país (`Chile`), unidades métricas (`metric`) y zona horaria (`America/Santiago`).
   2. *Extracción Inteligente de Parámetros:* `ActionPlanner` (`app/mind/action_planner.py`) recibe el contexto del usuario e infiere automáticamente los inputs requeridos a partir de la orden del usuario o desde sus preferencias base, eliminando preguntas redundantes cuando el usuario ya nombró la entidad o cuando existe un valor por defecto en su perfil.
   3. *Humanización de Preguntas de Requisitos:* `Coordinator` (`app/mind/coordinator.py`) erradica formulaciones técnicas como `¿Qué valores corresponden a city?`, sustituyéndolas por preguntas en lenguaje natural y empático (`¿Podrías indicarme la ciudad para continuar con la consulta?`) y autocompletando datos disponibles desde `MemoryEngine.get_user_profile()`.
-  4. *Outbound Wrapper (Traducción a Humano de Salidas):* Se implementa `humanize_worker_output` en `Coordinator`:
-     - Desempaqueta automáticamente objetos JSON emitidos por las skills (`weather_info`, `result`, etc.) y formatea diccionarios en viñetas limpias sin exponer llaves `{}` ni comillas de sintaxis técnica.
-     - Suprime prefijos mecánicos de depuración (`Paso X:`, `\w+ info:`, `Resultado:`).
-     - Traduce descripciones técnicas residuales de servicios externos (ej. `broken clouds` -> `cielo nuboso`, `light rain` -> `lluvia ligera`).
+  4. *Outbound Wrapper (Síntesis Contextual y Mínimo Hardcoding):* Se implementa `humanize_worker_output` en `Coordinator`:
+     - Principio constitucional de mínimo hardcoding: delega en el LLM (`generate_content`) la tarea de adaptar y redactar el resultado de la herramienta de acuerdo a la naturaleza de la pregunta u objetivo del usuario (ej. generar un resumen fluido cuando se piden noticias, en lugar de volcar listas o diccionarios con tags HTML).
+     - Fallback determinista seguro: si no hay LLM disponible o ante fallos transitorios, desempaqueta automáticamente JSONs (`weather_info`, `result`), suprime prefijos mecánicos (`Paso X:`, `\w+ info:`, `Resultado:`) y formatea limpiamente.
 - **Directrices de Localización Métrica para Hand (`app/hand/hand.py`):**
   - Se añade directriz mandatoria en el prompt de generación de código: todo servicio externo debe configurarse con `units='metric'` (grados Celsius) y `lang='es'`, redactando mensajes completos y fluidos para personas, sin prefijos ni emoticones.
 - **Suite de Pruebas Unitarias Aprobada al 100%:**
   - Nueva suite canónica `tests/test_human_interface.py` (8 pruebas unitarias) cubriendo deserialización limpia de JSON, eliminación de prefijos mecánicos, traducción climática, viñetas multiclave, humanización de preguntas de scope y persistencia de perfiles en `MemoryEngine`.
-  - Suite canónica completa consolidada: **371 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**.
+  - Suite canónica completa consolidada: **373 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**.
 
 ## Continuidad de modelos, contratos y validación de producción — trabajo autorizado
 
