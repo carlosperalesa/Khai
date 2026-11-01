@@ -79,3 +79,18 @@ Actualización del 31 de octubre: la nueva capacidad de búsqueda es el candidat
   6. Presentaci?n de evidencia: El usuario recibi? el clima en vivo de Santiago de Chile (`temp: 294.78 K`, `broken clouds`) y aprob? con `y`.
   7. Activaci?n en cat?logo: Promovida a estado `active` en `versions` (`version_id: 386e5c488f4c41be9d40d0bbf1f7a18b`) y `skill_specs`.
   8. Reutilizaci?n directa: En una nueva conversaci?n (`/new Reutilizacion Clima`), una consulta directa de clima reutiliz? la skill activa sin pedir clave ni generar c?digo nuevo.
+
+## 7. Validación de Síntesis y Formateo Contextual Humano (Resumen de Noticias con Brave Search)
+
+- **Fecha:** 1 de noviembre de 2026.
+- **Objetivo:** Comprobar en producción la capacidad de Mind como Outbound Wrapper aplicando el principio de mínimo hardcoding: recibir resultados crudos de búsqueda de la API de Brave Search y sintetizarlos en un resumen periodístico y conversacional adaptado a la solicitud del usuario ("Hazme un resumen de las noticias más importantes de la semana").
+- **Entorno:** Servidor de producción Azure (`khai_core` en contenedor Docker, pasarela Voice, red interna aislada `--network none`).
+- **Recorrido canónico verificado:**
+  1. Solicitud conversacional: `Hazme un resumen de las noticias más importantes de la semana` en conversación `/new Resumen Noticias Humanizado`.
+  2. Inbound Wrapper: Extracción automática del parámetro `query: 'noticias más importantes de la semana'` sin fricción técnica ni preguntas de variables de código.
+  3. Ejecución segura de herramienta: Worker ejecutó `web-search` conectando a Brave Search API mediante Voice.
+  4. Outbound Wrapper con Síntesis Contextual: En lugar de volcar el arreglo de diccionarios y snippets crudos con HTML de Brave, Mind utilizó el modelo para estructurar un resumen temático en español fluido:
+     - España y política local (Ceuta, Cataluña, medidas de ajuste fiscal).
+     - Internacional y conflictos (emboscada en Haití, cancelación de foto en el G20 por presencia rusa, elecciones en Israel).
+     - Ciencia y descubrimientos (posible planeta enano más allá de Plutón, estudio de meteoritos antiguos de la NASA).
+  5. Cierre y confirmación: Presentación clara y profesional ofreciendo profundizar en cualquiera de las noticias y confirmada exitosamente con `si` (`id: 426`).
