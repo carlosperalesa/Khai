@@ -64,3 +64,18 @@ Actualización del 31 de octubre: la nueva capacidad de búsqueda es el candidat
 - Dotar a Voice/Hand de motor de búsqueda de infraestructura financiado con créditos de GCP / SearXNG con principio de fallback.
 - Incorporar extractor de documentación web con truncado inteligente (~4.000 tokens priorizando esquemas y parámetros).
 - Reanudar el recorrido desde el Paso 1 con el entorno fortalecido.
+
+## 6. Validaci?n de Creaci?n y Reutilizaci?n Can?nica de Skill (OpenWeather Clima Santiago)
+
+- **Fecha:** 1 de noviembre de 2026.
+- **Objetivo:** Creaci?n completa y verificaci?n de extremo a extremo de la skill `clima-santiago-openweather` interactuando con la API de OpenWeatherMap.
+- **Entorno:** Servidor de producci?n Azure (`khai_core` en contenedor Docker, pasarela Voice, red interna aislada `--network none`).
+- **Recorrido can?nico verificado:**
+  1. Solicitud conversacional: `Crea una skill para darme el clima de santiago de chile, usa la api de openweather`.
+  2. Gobernanza de Pixy: Solicitud de autorizaci?n de servicio `openweather.current_weather` en `api.openweathermap.org` con confirmaci?n binaria (`y/n`). Mensaje sin fuga de IDs internos.
+  3. Captura privada de credencial: Voice captur? la API key en `data/voice/secrets.env` bajo clave `OPENWEATHER_API_KEY` con recibo auditado.
+  4. Generaci?n y auditor?a: Hand gener? `main.py` bajo contrato `# MODE: SAFE` consumiendo `khai_input.params` y despachando peticiones por `khai_gateway.request`. Pixy audit? y aprob? el artefacto.
+  5. Ejecuci?n aislada: Worker ejecutado con red deshabilitada (`--network none`). Voice resolvi? `api.openweathermap.org` priorizando IPv4, inyect? la cabecera `x-api-key` y obtuvo `HTTP 200 OK`.
+  6. Presentaci?n de evidencia: El usuario recibi? el clima en vivo de Santiago de Chile (`temp: 294.78 K`, `broken clouds`) y aprob? con `y`.
+  7. Activaci?n en cat?logo: Promovida a estado `active` en `versions` (`version_id: 386e5c488f4c41be9d40d0bbf1f7a18b`) y `skill_specs`.
+  8. Reutilizaci?n directa: En una nueva conversaci?n (`/new Reutilizacion Clima`), una consulta directa de clima reutiliz? la skill activa sin pedir clave ni generar c?digo nuevo.
