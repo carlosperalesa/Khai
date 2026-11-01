@@ -212,7 +212,7 @@ Cuando se reutilice la skill, los parámetros tipados estarán en
 `from khai_input import params`. Diseña el código para usar esos parámetros y
 validarlos; el texto original seguirá disponible en sys.argv[1].
 El script debe manejar posibles errores e imprimir el resultado claro y formateado en stdout, o escribir en {public_dir}.
-Si hay un contrato de acción planificada, implementa solamente esa acción. Lee sus entradas de
+Si hay un contrato de acción planificada, implementa solamente esa acción usando obligatoriamente '# MODE: SAFE' en la primera línea. Lee sus entradas de
 `khai_input.params` y emite exactamente un objeto JSON en stdout que cumpla su output_schema.
 No incorpores otras acciones del objetivo compuesto dentro de esta skill.
 NO uses emoticones ni emojis en las salidas impresas ni en el código.
@@ -250,7 +250,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             {'name': 'finish_code', 'description': 'Entrega el código Python final para validación.',
              'parameters': {'type': 'object', 'properties': {'code': {'type': 'string'}},
                             'required': ['code'], 'additionalProperties': False},
-             'handler': lambda args: self._finish_code(args, caps)},
+             'handler': lambda args: self._finish_code(args, caps, task.get('planned_skill_spec'))},
         ])
         self.last_agent_run_id = run_id
         return result['code'], result['mode'], result['dependencies']
@@ -262,7 +262,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         return []
 
     @staticmethod
-    def _finish_code(args, caps):
+    def _finish_code(args, caps, planned=None):
         code = str(args.get('code') or '').strip()
         if code.startswith('```'):
             code = '\n'.join(code.splitlines()[1:])
@@ -270,6 +270,8 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 code = code.rstrip()[:-3]
         ast.parse(code)
         mode, deps = skill_metadata(code)
+        if planned and mode == 'AGENT':
+            raise ValueError("Una acción de receta planificada debe usar '# MODE: SAFE' para terminar y emitir el resultado formal; no uses AGENT.")
         caps.validate_code(mode, deps)
         return {'finished': True, 'value': {'code': code, 'mode': mode, 'dependencies': deps}}
 
