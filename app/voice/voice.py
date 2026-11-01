@@ -281,7 +281,11 @@ def _command(manager, source, text):
         target_mode = aliases.get(arg, arg)
         if not getattr(manager, 'model_transitions', None) and target_mode in {'low', 'mid', 'high'} and hasattr(c, 'notify') and c.notify:
             c.notify(f"[Conectando con Modo {target_mode}]")
-        return ctrl.set_mode(arg, notifier=getattr(c, 'notify', None))
+        raw_res = ctrl.set_mode(arg, notifier=getattr(c, 'notify', None))
+        if isinstance(raw_res, str):
+            raw_res = re.sub(r'\s*ID:\s*transition_[a-f0-9]{32}\.?', '', raw_res)
+            raw_res = re.sub(r':\s*transition_[a-f0-9]{32}\.', '.', raw_res)
+        return raw_res
     if name in {'/pixy', '/p', '/pixy?', '/p?'}:
         payload = '?' if name.endswith('?') and len(parts) == 1 else text.partition(' ')[2]
         return manager.pixy.direct_response(payload, source=source)

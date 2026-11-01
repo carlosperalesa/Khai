@@ -144,7 +144,14 @@ class Coordinator:
     def notify(self, text, buttons=None, message_thread_id=None, chat_id=None):
         if not text or not str(text).strip():
             return
-        cleaned = re.sub(r'^(task_[a-f0-9]{32}|run_[a-f0-9]{32}|auth_[a-f0-9]{32}|case-[a-f0-9]{16,32}):\s*', '', str(text).strip())
+        cleaned = str(text).strip()
+        cleaned = re.sub(r'^(task_[a-f0-9]{32}|run_[a-f0-9]{32}|auth_[a-f0-9]{32}|case-[a-f0-9]{16,32}|transition_[a-f0-9]{32}|req_[a-zA-Z0-9_-]+):\s*', '', cleaned)
+        cleaned = re.sub(r'\btask_[a-f0-9]{32}\b', 'la tarea', cleaned)
+        cleaned = re.sub(r'\bcase-[a-f0-9]{16,32}\b', 'el caso', cleaned)
+        cleaned = re.sub(r'\bauth_[a-f0-9]{32}\b', 'la autorización', cleaned)
+        cleaned = re.sub(r'\btransition_[a-f0-9]{32}\b', '', cleaned)
+        cleaned = re.sub(r'\s*\((syntax_or_code|unknown_contract|uncertain_execution|model_unavailable|schema_violation|execution_uncertain)\)', '', cleaned)
+        cleaned = cleaned.replace('plan médico de Heart', 'propuesta de recuperación')
         dolphin = getattr(self.manager, 'dolphin', None)
         if dolphin is not None and not cleaned.startswith('[Mode =') and not cleaned.startswith('[Modo '):
             banner = dolphin.consume_transition_banner(dolphin.get_active_mode())
@@ -362,7 +369,7 @@ class Coordinator:
                 learning(failed, stage, failure)
             except Exception as learning_error:
                 self.store.event(tid, 'failure_learning_error', {'error_type': type(learning_error).__name__})
-        self.notify(f'{tid}: fallo registrado; Heart revisará la evidencia antes de continuar.')
+        self.notify('Se detectó una incidencia técnica; analizando la evidencia antes de continuar.')
 
     def _collect_llm_jobs(self):
         for task_id, future in list(self._llm_jobs.items()):
@@ -1594,7 +1601,11 @@ class Coordinator:
                     err = f": {case['error']}" if case.get('error') else ""
                     if (case.get('verification') or {}).get('verification_scope') == 'delivery_only':
                         err += ': entrega confirmada; la calidad de la respuesta no fue verificada'
-                    self.notify(f"Pixy: Caso de recuperación {cid} finalizado con estado {state}{err}.")
+                    logger.info("Caso de recuperación %s finalizado con estado %s%s", cid, state, err)
+                    if state == 'DENIED' and 'expirada' in str(err).lower():
+                        self.notify("La propuesta de recuperación expiró por tiempo de espera.")
+                    elif state == 'FAILED':
+                        self.notify("No se pudo completar la recuperación técnica automática.")
             except Exception:
                 logger.exception('Error en ciclo de recuperación de Heart')
         self.store.flush_events()
@@ -2470,7 +2481,7 @@ class Coordinator:
                         self.store.update(tid, expected={'DIAGNOSING'},
                                           recovery_case_id=case['case_id'],
                                           recovery_authorization_id=auth['authorization_id'])
-                        self.notify(f"Heart propone: {plan.get('summary', '')}. ¿Apruebas? Responde sí o no.")
+                        self.notify(f"Propuesta de recuperación: {plan.get('summary', '')}. ¿Apruebas? Responde sí o no.")
                     elif case['state'] in {'DENIED', 'FAILED', 'UNKNOWN'}:
                         self.store.update(tid, expected={'DIAGNOSING'}, state='FAILED',
                                           error='La recuperación no fue autorizada o no pudo confirmarse')
@@ -2485,7 +2496,7 @@ class Coordinator:
                 err_detail = ''
                 if diagnosis and diagnosis.get('findings'):
                     err_detail = f": {diagnosis['findings'][0].get('detail', '')[:200]}"
-                self.notify(f"{tid}: Fallo diagnosticado por Heart sin plan de autoreparación automático{err_detail}.")
+                self.notify(f"Incidencia técnica diagnosticada sin plan de autoreparación automático{err_detail}.")
         elif state == 'CANCELLING':
             self._poll_stop(task)
 

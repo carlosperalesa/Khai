@@ -798,12 +798,13 @@ class Recovery:
                 'proposed_steps': proposed,
             }
             validate_plan(plan)
-            summary = f'Corregir o ejecutar solución en Hand para {tid} ({task_remedy["code"]}).'
             if instruction:
-                summary += f" Acción: {instruction[:240]}"
+                summary = f"Aplicar remediación técnica: {instruction[:240]}"
+            else:
+                summary = "Corregir la implementación de la habilidad en Hand."
             plan.update(reason=task_remedy['code'],
                         summary=summary,
-                        risk='low', impact=f'La tarea {tid} se ejecutará en Hand con las instrucciones de remediación de Heart.',
+                        risk='low', impact='La tarea se ejecutará en Hand con las instrucciones de remediación.',
                         reversible=True, requires_approval=requires_approval(plan))
             return plan
 
@@ -860,7 +861,7 @@ class Recovery:
             if not record or record['status'] in {'expired', 'superseded', 'denied'}:
                 self._move(row['case_id'], 'DENIED', expected={'WAITING_USER_APPROVAL'},
                            detail={'reason': (record or {}).get('status', 'missing')},
-                           error='Autorización ' + (record or {}).get('status', 'expirada') + '; plan médico de Heart cancelado por tiempo de espera.')
+                           error='Autorización ' + (record or {}).get('status', 'expirada') + '; propuesta de recuperación cancelada por tiempo de espera.')
 
     # ------------------------------------------------------------- hand-off
     def _order(self, case):

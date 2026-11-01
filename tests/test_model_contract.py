@@ -154,4 +154,12 @@ class ModelContractTests(unittest.TestCase):
             '[Error en modo low, pasando a Nano ¿deseas otro modo?]',
             buttons=MODE_SELECTION_BUTTONS
         )
-
+    def test_internal_identifiers_are_masked_in_user_facing_messages(self):
+        from unittest.mock import MagicMock
+        from app.voice.voice import _command
+        manager = MagicMock()
+        manager.brain.set_mode.return_value = 'Cambio solicitado a high; modo efectivo nano. ID: transition_1234567890abcdef1234567890abcdef. /stop para cancelar.'
+        res = _command(manager, 'tg:123', '/m h')
+        self.assertNotIn('transition_1234567890abcdef1234567890abcdef', res)
+        self.assertIn('Cambio solicitado a high; modo efectivo nano.', res)
+        self.assertIn('/stop para cancelar.', res)
