@@ -369,7 +369,17 @@ class ExternalGateway:
         connection = http.client.HTTPSConnection(url.hostname,timeout=timeout)
         try:
             # Pin the validated address while TLS verifies the configured hostname.
-            sock = socket.create_connection((sorted(ips)[0],443),timeout=timeout)
+            sock = None
+            last_conn_err = None
+            for ip in sorted(ips, key=lambda addr: (1 if ':' in addr else 0, addr)):
+                try:
+                    sock = socket.create_connection((ip, 443), timeout=timeout)
+                    break
+                except OSError as conn_err:
+                    last_conn_err = conn_err
+                    continue
+            if sock is None:
+                raise last_conn_err or OSError('No validated address could be reached')
             connection.sock = ssl.create_default_context().wrap_socket(sock,server_hostname=url.hostname)
             headers = {'Accept':','.join(spec.get('content_types',['application/json']))}
             secret_key = spec.get('credential')

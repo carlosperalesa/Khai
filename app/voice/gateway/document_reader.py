@@ -39,7 +39,17 @@ def read_public_document(url, allowed_urls):
         raise PermissionError('Private destinations are forbidden')
     conn = http.client.HTTPSConnection(parsed.hostname, timeout=15)
     try:
-        sock = socket.create_connection((sorted(ips)[0], 443), timeout=15)
+        sock = None
+        last_conn_err = None
+        for ip in sorted(ips, key=lambda addr: (1 if ':' in addr else 0, addr)):
+            try:
+                sock = socket.create_connection((ip, 443), timeout=15)
+                break
+            except OSError as conn_err:
+                last_conn_err = conn_err
+                continue
+        if sock is None:
+            raise last_conn_err or OSError('No validated address could be reached')
         conn.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parsed.hostname)
         path = parsed.path or '/'
         if parsed.query:

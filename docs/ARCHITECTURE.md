@@ -100,7 +100,7 @@ La recuperación de tareas distingue postcondiciones verificadas, entrega de una
 La skill `skills/web-search` llama a `brave_search.search` mediante Voice y devuelve resultados estructurados. Incluye SkillSpec, código sin dependencias y descriptor para Brave Search API. Voice resuelve `BRAVE_SEARCH_API_KEY` y la envía mediante `X-Subscription-Token`; el worker no recibe el secreto. Fue activada en producción el 31 de octubre tras revisión de Pixy y una ejecución aislada con recibo real; las actualizaciones futuras requieren repetir revisión, autorización y verificación.
 
 La investigación de infraestructura de Hand usa `config/research.yaml` mediante `ResearchSearch` y el transporte existente de `ExternalGateway`: DNS público fijado, TLS, límites de tiempo, tamaño y frecuencia. El proveedor se declara en configuración; no se sustituyen proveedores al fallar. No modifica la inferencia de nano ni las preferencias de búsqueda del usuario. El candidato anterior de Google y su plantilla de descriptor fueron retirados del código local; los registros históricos de producción permanecen pendientes de migración.
-- **Voice:** Concentrador único de conectividad externa con verificación TLS estricta, DNS pineado y aislamiento absoluto de secretos (`secrets.env`).
+- **Voice:** Concentrador ?nico de conectividad externa con verificaci?n TLS estricta, DNS pineado, resoluci?n multihoming con priorizaci?n IPv4 y tolerancia a fallos de ruta IPv6, y aislamiento absoluto de secretos (`secrets.env`).
 - **Dreams:** Persiste notas de episodios (`episode_notes`), consolida experiencias y formula recomendaciones de evolución de catálogo.
 
 ### Ciclo de Vida de una Solicitud:

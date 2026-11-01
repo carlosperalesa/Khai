@@ -150,6 +150,8 @@ class Coordinator:
         cleaned = re.sub(r'\bcase-[a-f0-9]{16,32}\b', 'el caso', cleaned)
         cleaned = re.sub(r'\bauth_[a-f0-9]{32}\b', 'la autorización', cleaned)
         cleaned = re.sub(r'\btransition_[a-f0-9]{32}\b', '', cleaned)
+        cleaned = re.sub(r'\b(?:sr|order|run)_[a-f0-9]{16,32}\b', '', cleaned)
+        cleaned = re.sub(r'\s*Solicitud\s*\.?\s*$', '', cleaned)
         cleaned = re.sub(r'\s*\((syntax_or_code|unknown_contract|uncertain_execution|model_unavailable|schema_violation|execution_uncertain)\)', '', cleaned)
         cleaned = cleaned.replace('plan médico de Heart', 'propuesta de recuperación')
         dolphin = getattr(self.manager, 'dolphin', None)
@@ -2290,8 +2292,7 @@ class Coordinator:
                     self.store.update(tid, expected={'READY'}, state='WAITING_SECRET',
                                       secret_request_id=request['request_id'])
                     self.notify(f"{tid}: el servicio {ref['service_id']} requiere una credencial. "
-                                f"En chat privado: {request['instruction']} "
-                                f"Solicitud {request['request_id']}.")
+                                f"En chat privado: {request['instruction']}")
                     return
             if hasattr(self.manager, 'hand') and task.get('version_id'):
                 version = self.manager.hand.version(task['version_id'])
