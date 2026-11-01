@@ -22,6 +22,27 @@ from unittest.mock import patch
 
 
 class ConversationFlowTests(Fixture):
+    def test_slow_heart_diagnosis_does_not_race_a_second_task_owner(self):
+        entered, release=threading.Event(),threading.Event()
+        recovery=Mock()
+        def diagnose(*args):
+            entered.set();release.wait(5)
+            return {'case_id':'case-20261031slowdiagnosis'}
+        recovery.open_incident_case.side_effect=diagnose
+        self.manager.heart=SimpleNamespace(recovery=recovery)
+        self.manager.mind.process_message=Mock(return_value={'action':'ROUTING_ERROR','error':'ValidationError',
+                                                           'reply':'Rejected','diagnostic':{'id':'fixture'}})
+        task=self.store.create('fixture:slow-heart','Route this request',state='ROUTING',kind='turn')
+        try:
+            self.c.tick(background=True)
+            self.assertTrue(entered.wait(3))
+            self.assertEqual(self.store.get(task['id'])['state'],'DIAGNOSING')
+            self.c.tick(background=True)
+            self.assertEqual(self.store.get(task['id'])['state'],'DIAGNOSING')
+            self.assertEqual(recovery.open_incident_case.call_count,1)
+        finally:
+            release.set()
+
     def setUp(self):
         super().setUp()
         self.manager.telegram.user_id = 'owner'

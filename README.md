@@ -6,6 +6,8 @@ Estado al 31 de octubre: `web-search` y el parser PDF/CSV/XLSX están activos y 
 
 Se está validando el registro durable de rechazos del modelo y su derivación automática a Heart/Pixy/Dreams: evidencia por tarea, esquema y errores, con secretos redactados y sin prompts. El disco de modelos está en `pd-balanced`, `us-west1-b`, conservando el original. High y mid siguen fallando; low conectó en 30,81 s de precarga. Cloud Monitoring permanece deshabilitado por decisión del propietario. Mediciones e hipótesis en [`docs/LOAD_TIMES.md`](./docs/LOAD_TIMES.md).
 
+El diagnóstico se ejecuta con un único propietario por tarea para que una respuesta lenta de Heart no cause diagnósticos simultáneos ni cierre prematuro del objetivo.
+
 Para probar el parser localmente: `pip install -r requirements-dev.txt` y `python -m pytest -q`. La ingesta de adjuntos Telegram y OCR siguen pendientes.
 
 Heart evita asociar consultas sobre transiciones de modelo a tareas no relacionadas; si falta telemetría vinculada, Pixy comunica que la evidencia es insuficiente.

@@ -1527,7 +1527,7 @@ class Coordinator:
                                      and task_order[t['id']] < task_order[task['id']]), None)
                 if older_active:
                     continue
-            if background and task['state'] in {'ROUTING', 'SCOPE_PLANNING', 'RESOLVING_SCOPE', 'GENERATING', 'REVIEWING'}:
+            if background and task['state'] in {'ROUTING', 'SCOPE_PLANNING', 'RESOLVING_SCOPE', 'GENERATING', 'REVIEWING', 'DIAGNOSING'}:
                 if task['id'] not in self._llm_jobs:
                     self._llm_jobs[task['id']] = self._llm_executor.submit(self._run_task, task)
                 continue
