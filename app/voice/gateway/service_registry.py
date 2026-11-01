@@ -27,6 +27,14 @@ def validate_write_summary(summary):
 
 
 def validate_descriptor(spec):
+    if isinstance(spec, dict):
+        if spec.get('effect') == 'read' and 'effect_contract' not in spec:
+            spec['effect_contract'] = None
+        if 'credential_ref' not in spec:
+            spec['credential_ref'] = None
+        if spec.get('credential_ref') is None:
+            spec.setdefault('credential_header', 'Authorization')
+            spec.setdefault('credential_prefix', 'Bearer ')
     fields = {'service_id', 'operation', 'version', 'url', 'method', 'parameters',
               'content_types', 'max_bytes', 'timeout', 'per_minute', 'effect',
               'credential_ref', 'credential_header', 'credential_prefix', 'effect_contract'}
