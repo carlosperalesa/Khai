@@ -41,6 +41,102 @@ def skill(skill_id, inputs, outputs, services=None):
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_creation_tool_history_keeps_failed_and_corrected_calls_after_restart(self):
+        from app.kernel.database import connection
+        llm = Mock()
+        llm.complete.side_effect = [
+            {'content': '', 'provider': 'fixture', 'model': 'test', 'tool_calls': [
+                {'id': 'syntax-invalid', 'name': 'finish_code',
+                 'arguments': {'code': '# MODE: SAFE\ndef broken('}}]},
+            {'content': '', 'provider': 'fixture', 'model': 'test', 'tool_calls': [
+                {'id': 'syntax-corrected', 'name': 'finish_code',
+                 'arguments': {'code': '# MODE: SAFE\nprint("corrected")'}}]},
+        ]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'hand'
+            hand = Hand(root, Mock(), llm=llm)
+            code, mode, deps = hand.generate({'id': 'task-creation-audit', 'request': 'test'}, [])
+            run_id = hand.last_agent_run_id
+            restarted = Hand(root, Mock(), llm=Mock())
+            with connection(restarted.db) as conn:
+                run = dict(conn.execute('SELECT * FROM agent_runs WHERE run_id=?',
+                                        (run_id,)).fetchone())
+                calls = [dict(row) for row in conn.execute(
+                    'SELECT * FROM agent_tool_calls WHERE run_id=? ORDER BY created_at', (run_id,))]
+                messages = [dict(row) for row in conn.execute(
+                    'SELECT * FROM agent_messages WHERE run_id=? ORDER BY sequence', (run_id,))]
+            self.assertEqual((mode, deps), ('SAFE', []))
+            self.assertEqual(run['task_id'], 'task-creation-audit')
+            self.assertEqual((run['status'], run['turns'], run['tool_calls']), ('completed', 2, 2))
+            self.assertEqual(json.loads(run['result'])['code'], code)
+            self.assertEqual([call['call_id'] for call in calls], ['syntax-invalid', 'syntax-corrected'])
+            self.assertEqual([call['ok'] for call in calls], [0, 1])
+            self.assertEqual(json.loads(calls[0]['result'])['error_type'], 'SyntaxError')
+            self.assertTrue(calls[0]['error_fingerprint'])
+            self.assertIsNone(calls[1]['error_fingerprint'])
+            self.assertEqual([message['sequence'] for message in messages], list(range(6)))
+            self.assertEqual([message['role'] for message in messages],
+                             ['system', 'user', 'assistant', 'tool', 'assistant', 'tool'])
+            self.assertEqual(json.loads(messages[3]['document'])['tool_call_id'], 'syntax-invalid')
+            self.assertEqual(json.loads(messages[5]['document'])['tool_call_id'], 'syntax-corrected')
+            self.assertIn('SyntaxError', llm.complete.call_args_list[1].args[0][-1]['content'])
+
+    def test_creation_and_activation_operations_keep_objective_and_immutable_receipts(self):
+        import sqlite3
+        from app.kernel.database import connection
+        pixy, events = Mock(), Mock()
+        pixy.audit_artifact.return_value = {
+            'safe': True, 'requires_approval': False, 'audit_id': 'audit-creation-test'}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'hand'
+            hand = Hand(root, pixy, events=events)
+            version = hand.create('audit-example', '# MODE: SAFE\nprint("ok")',
+                                  {'purpose': 'test'}, correlation_id='task-creation-test')
+            hand.approve(version['version_id'], correlation_id='task-creation-test')
+            restarted = Hand(root, pixy)
+            with connection(restarted.db) as conn:
+                operations = [dict(row) for row in conn.execute(
+                    'SELECT * FROM operations WHERE target_version_id=? ORDER BY created_at',
+                    (version['version_id'],))]
+            self.assertEqual([op['operation_type'] for op in operations], ['create', 'approve'])
+            self.assertEqual(len({op['operation_id'] for op in operations}), 2)
+            for operation in operations:
+                self.assertEqual(operation['correlation_id'], 'task-creation-test')
+                self.assertEqual(operation['status'], 'completed')
+                self.assertGreaterEqual(operation['completed_at'], operation['created_at'])
+                with self.assertRaises(sqlite3.IntegrityError), connection(restarted.db) as conn:
+                    conn.execute('UPDATE operations SET reason=? WHERE operation_id=?',
+                                 ('rewritten', operation['operation_id']))
+                with self.assertRaises(sqlite3.IntegrityError), connection(restarted.db) as conn:
+                    conn.execute('DELETE FROM operations WHERE operation_id=?',
+                                 (operation['operation_id'],))
+            active = restarted.active('audit-example')
+            self.assertEqual(active['version_id'], version['version_id'])
+            self.assertEqual(active['pixy_audit_id'], 'audit-creation-test')
+            events.emit.assert_called_once_with('hand', 'activated', skill_name='audit-example',
+                version_id=version['version_id'], correlation_id='task-creation-test')
+
+    def test_owner_rejected_candidate_keeps_artifact_and_operation_after_restart(self):
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'hand'
+            hand = Hand(root, Mock())
+            version = hand.create('rejected-example', '# MODE: SAFE\nprint("candidate")',
+                                  {'purpose': 'test'}, correlation_id='task-owner-rejection')
+            hand.reject(version['version_id'], 'Owner rejected candidate')
+            restarted = Hand(root, Mock())
+            retained = root / ('.rejected-' + version['version_id'])
+            self.assertEqual(restarted.version(version['version_id'])['status'], 'rejected')
+            self.assertEqual(restarted.tree_hash(retained), version['artifact_hash'])
+            self.assertIsNone(restarted.active('rejected-example'))
+            with connection(restarted.db) as conn:
+                operation = dict(conn.execute(
+                    'SELECT * FROM operations WHERE operation_type="reject" AND source_version_id=?',
+                    (version['version_id'],)).fetchone())
+            self.assertEqual(operation['status'], 'completed')
+            self.assertEqual(operation['reason'], 'Owner rejected candidate')
+            self.assertIsNotNone(operation['completed_at'])
+
     def test_web_search_candidate_uses_voice_and_normalizes_results(self):
         import contextlib
         import io

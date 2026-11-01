@@ -2,6 +2,10 @@
 
 Este documento consolida la arquitectura del sistema, contratos, almacenamiento, seguridad, decisiones históricas (ADRs), procedimientos de operaciones, la infraestructura híbrida acelerada (Brain) y la arquitectura canónica de pruebas.
 
+Auditoría de siete caminos y contrato propuesto de trazabilidad: [`INTERACTION_AUDIT.md`](./INTERACTION_AUDIT.md). Los IDs de tareas, casos, autorizaciones, herramientas y entregas existentes no acreditan todavía un árbol completo padre/hijo con cierre de cada rama. Se detectaron pérdida por colisión de IDs externos en AgentLoop, cierres ausentes o prematuros y contaminación de diagnóstico por evidencia histórica ajena. Las pruebas nuevas conservan garantías actuales; la implementación del diario común permanece pendiente de decisión.
+
+La auditoría añadió 16 pruebas dentro de las suites canónicas: validación conjunta final 303 pruebas y 25 subpruebas aprobadas (191,73 s). Este resultado no acredita reparación de los huecos enumerados; la auditoría solo cambia documentación y pruebas.
+
 Actualización de implementación del 31 de octubre (aceptación en curso): `busca <consulta>` usa el SkillSpec de `web-search`; el proveedor se resuelve por una preferencia aprobada y auditable, nunca por instalación implícita.
 
 Voice mantiene un diario append-only `model_rejections` para rechazos del contrato de Mind. Conserva respuesta de hasta 16.000 caracteres (truncamiento explícito y SHA-256 del contenido completo), esquema esperado, errores Pydantic sin inputs/contextos, modelo y duraciones disponibles, task_id, revisión y traza. Redacta valores de secretos conocidos antes de persistir o devolver referencias; no incluye prompts ni credenciales. El contenido del modelo se marca como no confiable. El diario reside en Voice, no se monta en workers y sobrevive al reinicio.
@@ -9,6 +13,8 @@ Voice mantiene un diario append-only `model_rejections` para rechazos del contra
 Ante un rechazo, Mind entrega una referencia del diario; Coordinator registra `routing_failure`, pasa a DIAGNOSING y abre Heart en el primer fallo. Senses entrega el registro que coincide con referencia y task_id, no un error reciente de otra tarea. Heart diagnostica contra ese JSON y esquema; Pixy custodia el plan y sus autorizaciones, y Dreams conserva un episodio con run_id ausente porque todavía no hubo worker. Una negativa terminal de contenido se registra sin reintentar para eludirla. Los incidentes anteriores al despacho se identifican por intento y revisión. El lector de archivos reconoce trazas tanto con guion como con guion bajo.
 
 DIAGNOSING se agenda en el mismo executor con propiedad por task_id que las llamadas de generación. Si Heart tarda, el ciclo principal no inicia otro diagnóstico ni transforma la tarea en fallo por observar un caso aún incompleto. La mensajería y otras tareas pueden continuar.
+
+Aceptación de producción de la instrumentación: código `19ce591` activo. La repetición de la orden de preferencia con low produjo un contrato válido en 164,33 s y guardó la preferencia auditable. Esto acredita ese turno, no explica el rechazo histórico ni demuestra que todos los errores puedan repararse automáticamente. La integración Voice→Mind→Senses→Heart→Pixy→Dreams ante un JSON inválido está cubierta por una prueba controlada; no se presenta como un rechazo nuevo del modelo de producción.
 
 La aceptación del parser recorrió fallo real de TLS en PyPI, diagnóstico de Heart, decisión de Pixy, reanudación del artefacto aprobado y verificación independiente de CSV/PDF/XLSX. El caso terminó RECOVERED por postcondiciones y Dreams registró las tres ejecuciones. La aceptación conversacional de búsqueda detectó además que low puede conectar y aun devolver un JSON inválido para Mind; la conexión de un modelo no acredita su compatibilidad con el router.
 

@@ -446,6 +446,130 @@ class HttpReceiptTests(unittest.TestCase):
             self.assertTrue(all(item['resource_id'] is None for item in uncertain))
 
 
+class SkillUseAuditTests(unittest.TestCase):
+    """Durable facts available to audit an existing skill's execution branches."""
+
+    def gateway(self, folder):
+        registry = Mock()
+        registry.active_services.return_value = {'weather': {'operations': {
+            'forecast': {'version': 'v1', 'effect': 'read'}}}}
+        return ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
+            db=Path(folder) / 'voice.sqlite3', registry=registry,
+            execution_authority=Mock())
+
+    def test_sibling_execution_receipts_survive_restart_without_cross_attribution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            gateway = self.gateway(folder)
+            gateway.request = Mock(return_value={
+                'content_type': 'application/json', 'body': b'{"temperature":20}'})
+            request = {'service': 'weather', 'operation': 'forecast',
+                       'params': {'city': 'Santiago'}}
+            refs = [{'service_id': 'weather', 'operation': 'forecast', 'version': 'v1'}]
+            task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
+                    'deadline': time.time() + 60}
+            sibling = {**task, 'execution_id': 'run_' + 'c' * 32}
+            for branch in (task, sibling):
+                gateway._mailbox_request(branch, 'same-worker-local-id', request)
+            self.assertEqual(gateway.request.call_count, 2)
+
+            restarted = self.gateway(folder)
+            restarted.request = Mock(side_effect=AssertionError('must reuse durable receipt'))
+            branch_ids = []
+            for branch in (task, sibling):
+                self.assertEqual(restarted._mailbox_request(branch, 'same-worker-local-id', request),
+                                 {'result': {'temperature': 20}})
+                facts = restarted.technical_receipts(branch['id'], branch['execution_id'], refs)
+                self.assertEqual(len(facts), 1)
+                self.assertEqual(facts[0]['task_id'], branch['id'])
+                self.assertEqual(facts[0]['execution_id'], branch['execution_id'])
+                branch_ids.append(facts[0]['request_id'])
+            self.assertEqual(len(set(branch_ids)), 2)
+            self.assertEqual(restarted.technical_receipts('another-task', task['execution_id'], refs), [])
+            self.assertEqual(restarted.technical_receipts(task['id'], task['execution_id'],
+                [{**refs[0], 'version': 'v2'}]), [])
+            with self.assertRaises(PermissionError):
+                restarted._mailbox_request(task, 'same-worker-local-id',
+                    {**request, 'params': {'city': 'another city'}})
+            restarted.request.assert_not_called()
+
+    def test_interrupted_transport_preserves_dispatch_identity_and_never_replays(self):
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            gateway = self.gateway(folder)
+            # Emulate process death after the durable admission and before an outcome.
+            gateway.request = Mock(side_effect=SystemExit('fixture process death'))
+            task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
+                    'deadline': time.time() + 60}
+            request = {'service': 'weather', 'operation': 'forecast', 'params': {}}
+            with self.assertRaises(SystemExit):
+                gateway._mailbox_request(task, 'interrupted', request)
+
+            restarted = self.gateway(folder)
+            restarted.request = Mock(side_effect=AssertionError('uncertain dispatch must not repeat'))
+            self.assertEqual(restarted._mailbox_request(task, 'interrupted', request),
+                             {'error': 'UnconfirmedPreviousRequest'})
+            restarted.request.assert_not_called()
+            with connection(restarted.db) as conn:
+                fact = conn.execute('SELECT * FROM gateway_receipts WHERE request_id=?',
+                                    (task['execution_id'] + ':interrupted',)).fetchone()
+            self.assertEqual(fact['task_id'], task['id'])
+            self.assertEqual(fact['execution_id'], task['execution_id'])
+            self.assertEqual(fact['status'], 'sending')
+            self.assertIsNone(fact['reply'])
+
+    def test_receipt_verification_and_learning_share_the_same_execution_after_restart(self):
+        from app.dreams.dreams import Dreams
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            gateway = self.gateway(folder)
+            gateway.request = Mock(return_value={
+                'content_type': 'application/json', 'body': b'{"temperature":20}'})
+            task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
+                    'deadline': time.time() + 60, 'request': 'forecast'}
+            gateway._mailbox_request(task, 'forecast-1',
+                {'service': 'weather', 'operation': 'forecast', 'params': {'city': 'Santiago'}})
+            refs = [{'service_id': 'weather', 'operation': 'forecast', 'version': 'v1'}]
+            criterion = {'kind': 'http_schema', **refs[0], 'schema': {
+                'type': 'object', 'properties': {'temperature': {'type': 'number'}},
+                'required': ['temperature'], 'additionalProperties': False}}
+            facts = self.gateway(folder).technical_receipts(task['id'], task['execution_id'], refs)
+            success, evidence = verify_result({'status': 'finished', 'returncode': 0},
+                criterion, folder, facts, task['execution_id'])
+            self.assertTrue(success)
+            db = Path(folder) / 'control.sqlite3'
+            Dreams(db).record(task, success, evidence)
+            self.assertFalse(Dreams(db).record(task, success, evidence))
+            with connection(db) as conn:
+                rows = conn.execute('SELECT * FROM task_observations').fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['task_id'], task['id'])
+            self.assertEqual(rows[0]['execution_id'], task['execution_id'])
+            persisted = json.loads(rows[0]['evidence'])
+            self.assertEqual(persisted['receipts'][0]['request_id'], facts[0]['request_id'])
+            self.assertEqual(rows[0]['outcome'], 1)
+
+    def test_delivered_skill_result_retains_branch_metadata_and_telegram_receipt(self):
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'control.sqlite3'
+            mailbox = VoiceMailbox(path)
+            metadata = {'task_id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
+                        'conversation_id': 'conversation-fixture'}
+            delivery = mailbox.enqueue('Skill result', metadata)
+            sender = Mock(return_value={'result': {'message_id': 701}})
+            self.assertTrue(mailbox.deliver_one(sender))
+            sender.assert_called_once_with('Skill result', metadata)
+            restarted = VoiceMailbox(path)
+            self.assertFalse(restarted.deliver_one(sender))
+            with connection(path) as conn:
+                row = conn.execute('SELECT * FROM voice_outbox WHERE delivery_id=?',
+                                   (delivery,)).fetchone()
+            self.assertEqual(row['status'], 'delivered')
+            self.assertEqual(json.loads(row['metadata']), metadata)
+            self.assertEqual(json.loads(row['message_ids']), [701])
+            self.assertIsNotNone(row['sent_at'])
+
+
 class MultiConversationVoiceTests(Fixture):
     def setUp(self):
         super().setUp()

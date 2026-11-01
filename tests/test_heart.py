@@ -175,6 +175,42 @@ class HeartRecoveryTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_repair_branches_survive_restart_with_separate_immutable_histories(self):
+        self.senses.evidence.return_value = {
+            'storage': {'vitals': {'ram_percent': 95, 'disk_free': 5 * 1024**3},
+                        'integrity': {'status': 'ok'}},
+            'container_core': {'running': True},
+            'container_proxy': {'running': True, 'scheduler_age': 5}}
+        first = self.recovery.open_case('diagnostico memoria A', 'telegram:a')
+        second = self.recovery.open_case('diagnostico memoria B', 'telegram:b')
+        self.assertNotEqual(first['case_id'], second['case_id'])
+        auth = self.auth_store.issue(first['case_id'], first['plan']['capabilities'],
+            first['plan']['target'], first['plan_hash'], 'telegram:a')
+        self.recovery.await_approval(first['case_id'], auth)
+        denied = self.auth_store.decide(auth['authorization_id'], False, 'telegram:decision-a')
+        self.recovery.receive_decision(first['case_id'], denied)
+
+        reopened = Recovery(self.recovery.path, self.senses, self.hand, self.auth_store, self.events)
+        self.assertEqual(reopened.get(first['case_id'])['state'], 'DENIED')
+        self.assertEqual(reopened.get(second['case_id'])['state'], 'SOLUTION_PROPOSED')
+        first_states = [r['to_state'] for r in reopened.transitions(first['case_id'])]
+        second_states = [r['to_state'] for r in reopened.transitions(second['case_id'])]
+        self.assertEqual(first_states, ['RECEIVED', 'COLLECTING_EVIDENCE', 'DIAGNOSED',
+                                      'SOLUTION_PROPOSED', 'WAITING_USER_APPROVAL', 'DENIED'])
+        self.assertEqual(second_states, first_states[:4])
+        self.hand.create_recovery.assert_not_called()
+        with connection(reopened.path) as db:
+            for statement in ('DELETE FROM recovery_transitions WHERE case_id=?',
+                              'UPDATE recovery_transitions SET to_state="FAILED" WHERE case_id=?'):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(statement, (first['case_id'],))
+        with connection(self.events.path) as db:
+            events = db.execute("SELECT correlation_id,metadata FROM events WHERE module='heart' "
+                                "AND event_type='recovery_state'").fetchall()
+        self.assertEqual({r['correlation_id'] for r in events}, {first['case_id'], second['case_id']})
+        self.assertEqual([json.loads(r['metadata'])['to'] for r in events
+                          if r['correlation_id'] == second['case_id']], second_states[1:])
+
     def test_task_verification_distinguishes_failure_and_missing_evidence(self):
         case = {'plan': {'target': 'task', 'task_id': 'task_x',
                          'task_binding': {'attempt_number': 1}},

@@ -233,6 +233,69 @@ class ConversationFlowTests(Fixture):
         self.assertEqual([(r['role'], r['content']) for r in reopened.history(self.sid)],
                          [('user', 'Hola'), ('assistant', 'Hola.')])
 
+    def test_chat_receipts_join_ingress_turn_task_and_delivery_after_restart(self):
+        """A real mailbox path preserves the identifiers needed to reconstruct a chat."""
+        mailbox = self.manager.voice_mailbox = VoiceMailbox(self.state.db_path)
+        mailbox.on_delivered = self.c._notification_delivered
+        source, trace = 'telegram:audit-chat', 'req_audit-chat'
+        self.llm.generate_content.return_value = '{"reply":"Hola.","tool_calls":[]}'
+
+        self.assertEqual(mailbox.accept(source, trace, 'Hola'), 'pending')
+        self.assertTrue(mailbox.process_one(
+            lambda src, tid, text: process_ordinary(self.manager, src, tid, text)))
+        turn = self.c.conversations.turn(source)
+        task = self.store.get(turn['task_id'])
+        self.assertEqual((turn['trace_id'], task['trace_id']), (trace, trace))
+        self.assertEqual((turn['conversation_id'], task['conversation_id']), (self.sid, self.sid))
+
+        self.c.advance(task)
+        self.c._mailbox_job.result(timeout=5)
+        with connection(self.state.db_path) as conn:
+            incoming = dict(conn.execute('SELECT * FROM voice_inbox WHERE source=?', (source,)).fetchone())
+            outgoing = dict(conn.execute('SELECT * FROM voice_outbox').fetchone())
+            delivered = dict(conn.execute(
+                'SELECT * FROM conversation_messages WHERE source=?',
+                (outgoing['delivery_id'],)).fetchone())
+        self.assertEqual(incoming['status'], 'completed')
+        self.assertIsNotNone(incoming['completed_at'])
+        self.assertEqual(outgoing['status'], 'delivered')
+        self.assertTrue(json.loads(outgoing['message_ids']))
+        self.assertEqual(json.loads(outgoing['metadata'])['task_id'], task['id'])
+        self.assertEqual((delivered['task_id'], delivered['conversation_id']), (task['id'], self.sid))
+
+        reopened = ConversationStore(self.state.db_path)
+        self.assertEqual(reopened.turn(source)['task_id'], task['id'])
+        self.assertEqual(json.loads(reopened.turn(source)['receipt'])['result'], 'Hola.')
+        self.assertEqual(reopened.history(self.sid)[-1]['content'], 'Hola.')
+        # Telegram's replay of an acknowledged update cannot create another turn or model call.
+        self.assertEqual(mailbox.accept(source, trace, 'Hola'), 'completed')
+        self.assertFalse(mailbox.process_one(lambda *_: self.fail('Duplicate ingress was replayed')))
+        process_ordinary(self.manager, source, trace, 'Hola')
+        self.llm.generate_content.assert_called_once()
+        self.assertEqual(len(self.store.all()), 1)
+
+    def test_chat_delivery_failure_retains_receipt_without_claiming_delivered_history(self):
+        mailbox = self.manager.voice_mailbox = VoiceMailbox(self.state.db_path)
+        mailbox.on_delivered = self.c._notification_delivered
+        self.manager.telegram.send_message.side_effect = TimeoutError('Unconfirmed Telegram delivery')
+        self.llm.generate_content.return_value = '{"reply":"Hola.","tool_calls":[]}'
+        self.receive('telegram:audit-uncertain', 'Hola')
+        task = self.advance_turn('telegram:audit-uncertain')
+        self.c._mailbox_job.result(timeout=5)
+
+        with connection(self.state.db_path) as conn:
+            outgoing = dict(conn.execute('SELECT * FROM voice_outbox').fetchone())
+        self.assertEqual(outgoing['status'], 'unknown')
+        self.assertEqual(outgoing['error_type'], 'TimeoutError')
+        self.assertIsNone(outgoing['sent_at'])
+        self.assertEqual(json.loads(outgoing['metadata'])['task_id'], task['id'])
+        reopened = ConversationStore(self.state.db_path)
+        self.assertEqual([(item['role'], item['content']) for item in reopened.history(self.sid)],
+                         [('user', 'Hola')])
+        # A timeout could occur after Telegram accepted the message: never send it again blindly.
+        self.assertFalse(mailbox.deliver_one(lambda *_: self.fail('Uncertain delivery was replayed')))
+        self.manager.telegram.send_message.assert_called_once()
+
     def test_question_reconciles_delivered_outbox_after_restart(self):
         mailbox = VoiceMailbox(self.state.db_path)
         task = self.goal()

@@ -15,6 +15,8 @@ from app.kernel.database import connection
 from app.kernel.execution_authority import VoiceExecutionPort
 from app.mind.conversation import ReplyResult
 from app.pixy.skill_approvals import SkillApprovalStore
+from app.pixy.authorization import AuthorizationStore
+from app.kernel.tracing import trace_scope
 from app.voice.gateway.external_gateway import ExternalGateway
 from app.voice.secrets import SecretCaptureService, Secrets
 from app.voice.voice import command
@@ -453,6 +455,72 @@ class PixyPortTests(Fixture):
         self.assertIsInstance(res, ReplyResult)
         self.assertTrue(res.handled)
         self.assertEqual(res.text, 'Operación aprobada por Pixy')
+
+
+class PixyDecisionPersistenceTests(unittest.TestCase):
+    """Governance evidence must retain exact branch identities across restarts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = Path(self.tmp.name) / 'control.sqlite3'
+        self.plane = ControlPlane(self.db)
+
+    def test_sibling_decisions_keep_identity_actor_and_timestamps_after_restart(self):
+        with trace_scope('req_pixy_parent'):
+            approved = self.plane.ports.pixy.issue(
+                'case-20261031aaaa0001', ['HealthCheck'], 'core', 'a' * 64, 'telegram:request-a')
+            denied = self.plane.ports.pixy.issue(
+                'case-20261031aaaa0002', ['HealthCheck'], 'proxy', 'b' * 64, 'telegram:request-b')
+        grant = self.plane.ports.pixy.decide(
+            approved['authorization_id'], True, 'telegram:decision-a')
+        rejection = self.plane.ports.pixy.decide(
+            denied['authorization_id'], False, 'telegram:decision-b')
+
+        restarted = AuthorizationStore(self.db)
+        for issued, decision in ((approved, grant), (denied, rejection)):
+            persisted = restarted.get(issued['authorization_id'])
+            self.assertEqual(persisted['trace_id'], 'req_pixy_parent')
+            self.assertEqual(persisted['case_id'], issued['case_id'])
+            self.assertEqual(persisted['requested_by'], issued['requested_by'])
+            self.assertEqual(persisted['decided_by'], decision['decided_by'])
+            self.assertEqual(persisted['status'], decision['status'])
+            self.assertEqual(persisted['created_at'], issued['created_at'])
+            self.assertGreaterEqual(persisted['decided_at'], persisted['created_at'])
+        self.assertNotEqual(approved['authorization_id'], denied['authorization_id'])
+        self.assertEqual(restarted.pending_all(), [])
+        with connection(self.db) as conn:
+            orders = [dict(row) for row in conn.execute('SELECT * FROM execution_orders')]
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(orders[0]['authorization_id'], approved['authorization_id'])
+
+    def test_exact_order_claim_resumes_with_same_ids_and_preserves_decision(self):
+        auth = self.plane.ports.pixy.issue(
+            'case-20261031bbbb0001', ['HealthCheck'], 'core', 'c' * 64,
+            'telegram:request', trace_id='req_pixy_order')
+        decision = self.plane.ports.pixy.decide(auth['authorization_id'], True, 'telegram:approval')
+        terms = (decision['order_id'], auth['authorization_id'], auth['nonce'],
+                 auth['case_id'], auth['capabilities'], auth['target'], auth['plan_hash'],
+                 'hand:' + auth['case_id'])
+        claimed = self.plane.claim_authorized_order(*terms)
+
+        restarted = ControlPlane(self.db)
+        resumed = restarted.claim_authorized_order(*terms)
+        consumed = restarted.ports.pixy.get(auth['authorization_id'])
+        self.assertEqual(resumed, claimed)
+        self.assertEqual(consumed['status'], 'consumed')
+        self.assertEqual(consumed['trace_id'], auth['trace_id'])
+        self.assertEqual(consumed['decided_by'], 'telegram:approval')
+        self.assertEqual(consumed['consumed_by'], terms[-1])
+        self.assertGreaterEqual(consumed['consumed_at'], consumed['decided_at'])
+        self.assertEqual(claimed['authorization_id'], auth['authorization_id'])
+        self.assertEqual(claimed['case_id'], auth['case_id'])
+        self.assertEqual(claimed['operation_id'],
+                         'recovery:' + auth['case_id'] + ':' + auth['plan_hash'])
+        with self.assertRaises(PermissionError):
+            restarted.claim_authorized_order(*terms[:-1], 'hand:another-consumer')
+        with connection(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM execution_orders').fetchone()[0], 1)
 
 
 if __name__ == '__main__':

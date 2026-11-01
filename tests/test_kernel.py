@@ -891,6 +891,105 @@ class ContractTests(Fixture):
         self.assertEqual(turn['thread_id'], 100)
 
 
+class PixyReportAuditTests(Fixture):
+    """Preserve the observable receipts of direct Pixy reports across restarts."""
+
+    def setUp(self):
+        super().setUp()
+        from app.heart.recovery import Recovery
+        self.manager.telegram.user_id = 'owner'
+        self.manager.telegram.send_chat_action = None
+        self.manager.voice_mailbox = VoiceMailbox(self.state.db_path)
+        self.manager.voice_mailbox.on_delivered = self.c._notification_delivered
+        self.c._schedule_mailbox = Mock()
+        self.evidence_traces = []
+
+        def observe(*args, **kwargs):
+            self.evidence_traces.append(get_trace_id())
+            return {
+                'storage': {'vitals': {'disk_free': 2 * 1024 ** 3, 'ram_percent': 20},
+                            'integrity': {'status': 'ok', 'databases': {}}},
+                'container_proxy': {'running': True, 'scheduler_age': 0},
+                'container_core': {'oom_killed': False},
+                'core_logs': {'text': ''},
+                'pixy': {'recent_tasks': []},
+            }
+
+        self.senses = SimpleNamespace(evidence=Mock(side_effect=observe))
+        self.recovery = Recovery(self.state.db_path, self.senses, self.manager.hand, None)
+        self.manager.heart = SimpleNamespace(recovery=self.recovery)
+        self.llm.generate_content.return_value = 'Heart no detecta anomalias en la evidencia disponible.'
+
+    def process_report(self, source, trace, text):
+        mailbox = self.manager.voice_mailbox
+        mailbox.accept(source, trace, text)
+        self.assertTrue(mailbox.process_one(
+            lambda src, tid, body: process_ordinary(self.manager, src, tid, body)))
+
+    def test_report_paths_keep_distinct_cases_ingress_trace_and_delivery_receipts(self):
+        from app.heart.recovery import Recovery
+        requests = ['/p estado', '/p explica el ultimo error', '/p diagnostico']
+        case_ids, delivery_ids = [], []
+        for index, text in enumerate(requests):
+            source, trace = f'telegram:pixy-report-{index}', f'req_pixy-report-{index}'
+            self.process_report(source, trace, text)
+            case = self.recovery.recent(1)[0]
+            case_ids.append(case['case_id'])
+            self.assertEqual(case['requested_by'], source)
+            self.assertEqual(case['question'], text.partition(' ')[2])
+            self.assertEqual(case['state'], 'DIAGNOSED')
+            self.assertIsNone(case['plan'])
+            self.assertIsNone(case['authorization_id'])
+            self.assertEqual([row['to_state'] for row in self.recovery.transitions(case['case_id'])],
+                             ['RECEIVED', 'COLLECTING_EVIDENCE', 'DIAGNOSED'])
+            turn = self.c.conversations.turn(source)
+            self.assertEqual(turn['trace_id'], trace)
+            self.assertEqual(turn['status'], 'completed')
+            self.assertIn('result', json.loads(turn['receipt']))
+            self.assertTrue(self.manager.voice_mailbox.deliver_one(
+                lambda *_: {'result': {'message_id': 900 + index}}))
+            with connection(self.state.db_path) as conn:
+                inbox = conn.execute('SELECT * FROM voice_inbox WHERE source=?', (source,)).fetchone()
+                outbox = conn.execute('SELECT * FROM voice_outbox ORDER BY created_at DESC LIMIT 1').fetchone()
+                delivered = conn.execute('SELECT * FROM conversation_messages WHERE source=?',
+                                         (outbox['delivery_id'],)).fetchone()
+            self.assertEqual(inbox['trace_id'], trace)
+            self.assertEqual(inbox['status'], 'completed')
+            self.assertIsNotNone(inbox['completed_at'])
+            self.assertEqual(outbox['status'], 'delivered')
+            self.assertEqual(json.loads(outbox['message_ids']), [900 + index])
+            self.assertEqual(json.loads(outbox['metadata'])['conversation_id'], turn['conversation_id'])
+            self.assertEqual(delivered['role'], 'assistant')
+            delivery_ids.append(outbox['delivery_id'])
+        self.assertEqual(len(set(case_ids)), len(requests))
+        self.assertEqual(len(set(delivery_ids)), len(requests))
+        self.assertEqual(self.evidence_traces, [f'req_pixy-report-{i}' for i in range(len(requests))])
+        restarted = Recovery(self.state.db_path, self.senses, self.manager.hand, None)
+        self.assertEqual({case['case_id'] for case in restarted.recent()}, set(case_ids))
+        self.assertEqual(get_trace_id(), '')
+        self.assertEqual(self.store.all(), [])
+
+    def test_report_duplicate_and_uncertain_delivery_do_not_repeat_diagnosis(self):
+        source, trace, text = 'telegram:pixy-uncertain', 'req_pixy-uncertain', '/p estado'
+        self.llm.generate_content.side_effect = RuntimeError('provider unavailable')
+        self.process_report(source, trace, text)
+        case = self.recovery.recent(1)[0]
+        with self.assertRaises(TimeoutError):
+            self.manager.voice_mailbox.deliver_one(Mock(side_effect=TimeoutError('delivery unknown')))
+        self.assertEqual(self.manager.voice_mailbox.accept(source, trace, text), 'completed')
+        self.assertFalse(self.manager.voice_mailbox.process_one(
+            lambda *_: self.fail('A duplicate report must not diagnose again')))
+        self.assertFalse(self.manager.voice_mailbox.deliver_one(
+            lambda *_: self.fail('An uncertain delivery must not be blindly repeated')))
+        with connection(self.state.db_path) as conn:
+            outbox = conn.execute('SELECT * FROM voice_outbox').fetchone()
+        self.assertEqual(outbox['status'], 'unknown')
+        self.assertEqual(outbox['error_type'], 'TimeoutError')
+        self.assertIn('No se detectaron', outbox['text'])
+        self.assertEqual([row['case_id'] for row in self.recovery.recent()], [case['case_id']])
+        self.senses.evidence.assert_called_once()
+
+
 class DependencyPreparationFlowTests(Fixture):
     def test_pre_dispatch_failure_goes_to_heart_without_transport_retry(self):
         from app.voice.runtime.dependencies import DependencyPreparationError

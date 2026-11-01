@@ -35,6 +35,71 @@ class _Memory:
 
 
 class BrainTests(unittest.TestCase):
+    def test_mode_command_cascade_retains_attempts_after_controller_restart(self):
+        """One request can fail a candidate and connect another without losing either receipt."""
+        from app.kernel.tracing import trace_scope
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            manager = SimpleNamespace(coordinator=MagicMock(), dolphin=controller)
+            with patch.object(controller, '_start', side_effect=[
+                    TimeoutError('fixture cold start'), '[Modo mid conectado]']), \
+                 trace_scope('req_model-cascade'):
+                result = _command(manager, 'telegram:model-cascade', '/mode high')
+
+            self.assertEqual(result, '[Modo mid conectado]')
+            restarted = ModelController(directory, {})
+            events = list(reversed(restarted.transition_snapshot()['recent_transitions']))
+            self.assertEqual([(event['profile'], event['phase']) for event in events], [
+                ('high', 'activation_started'), ('high', 'activation_failed'),
+                ('mid', 'activation_started'), ('mid', 'activation_completed'),
+            ])
+            self.assertEqual({event['trace_id'] for event in events}, {'req_model-cascade'})
+            self.assertEqual(events[0]['attempt_id'], events[1]['attempt_id'])
+            self.assertEqual(events[2]['attempt_id'], events[3]['attempt_id'])
+            self.assertNotEqual(events[0]['attempt_id'], events[2]['attempt_id'])
+            self.assertEqual(events[1]['error_type'], 'TimeoutError')
+            self.assertGreaterEqual(events[1]['elapsed_seconds'], 0)
+            self.assertGreaterEqual(events[3]['elapsed_seconds'], 0)
+
+    def test_parallel_activation_journals_do_not_mix_request_contexts(self):
+        """Telemetry from overlapping requests retains its own trace and activation ID."""
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from app.kernel.tracing import get_trace_id, trace_scope
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            barrier = Barrier(2)
+
+            def activate(profile):
+                barrier.wait(timeout=5)
+                controller._transition_event(profile, 'warmup_started')
+                return 'connected'
+
+            def request(profile):
+                with trace_scope('req_parallel-' + profile):
+                    return controller.start(profile)
+
+            with patch.object(controller, '_start', side_effect=activate), \
+                 ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(request, profile) for profile in ('high', 'mid')]
+                self.assertEqual([future.result(timeout=10) for future in futures],
+                                 ['connected', 'connected'])
+
+            events = controller.transition_snapshot()['recent_transitions']
+            attempts = {}
+            for profile in ('high', 'mid'):
+                branch = [event for event in events if event['profile'] == profile]
+                self.assertEqual([event['phase'] for event in branch],
+                                 ['activation_completed', 'warmup_started', 'activation_started'])
+                self.assertEqual({event['trace_id'] for event in branch}, {'req_parallel-' + profile})
+                attempts[profile] = {event['attempt_id'] for event in branch}
+                self.assertEqual(len(attempts[profile]), 1)
+                self.assertNotIn('', attempts[profile])
+            self.assertTrue(attempts['high'].isdisjoint(attempts['mid']))
+            self.assertEqual(get_trace_id(), '')
+
     def test_activation_telemetry_correlates_failure_and_warmup_stage(self):
         from app.kernel.tracing import trace_scope
         with tempfile.TemporaryDirectory() as directory:
