@@ -77,9 +77,26 @@ class Brain:
 
     # Model and VM lifecycle coordination
     def set_mode(self, mode: str, notifier=None) -> str:
+        transitions = getattr(self._gateway, 'transitions', None)
+        if transitions is not None:
+            if str(mode).strip().lower() in {'?', 'status', 'info'}:
+                snapshot = transitions.snapshot()
+                active = [t for t in snapshot['transitions'] if t['status'] == 'active']
+                return f"Modo efectivo: {snapshot['effective_mode']}." + (
+                    f" Cambio a {active[0]['requested_mode']} en curso: {active[0]['id']}. /stop para cancelar." if active else '')
+            if str(mode).strip().lower() in {'cancel', 'cancelar'}:
+                result = transitions.cancel(notifier=notifier)
+                return f"Cambio {result['status']}; modo {result['effective_mode']} conservado."
+            result = transitions.request(mode, notifier=notifier)
+            return (f"Cambio solicitado a {result['requested_mode']}; modo efectivo {result['effective_mode']}. "
+                    f"ID: {result['id']}. /stop para cancelar.")
         if self.controller is not None:
             return self.controller.set_mode(mode, notifier=notifier)
         raise RuntimeError("No model controller configured in Brain.")
+
+    def cancel_transition(self):
+        transitions = getattr(self._gateway, 'transitions', None)
+        return transitions.cancel() if transitions is not None else {'status': 'idle', 'ids': []}
 
     def get_active_mode(self) -> str:
         if self.controller is not None:

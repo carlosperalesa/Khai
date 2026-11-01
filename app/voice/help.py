@@ -9,11 +9,13 @@ Modo:
 /mode mid o /m m - Dolphin GPU (g2-standard-4, L4 8B).
 /mode high o /m h - Qwen 32B GPU (g2-standard-8, L4 32B).
 /mode ? o /m ? - muestra el modo actual.
+/mode cancel - cancela el cambio de modelo pendiente.
+Los cambios se preparan en segundo plano y devuelven su ID.
 
 Sistema:
 /pixy o /p - habla con Pixy.
 /health - muestra el estado del sistema.
-/cancel o /stop - detiene el objetivo en curso.
+/cancel o /stop - detiene los objetivos y el cambio de modelo en curso.
 /restart - reinicia Khai.
 
 Conversaciones:

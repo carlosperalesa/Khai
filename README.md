@@ -1,5 +1,9 @@
 # Khai
 
+Continuidad de modelos implementada y en validación: `/mode <perfil>` devuelve un ID y prepara el cambio en segundo plano; `/mode cancel` o `/stop` lo cancelan. Brain conserva el servicio actual o confirma Nano antes de reemplazar la VM compartida. Si Nano falla, solicita elegir un perfil; no arranca otros automáticamente. El contrato de Mind usa el esquema nativo de Ollama y separa la orden actual del historial. Estado real de despliegue y pruebas en [CHECKPOINT](./CHECKPOINT.md).
+
+Validación local de esta continuación: 345 pruebas y 30 subpruebas; revisión posterior de Brain/contrato, 43 pruebas y 2 subpruebas. Todas aprobadas; los fixtures de modelos no sustituyen la aceptación real.
+
 El propietario aprobó el [diario común de interacciones](./docs/COMMON_JOURNAL.md). La implementación enlaza modelos, chat, Hand, Pixy, Heart, informes y uso de skills mediante ciclos y eventos persistentes; `/p informe <ID>` consulta una rama sin iniciar reparación. Validación y despliegue de esta continuación se registran en CHECKPOINT.
 
 La versión del diario común pasó 329 pruebas y 30 subpruebas. Conserva evidencia de errores y acuses de entrega; no reconstruye registros históricos perdidos ni considera una reparación exitosa sin verificación.
@@ -20,7 +24,7 @@ Para probar el parser localmente: `pip install -r requirements-dev.txt` y `pytho
 
 Heart evita asociar consultas sobre transiciones de modelo a tareas no relacionadas; si falta telemetría vinculada, Pixy comunica que la evidencia es insuficiente.
 
-El diseño propuesto para conservar la conversación mediante nano durante cambios de VM está en [`docs/MODEL_TRANSITIONS.md`](./docs/MODEL_TRANSITIONS.md); todavía no está implementado. Hand dispone de herramientas locales de análisis sintáctico y plantillas no aprobadas, y de lectura de URLs HTTPS explícitas a través de Voice.
+El contrato para conservar la conversación mediante nano durante cambios de VM está en [`docs/MODEL_TRANSITIONS.md`](./docs/MODEL_TRANSITIONS.md); la implementación y su aceptación se registran arriba. Hand dispone de herramientas locales de análisis sintáctico y plantillas no aprobadas, y de lectura de URLs HTTPS explícitas a través de Voice.
 
 La skill [`web-search`](./skills/web-search/SKILL.md) usa Brave Search API mediante Voice y devuelve título, URL y descripción. Está activa y verificada en producción desde el 31 de octubre de 2026; requiere `BRAVE_SEARCH_API_KEY` exclusivamente en `data/voice/secrets.env`. La investigación de Hand usa el mismo servicio declarado en `config/research.yaml`, sin respaldo automático a Google u otros buscadores. Esta configuración de infraestructura no establece una preferencia predeterminada del usuario.
 

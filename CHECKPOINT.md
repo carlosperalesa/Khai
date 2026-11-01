@@ -1,5 +1,15 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Continuidad de modelos y contrato de low — trabajo autorizado
+
+- El propietario autorizó corregir low, repetir `busca` real, implementar Nano/cancelación y medir high/mid sin ampliar 90 s ni habilitar Monitoring.
+- Mind separa sistema, historial de referencia y mensaje actual; Ollama recibe `AssistantTurn.model_json_schema()` en `format`, temperatura cero y contexto 8192. Se mantienen validación, hash y evidencia de rechazo, sin envolver respuestas mal formadas ni reintentar sin cambios.
+- `TransitionManager` usa control.sqlite3 como autoridad de generación/modo efectivo. `/mode` devuelve ID sin esperar GCP, `/mode cancel` y `/stop` invalidan el intento; las respuestas tardías no publican perfiles obsoletos. Nano se prueba antes de retirar un servicio. Si no existe VM activa, una elección local explícita puede arrancar sin Nano. No hay cascada de perfiles desde inferencia.
+- Las mutaciones remotas conservan intención y nombre de operación; un recibo ausente bloquea nuevas mutaciones, los nombres pendientes se consultan por GET. Reiniciar marca unknown sin replay. Ver `docs/MODEL_TRANSITIONS.md` para límites.
+- Validación específica: 38 pruebas de Mind/contrato aprobadas; suite Brain final 35 pruebas y 2 subpruebas aprobadas. Suite conjunta en curso; despliegue y aceptación real todavía pendientes en este punto.
+- Respaldo previo verificado: `/opt/khai/data/backups/model-continuity-20261101T020711Z`, cuatro bases SQLite con quick_check ok. VM observada TERMINATED; no arrancada durante la preparación. Medición preparada por SSH con clave y hostkey existentes, sin gcloud SSH, agentes ni nuevas APIs.
+- Validación consolidada: 345 pruebas y 30 subpruebas aprobadas en 332,95 s. Los últimos ajustes del agente se validaron después con las suites completas de Brain/contrato: 43 pruebas y 2 subpruebas aprobadas en 26,52 s. No sumar esos conteos como pruebas distintas. Código listo para despliegue; aceptación real aún pendiente.
+
 ## Diario común aprobado — continuación del 31 de octubre
 
 - **Desplegado y aceptado:** código `385f20d` en Core y proxy, imágenes reconstruidas. `/health` HTTPS 200 con certificado validado; `quick_check` ok en las cuatro bases. Suite final: 329 pruebas y 30 subpruebas aprobadas; última prueba de aislamiento de evidencia también aprobada.

@@ -19,6 +19,13 @@ from app.kernel.database import adopt_schema, connection
 
 logger = logging.getLogger(__name__)
 _attempt = ContextVar('model_activation_attempt', default='')
+transition_token = ContextVar('model_transition_token', default=None)
+
+
+def _check_transition():
+    token = transition_token.get()
+    if token is not None:
+        token.check()
 
 PROFILES = {
     'low': {
@@ -113,7 +120,12 @@ def _model_audit(kind):
                     refs['profile'] = value
             object_id = str(args[0]) if fn.__name__ == '_wait_operation' else uuid.uuid4().hex
             with self.journal.scope(kind, object_id, refs=refs) as cycle:
-                result = fn(self, *args, **kwargs)
+                try:
+                    result = fn(self, *args, **kwargs)
+                except Exception as exc:
+                    if type(exc).__name__ == 'TransitionCancelled':
+                        self.journal.finish(cycle, 'cancelled', data={'error_type': type(exc).__name__})
+                    raise
                 if kind in {'model_change', 'model_stop', 'model_fallback', 'model_rollback'}:
                     self.journal.event(cycle, 'effective_mode_observed',
                                        data={'effective_mode': self.get_active_mode()})
@@ -172,6 +184,11 @@ class ModelController:
                 return str(val).strip()
         return os.getenv(key, default).strip()
 
+    def _require_transition_owner(self):
+        if getattr(self, '_transition_manager', None) is not None and transition_token.get() is None:
+            raise RuntimeError('Model mutations require the transition manager')
+        _check_transition()
+
     def _transition_event(self, profile, phase, **detail):
         event = dict(attempt_id=_attempt.get(), trace_id=get_trace_id(), profile=profile,
                      phase=phase, created_at=time.time(), disk=self.disk,
@@ -191,11 +208,24 @@ class ModelController:
                 'recent_transitions': [json.loads(r['document']) for r in rows]}
 
     def get_active_mode(self) -> str:
+        manager = getattr(self, '_transition_manager', None)
+        if manager is not None:
+            return manager.effective_mode()
         with connection(self.db_path) as conn:
             row = conn.execute('SELECT active_mode FROM dolphin_mode_state WHERE id = 1').fetchone()
             return row['active_mode'] if row else 'nano'
 
     def _set_mode_state(self, active_mode: str, *, mark_notified: bool = False) -> None:
+        _check_transition()
+        token = transition_token.get()
+        if token is not None:
+            token.publish(active_mode)
+        elif getattr(self, '_transition_manager', None) is not None:
+            raise RuntimeError('Effective mode requires the current transition owner')
+        self._mirror_mode_state(active_mode, mark_notified=mark_notified)
+
+    def _mirror_mode_state(self, active_mode: str, *, mark_notified=False):
+        """Compatibility mirror; the transition database is authoritative when attached."""
         with connection(self.db_path) as conn:
             if mark_notified:
                 conn.execute(
@@ -211,6 +241,7 @@ class ModelController:
     @_model_audit('model_fallback')
     def mark_fallback_to_nano(self) -> None:
         """Registra que Dolphin se apagó/no está disponible y vuelve a modo nano (Gemini)."""
+        self._require_transition_owner()
         self._record_stop()
         self._set_mode_state('nano', mark_notified=False)
         try:
@@ -230,8 +261,8 @@ class ModelController:
             last_notified = row['notified_mode'] if row else 'nano'
             if last_notified != effective_mode:
                 conn.execute(
-                    'UPDATE dolphin_mode_state SET active_mode = ?, notified_mode = ? WHERE id = 1',
-                    (effective_mode, effective_mode),
+                    'UPDATE dolphin_mode_state SET notified_mode = ? WHERE id = 1',
+                    (effective_mode,),
                 )
                 label = PROFILE_LABELS.get(effective_mode, effective_mode.lower())
                 return f'[Modo {label} conectado]\n'
@@ -309,6 +340,7 @@ class ModelController:
     def _wait_operation(self, op_name: str, timeout_sec: int = 90) -> None:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
+            _check_transition()
             resp = requests.get(
                 self._gce_url(f'operations/{quote(op_name)}'),
                 headers=self._headers(),
@@ -317,6 +349,10 @@ class ModelController:
             resp.raise_for_status()
             data = resp.json()
             if data.get('status') == 'DONE':
+                token = transition_token.get()
+                if token is not None:
+                    token.operation_done(op_name, bool(data.get('error')))
+                _check_transition()
                 if 'error' in data:
                     errors = data['error'].get('errors', [])
                     msg = '; '.join(e.get('message', e.get('code', 'GCE error')) for e in errors)
@@ -376,6 +412,7 @@ class ModelController:
     def _wait_ollama_ready(self, timeout_sec: int = 45) -> bool:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
+            _check_transition()
             try:
                 r = requests.get(f'{self.endpoint}/api/tags', timeout=3, allow_redirects=False)
                 if r.status_code == 200:
@@ -395,7 +432,7 @@ class ModelController:
         spec = PROFILES.get(target_mode, PROFILES.get('mid', {}))
         return spec.get('model', 'dolphin3:8b')
 
-    def _warmup_model(self, profile: str = 'mid') -> None:
+    def _warmup_model(self, profile: str = 'mid') -> dict:
         """Carga el modelo y exige una inferencia mínima antes de declarar el modo activo."""
         timeout = max(30, min(120, int(self._cfg('KHAI_DOLPHIN_WARMUP_TIMEOUT', '90'))))
         model = self.get_model_for_mode(profile)
@@ -412,24 +449,39 @@ class ModelController:
             allow_redirects=False,
         )
         response.raise_for_status()
-        answer = response.json().get('response')
+        data = response.json()
+        answer = data.get('response')
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError('Ollama no devolvió respuesta durante la precarga')
+        return {key: data[key] for key in ('total_duration', 'load_duration', 'prompt_eval_duration',
+                                         'eval_duration', 'prompt_eval_count', 'eval_count')
+                if isinstance(data.get(key), (int, float)) and not isinstance(data.get(key), bool)}
 
     def _confirm_ready(self, profile: str = 'mid') -> None:
+        _check_transition()
         self._transition_event(profile, 'waiting_api')
         if not self._wait_ollama_ready(timeout_sec=90):
             raise TimeoutError('Ollama no abrió su API dentro del plazo de arranque (90s)')
         self._transition_event(profile, 'warmup_started')
-        self._warmup_model(profile)
-        self._transition_event(profile, 'warmup_completed')
+        metrics = self._warmup_model(profile)
+        _check_transition()
+        self._transition_event(profile, 'warmup_completed', **(metrics if isinstance(metrics, dict) else {}))
+
+    def _mutation(self, method, url, **kwargs):
+        self._require_transition_owner()
+        token = transition_token.get()
+        if token is not None:
+            return token.mutate(method, url, **kwargs)
+        _check_transition()
+        return getattr(requests, method)(url, **kwargs)
 
     @_model_audit('model_vm_delete')
     def _delete_instance(self, *, wait: bool = True) -> None:
+        self._require_transition_owner()
         current = self.get_instance()
         if current is None:
             return
-        response = requests.delete(
+        response = self._mutation('delete',
             self._gce_url(f'instances/{quote(self.instance)}'),
             headers=self._headers(),
             timeout=20,
@@ -457,6 +509,7 @@ class ModelController:
 
     @_model_audit('model_rollback')
     def _rollback_activation(self) -> None:
+        self._require_transition_owner()
         self._record_stop()
         self._set_mode_state('nano', mark_notified=True)
         try:
@@ -520,10 +573,12 @@ class ModelController:
         except Exception as exc:
             self._transition_event(profile, 'activation_failed', error_type=type(exc).__name__,
                                    reason=_format_error_reason(exc), elapsed_seconds=time.monotonic()-started)
-            self.journal.finish(cycle, 'failed', data={'error_type': type(exc).__name__})
+            self.journal.finish(cycle, 'cancelled' if type(exc).__name__ == 'TransitionCancelled' else 'failed',
+                                data={'error_type': type(exc).__name__})
             raise
 
     def _start(self, profile: str = 'mid') -> str:
+        self._require_transition_owner()
         profile = (profile or 'mid').strip().lower()
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid', 'n': 'nano', 'off': 'nano'}
         profile = aliases.get(profile, profile)
@@ -535,6 +590,7 @@ class ModelController:
         target_mt = spec['machine_type']
         label = PROFILE_LABELS.get(profile, profile.capitalize())
         current = self.get_instance()
+        _check_transition()
         if current is not None:
             curr_mt = current.get('machineType', '').rsplit('/', 1)[-1]
             curr_status = current.get('status', '')
@@ -543,7 +599,7 @@ class ModelController:
                 self._set_mode_state(profile, mark_notified=True)
                 return f"[Modo {label} conectado]"
             if curr_mt == target_mt and curr_status == 'TERMINATED':
-                resp = requests.post(
+                resp = self._mutation('post',
                     self._gce_url(f'instances/{quote(self.instance)}/start'),
                     headers=self._headers(),
                     timeout=20,
@@ -554,7 +610,7 @@ class ModelController:
                 self._confirm_ready(profile)
                 self._set_mode_state(profile, mark_notified=True)
                 return f"[Modo {label} conectado]"
-            del_resp = requests.delete(
+            del_resp = self._mutation('delete',
                 self._gce_url(f'instances/{quote(self.instance)}'),
                 headers=self._headers(),
                 timeout=20,
@@ -566,6 +622,7 @@ class ModelController:
         target_candidates = [target_mt] + spec.get('fallback_machine_types', [])
         last_create_err = None
         for candidate_mt in target_candidates:
+            _check_transition()
             body = {
                 'name': self.instance,
                 'machineType': f'zones/{self.zone}/machineTypes/{candidate_mt}',
@@ -589,7 +646,7 @@ class ModelController:
                     }
                 ],
             }
-            ins_resp = requests.post(
+            ins_resp = self._mutation('post',
                 self._gce_url('instances'),
                 headers=self._headers(),
                 json=body,
@@ -601,20 +658,23 @@ class ModelController:
                 continue
             try:
                 self._wait_operation(ins_resp.json()['name'])
-                self._record_start(profile, candidate_mt, spec['rate_clp_per_hour'])
-                self._confirm_ready(profile)
-                self._set_mode_state(profile, mark_notified=True)
-                return f"[Modo {label} conectado]"
             except RuntimeError as op_err:
                 last_create_err = op_err
                 logger.warning('Operación Spot %s falló (%s)', candidate_mt, op_err)
                 continue
+            # Capacity alternatives apply to insertion only. An inference failure
+            # must retain its evidence rather than create another machine attempt.
+            self._record_start(profile, candidate_mt, spec['rate_clp_per_hour'])
+            self._confirm_ready(profile)
+            self._set_mode_state(profile, mark_notified=True)
+            return f"[Modo {label} conectado]"
         if last_create_err:
             raise last_create_err
         raise RuntimeError(f'No se pudo activar ningún tipo de máquina para {profile}')
 
     @_model_audit('model_stop')
     def stop(self) -> str:
+        self._require_transition_owner()
         current = self.get_instance()
         self._record_stop()
         self._set_mode_state('nano', mark_notified=True)
@@ -625,6 +685,10 @@ class ModelController:
 
     def status(self) -> str:
         current = self.get_instance()
+        if getattr(self, '_transition_manager', None) is not None:
+            mode = self.get_active_mode()
+            remote = (current or {}).get('status', 'ABSENT')
+            return f'[Modo {mode}]\nEstado Dolphin: {remote}. {self.billing_summary()}'
         if current is None:
             self._record_stop()
             self._set_mode_state('nano', mark_notified=True)

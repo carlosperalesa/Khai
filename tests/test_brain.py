@@ -368,9 +368,12 @@ class BrainTests(unittest.TestCase):
                 'KHAI_DOLPHIN_MODEL': 'dolphin3:8b',
             })
             response = MagicMock()
-            response.json.return_value = {'response': 'OK'}
+            response.json.return_value = {'response': 'OK', 'load_duration': 123,
+                                          'eval_count': 1, 'total_duration': True,
+                                          'prompt_eval_duration': 'not a metric'}
             with patch('app.mind.brain.controller.requests.post', return_value=response) as post:
-                ctrl._warmup_model()
+                metrics = ctrl._warmup_model()
+            self.assertEqual(metrics, {'load_duration': 123, 'eval_count': 1})
             payload = post.call_args.kwargs['json']
             self.assertEqual(payload['model'], 'dolphin3:8b')
             self.assertEqual(payload['options']['num_predict'], 1)
@@ -655,6 +658,338 @@ class BrainTests(unittest.TestCase):
         mgr = SimpleNamespace(brain=ctrl, coordinator=MagicMock())
         with self.assertRaises(ValueError):
             _command(mgr, 'telegram:1', '/mode invalid_foo')
+
+
+class CancelableTransitionTests(unittest.TestCase):
+    @staticmethod
+    def wait_until(predicate, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(.01)
+        raise AssertionError('Transition did not reach the expected state')
+
+    def test_cancel_during_warmup_preserves_nano_and_fences_late_publish(self):
+        from threading import Event
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            entered, release = Event(), Event()
+            notifications = []
+            manager = TransitionManager(controller, lambda: True)
+            def warmup(profile):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return {'load_duration': 42}
+            try:
+                with patch.object(controller, 'get_instance', return_value={'status': 'RUNNING', 'machineType': 'g2-standard-8'}), \
+                     patch.object(controller, '_wait_ollama_ready', return_value=True), \
+                     patch.object(controller, '_warmup_model', side_effect=warmup), \
+                     patch('app.mind.brain.controller.requests.delete') as delete:
+                    receipt = manager.request('high', notifications.append)
+                    self.assertTrue(entered.wait(5))
+                    start = time.monotonic()
+                    cancelled = manager.cancel()
+                    self.assertLess(time.monotonic() - start, 1)
+                    self.assertEqual(cancelled['effective_mode'], 'nano')
+                    release.set()
+                    manager._executor.shutdown(wait=True)
+                    self.assertEqual(controller.get_active_mode(), 'nano')
+                    self.assertNotIn('[Modo high conectado]', notifications)
+                    self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'cancelled')
+                    tree = manager.journal.tree(manager._cycle(receipt['id']))
+                    attempts = [c for c in tree['cycles'] if c['kind'] == 'model_attempt']
+                    self.assertEqual(attempts[0]['status'], 'cancelled')
+                    delete.assert_not_called()
+            finally:
+                release.set()
+                manager.shutdown(wait=True)
+
+    def test_newer_request_supersedes_slow_candidate_and_only_it_connects(self):
+        from threading import Event
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            entered, release = Event(), Event()
+            manager = TransitionManager(controller, lambda: True)
+            sent = []
+            def start(profile):
+                if profile == 'high':
+                    entered.set()
+                    self.assertTrue(release.wait(5))
+                controller._set_mode_state(profile)
+                return 'connected'
+            try:
+                with patch.object(controller, '_start', side_effect=start):
+                    first = manager.request('high', sent.append)
+                    self.assertTrue(entered.wait(5))
+                    second = manager.request('mid', sent.append)
+                    self.assertGreater(second['generation'], first['generation'])
+                    release.set()
+                    self.wait_until(lambda: manager.snapshot()['transitions'][0]['status'] == 'completed')
+                    self.assertEqual(controller.get_active_mode(), 'mid')
+                    self.assertEqual([r['status'] for r in manager.snapshot()['transitions']], ['completed', 'cancelled'])
+                    self.assertNotIn('[Modo high conectado]', sent)
+                    self.assertEqual(sent.count('[Modo mid conectado]'), 1)
+            finally:
+                release.set()
+                manager.shutdown(wait=True)
+
+    def test_nano_failure_keeps_current_service_and_never_mutates_gcp(self):
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            controller._set_mode_state('low')
+            manager = TransitionManager(controller, MagicMock(side_effect=TimeoutError('secret transport details')))
+            sent = []
+            try:
+                with patch.object(controller, 'start') as start, patch.object(controller, 'stop') as stop, \
+                     patch.object(controller, 'get_instance', return_value={'status': 'RUNNING', 'machineType': 'e2-standard-8'}):
+                    manager.request('high', sent.append)
+                    self.wait_until(lambda: not manager.is_active() and sent and 'Nano no responde' in sent[-1])
+                    self.assertEqual(controller.get_active_mode(), 'low')
+                    self.assertEqual(manager.snapshot()['transitions'][0]['error_type'], 'NanoUnavailable')
+                    start.assert_not_called()
+                    stop.assert_not_called()
+                    self.assertIn('Nano no responde', sent[-1])
+                    self.assertNotIn('secret transport details', sent[-1])
+            finally:
+                manager.shutdown(wait=True)
+
+    def test_owner_selected_local_profile_can_start_when_nano_and_vm_are_absent(self):
+        from app.mind.brain.transitions import TransitionManager
+        for remote in (None, {'status': 'TERMINATED', 'machineType': 'e2-standard-8'}):
+            with self.subTest(remote=remote), tempfile.TemporaryDirectory() as directory:
+                controller = ModelController(directory, {})
+                manager = TransitionManager(controller, MagicMock(side_effect=TimeoutError('Nano down')))
+                def start(profile):
+                    controller._set_mode_state(profile)
+                    return 'connected'
+                try:
+                    with patch.object(controller, 'get_instance', return_value=remote), \
+                         patch.object(controller, '_start', side_effect=start) as activate:
+                        receipt = manager.request('low')
+                        self.wait_until(lambda: not manager.is_active())
+                        self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'completed')
+                        self.assertEqual(controller.get_active_mode(), 'low')
+                        activate.assert_called_once_with('low')
+                        events = manager.journal.tree(manager._cycle(receipt['id']))['events']
+                        self.assertTrue(any(e['phase'] == 'nano_unavailable_owner_selected_profile' for e in events))
+                        self.assertFalse(any(e['phase'] == 'nano_bridge_ready' for e in events))
+                finally:
+                    manager.shutdown(wait=True)
+
+    def test_same_healthy_profile_validates_without_nano_or_vm_replacement(self):
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            controller._set_mode_state('low')
+            probe = MagicMock(side_effect=AssertionError('Nano must not be needed'))
+            manager = TransitionManager(controller, probe)
+            try:
+                with patch.object(controller, 'get_instance', return_value={'status': 'RUNNING', 'machineType': 'e2-standard-8'}), \
+                     patch.object(controller, '_wait_ollama_ready', return_value=True), \
+                     patch.object(controller, '_warmup_model', return_value={'load_duration': 100}), \
+                     patch('app.mind.brain.controller.requests.post') as post:
+                    manager.request('low')
+                    self.wait_until(lambda: not manager.is_active())
+                    self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'completed')
+                    self.assertEqual(controller.get_active_mode(), 'low')
+                    probe.assert_not_called()
+                    post.assert_not_called()
+                    warmups = [e for e in controller.transition_snapshot()['recent_transitions'] if e['phase'] == 'warmup_completed']
+                    self.assertEqual(warmups[0]['load_duration'], 100)
+            finally:
+                manager.shutdown(wait=True)
+
+    def test_same_running_profile_with_failed_readiness_does_not_destroy_service(self):
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            controller._set_mode_state('low')
+            probe = MagicMock()
+            manager = TransitionManager(controller, probe)
+            try:
+                with patch.object(controller, 'get_instance', return_value={'status': 'RUNNING', 'machineType': 'e2-standard-8'}), \
+                     patch.object(controller, '_wait_ollama_ready', return_value=True), \
+                     patch.object(controller, '_warmup_model', side_effect=TimeoutError('not ready')), \
+                     patch('app.mind.brain.controller.requests.delete') as delete, \
+                     patch('app.mind.brain.controller.requests.post') as post:
+                    manager.request('low')
+                    self.wait_until(lambda: not manager.is_active())
+                    self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'failed')
+                    self.assertEqual(controller.get_active_mode(), 'low')
+                    probe.assert_not_called()
+                    delete.assert_not_called()
+                    post.assert_not_called()
+            finally:
+                manager.shutdown(wait=True)
+
+    def test_failed_inference_does_not_try_other_machine_types(self):
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            manager = TransitionManager(controller, lambda: True)
+            inserted = MagicMock(ok=True, status_code=200)
+            inserted.json.return_value = {'name': 'op-created'}
+            try:
+                with patch.object(controller, 'get_instance', return_value=None), \
+                     patch.object(controller, '_headers', return_value={}), \
+                     patch.object(controller, '_wait_operation'), \
+                     patch.object(controller, '_confirm_ready', side_effect=RuntimeError('invalid warmup response')), \
+                     patch('app.mind.brain.controller.requests.post', return_value=inserted) as post:
+                    manager.request('high')
+                    self.wait_until(lambda: not manager.is_active())
+                    self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'failed')
+                    self.assertEqual(controller.get_active_mode(), 'nano')
+                    self.assertEqual(post.call_count, 1)
+            finally:
+                manager.shutdown(wait=True)
+
+    def test_mode_command_uses_managed_brain_and_stop_cancels_without_llm_wait(self):
+        from threading import Event
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            transitions = TransitionManager(controller, lambda: True)
+            brain = Brain(SimpleNamespace(transitions=transitions), controller)
+            entered, release = Event(), Event()
+            sent = []
+            coordinator = SimpleNamespace(notify=sent.append, store=SimpleNamespace(all=lambda: []),
+                                          cancel=MagicMock(), _agent_active=lambda _: False)
+            manager = SimpleNamespace(brain=brain, dolphin=controller, coordinator=coordinator,
+                                      model_transitions=transitions)
+            def prepare(profile):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                controller._set_mode_state(profile)
+            try:
+                with patch.object(controller, '_start', side_effect=prepare), \
+                     patch.object(controller, 'set_mode', side_effect=AssertionError('Legacy cascade must not run')):
+                    requested = _command(manager, 'telegram:managed-mode', '/mode high')
+                    self.assertIn('transition_', requested)
+                    self.assertTrue(entered.wait(5))
+                    start = time.monotonic()
+                    stopped = _command(manager, 'telegram:managed-stop', '/stop')
+                    self.assertLess(time.monotonic() - start, 1)
+                    self.assertIn('Cambio de modelo cancelado', stopped)
+                    release.set()
+                    transitions._executor.shutdown(wait=True)
+                    self.assertEqual(controller.get_active_mode(), 'nano')
+                    self.assertNotIn('[Modo high conectado]', sent)
+                    coordinator.cancel.assert_not_called()
+                    self.assertTrue(urgent_command('/mode high'))
+                    self.assertTrue(urgent_command('/stop'))
+            finally:
+                release.set()
+                transitions.shutdown(wait=True)
+
+    def test_cancelled_remote_post_receipt_is_reconciled_without_replaying(self):
+        from threading import Event
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            manager = TransitionManager(controller, lambda: True)
+            entered, release = Event(), Event()
+            response = MagicMock(ok=True, status_code=200)
+            response.json.return_value = {'name': 'op-late'}
+            def submit(*args, **kwargs):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return response
+            done = MagicMock()
+            done.json.return_value = {'status': 'DONE'}
+            try:
+                with patch.object(controller, 'get_instance', return_value=None), \
+                     patch.object(controller, '_headers', return_value={}), \
+                     patch('app.mind.brain.controller.requests.post', side_effect=submit) as post, \
+                     patch('app.mind.brain.transitions.requests.get', return_value=done) as read:
+                    manager.request('high')
+                    self.assertTrue(entered.wait(5))
+                    manager.cancel()
+                    release.set()
+                    manager.request('nano')
+                    self.wait_until(lambda: manager.snapshot()['transitions'][0]['status'] == 'completed')
+                    self.assertEqual(post.call_count, 1)
+                    self.assertIn('operations/op-late', read.call_args.args[0])
+                    self.assertEqual(manager.snapshot()['pending_operations'], [])
+                    self.assertEqual(controller.get_active_mode(), 'nano')
+            finally:
+                release.set()
+                manager.shutdown(wait=True)
+
+    def test_transport_timeout_without_receipt_blocks_next_mutation(self):
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            manager = TransitionManager(controller, lambda: True)
+            try:
+                with patch.object(controller, 'get_instance', return_value=None), \
+                     patch.object(controller, '_headers', return_value={}), \
+                     patch('app.mind.brain.controller.requests.post', side_effect=__import__('requests').Timeout('unknown')) as post:
+                    manager.request('high')
+                    self.wait_until(lambda: not manager.is_active())
+                    manager.request('mid')
+                    self.wait_until(lambda: not manager.is_active())
+                    self.assertEqual(post.call_count, 1)
+                    self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'unknown')
+                    self.assertEqual(manager.snapshot()['transitions'][0]['error_type'], 'RemoteOutcomeUnknown')
+                    self.assertEqual(controller.get_active_mode(), 'nano')
+            finally:
+                manager.shutdown(wait=True)
+
+    def test_restart_marks_incomplete_change_uncertain_without_replay(self):
+        from app.kernel.database import connection
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            manager = TransitionManager(controller, lambda: True)
+            manager.shutdown(wait=True)
+            with connection(manager.path) as db:
+                identifier, now = 'transition-interrupted', time.time()
+                db.execute('INSERT INTO model_transitions VALUES (?,?,?,?,?,?,?,?,NULL)',
+                           (identifier, 1, 'high', 'nano', 'active', 'preparing_target', now, now))
+                manager.journal.start('model_transition', identifier, conn=db)
+            controller2 = ModelController(directory, {})
+            with patch.object(controller2, 'get_instance') as read, patch.object(controller2, 'start') as start:
+                restarted = TransitionManager(controller2, MagicMock())
+                try:
+                    self.assertEqual(restarted.snapshot()['transitions'][0]['status'], 'unknown')
+                    self.assertEqual(controller2.get_active_mode(), 'nano')
+                    read.assert_not_called()
+                    start.assert_not_called()
+                    self.assertEqual(restarted.journal.get(restarted._cycle(identifier))['status'], 'unknown')
+                finally:
+                    restarted.shutdown(wait=True)
+
+    def test_transition_worker_keeps_parent_trace_and_late_fallback_cannot_override(self):
+        from app.kernel.tracing import trace_scope
+        from app.mind.brain.transitions import TransitionManager
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            manager = TransitionManager(controller, lambda: True)
+            def start(profile):
+                controller._set_mode_state(profile)
+                return 'connected'
+            try:
+                old_generation = manager.snapshot()['generation']
+                parent = manager.journal.start('interaction', 'fixture-parent', trace_id='req_transition-trace')
+                with trace_scope('req_transition-trace'), manager.journal.activate(parent), \
+                     patch.object(controller, '_start', side_effect=start):
+                    receipt = manager.request('high')
+                    self.wait_until(lambda: not manager.is_active())
+                tree = manager.journal.tree(parent)
+                transitions = [c for c in tree['cycles'] if c['object_id'] == receipt['id']]
+                self.assertEqual(transitions[0]['parent_id'], parent)
+                self.assertTrue(all(c['trace_id'] == 'req_transition-trace' for c in tree['cycles']))
+                self.assertFalse(manager.publish_nano_fallback('high', old_generation))
+                self.assertEqual(controller.get_active_mode(), 'high')
+                generation = manager.snapshot()['generation']
+                self.assertTrue(manager.publish_nano_fallback('high', generation))
+                self.assertEqual(controller.get_active_mode(), 'nano')
+            finally:
+                manager.shutdown(wait=True)
 
 
 if __name__ == '__main__':

@@ -64,6 +64,9 @@ class ModuleManager:
         self.dolphin = self.model_controller  # Backward compatibility alias
         provider = LLMManager(config_dir, str(self.data_dir/'voice'), self.memory, self.secrets, self.data_dir/'voice'/'voice.sqlite3', dolphin=self.model_controller)
         provider.journal = self.journal
+        from app.mind.brain.transitions import TransitionManager
+        self.model_transitions = TransitionManager(self.model_controller, provider.probe_nano, self.journal)
+        provider.transitions = self.model_transitions
         self.brain = Brain(provider, controller=self.model_controller)
         self.llm = self.brain
         self.mind = Mind(self.brain, self.memory)
@@ -109,7 +112,8 @@ class ModuleManager:
 
     def _domain_snapshot(self, name):
         if name == 'brain':
-            return {**self.model_controller.transition_snapshot(), **self.brain.diagnostic_snapshot()}
+            return {**self.model_controller.transition_snapshot(), **self.brain.diagnostic_snapshot(),
+                    'transition_manager': self.model_transitions.snapshot()}
         if name in {'database','storage','heart'}:
             return self.heart.run_diagnostic_fast()
         if name in {'runtime','docker'}:

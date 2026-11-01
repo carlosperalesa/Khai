@@ -18,6 +18,10 @@ class LLMContentRejected(ValueError):
     """The provider made a terminal content decision, not an availability failure."""
 
 
+class ModelUnavailable(RuntimeError):
+    """No healthy effective model; a profile choice belongs to the owner."""
+
+
 class LLMManager:
     """Fachada global del sistema LLM con Unified Fallback."""
 
@@ -144,10 +148,78 @@ class LLMManager:
             except Exception as exc:
                 logger.warning('No se pudo enviar notificación de LLM: %s', exc)
 
+    def _nano_call(self, operation, value, tools, kwargs):
+        status, now = self._load_status(), time.time()
+        pool = [c for c in self.api_keys_pool
+                if c['type'] == 'gemini' and now > status.get(c['id'], 0)]
+        rejected = 0
+        for credential in pool:
+            try:
+                if operation == 'generate':
+                    return self._generate_gemini(value, credential['key'], kwargs)
+                result = self._complete_gemini(value, tools, credential['key'], kwargs)
+                result.setdefault('provider', 'gemini')
+                return result
+            except LLMContentRejected:
+                rejected += 1
+            except Exception as exc:
+                logger.warning('Nano no disponible (%s)', type(exc).__name__)
+                code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                self._mark_key_failed(credential['id'], 300 if code in {401, 403, 429} else 60)
+        if pool and rejected == len(pool):
+            raise LLMContentRejected('Nano rechazo la solicitud; no se ejecuto ninguna accion.')
+        raise ModelUnavailable('Nano no responde. Elige el modelo al que deseas cambiar con /mode low, /mode mid o /mode high.')
+
+    def probe_nano(self):
+        from contextlib import nullcontext
+        journal = getattr(self, 'journal', None)
+        scope = journal.scope('model_probe', uuid.uuid4().hex,
+            refs={'profile': 'nano', 'provider': 'gemini'}) if journal else nullcontext()
+        with scope:
+            result = self._nano_call('generate', 'Devuelve exactamente {"ready":true}.', None,
+                {'response_format': {'type': 'json_object'}, 'temperature': 0, '_timeout': 15})
+            if json.loads(result) != {'ready': True}:
+                raise ModelUnavailable('Nano no supero la comprobacion de disponibilidad.')
+            return True
+
+    def _managed_inference(self, operation, value, tools, kwargs):
+        """Serve the effective model. Inference never mutates or starts a VM."""
+        from contextlib import nullcontext
+        manager = self.transitions
+        snapshot = manager.snapshot()
+        mode, generation = snapshot['effective_mode'], snapshot['generation']
+        budget = current_budget.get()
+        timeout = max(1, min(60, budget()['deadline'] - time.time())) if budget else min(60, kwargs.get('_timeout', 60))
+        kwargs = {**kwargs, '_timeout': timeout}
+        journal = getattr(self, 'journal', None)
+
+        def invoke(profile, call):
+            scope = journal.scope('provider_call', uuid.uuid4().hex,
+                refs={'profile': profile, 'provider': 'gemini' if profile == 'nano' else 'ollama'}) if journal else nullcontext()
+            with scope:
+                return call()
+
+        if mode in {'low', 'mid', 'high'}:
+            try:
+                local_kwargs = {**kwargs, '_local_model': self.dolphin.get_model_for_mode(mode)}
+                if operation == 'generate':
+                    return invoke(mode, lambda: self._call_dolphin(value, self._dolphin_endpoint(), local_kwargs))
+                return invoke(mode, lambda: self._complete_dolphin(value, tools, self._dolphin_endpoint(), local_kwargs))
+            except LLMContentRejected:
+                raise
+            except Exception as exc:
+                logger.warning('Modelo efectivo %s no responde (%s); comprobando Nano', mode, type(exc).__name__)
+        result = invoke('nano', lambda: self._nano_call(operation, value, tools, kwargs))
+        if mode != 'nano' and manager.publish_nano_fallback(mode, generation):
+            self._notify('[Modo nano conectado tras fallo del modelo local]')
+        return result
+
     def generate_content(self, prompt: str, **kwargs) -> str:
         """Genera contenido en cascada según el modo activo (mid/high -> Dolphin -> Cloud; low -> Cloud -> Dolphin)."""
         if hasattr(self, '_response_meta'):
             self._response_meta.set({})
+        if getattr(self, 'transitions', None) is not None:
+            return self._managed_inference('generate', prompt, None, kwargs)
         rf = kwargs.get('response_format')
         is_json = isinstance(rf, dict) and rf.get('type') == 'json_object'
         dolphin_ctrl = getattr(self, 'dolphin', None)
@@ -321,6 +393,8 @@ class LLMManager:
         """Execute one logical native function-calling turn with failover."""
         if not isinstance(messages, list) or not messages:
             raise ValueError('Agent messages are required')
+        if getattr(self, 'transitions', None) is not None:
+            return self._managed_inference('complete', messages, self._tool_schema(tools), kwargs)
         budget = current_budget.get()
         if budget is not None:
             task = budget()
@@ -526,7 +600,7 @@ class LLMManager:
         return {'content': '\n'.join(text).strip(), 'tool_calls': calls, 'model': model}
 
     def _complete_dolphin(self, messages, tools, endpoint, kwargs):
-        payload = {'model': self._dolphin_model(),
+        payload = {'model': kwargs.get('_local_model') or self._dolphin_model(),
                    'messages': self._openai_messages(messages), 'tools': tools,
                    'stream': False, 'options': {'num_predict': 4096, 'temperature': 0.2}}
         response = requests.post(endpoint + '/api/chat', json=payload,
@@ -600,13 +674,18 @@ class LLMManager:
         timeout = min(300.0, max(1.0, float(os.getenv('KHAI_DOLPHIN_TIMEOUT', '180'))))
         num_predict = max(256, int(os.getenv('KHAI_DOLPHIN_NUM_PREDICT', '2048')))
         payload = {
-            'model': self._dolphin_model(),
+            'model': (kwargs or {}).get('_local_model') or self._dolphin_model(),
             'prompt': prompt, 'stream': False,
-            'options': {'num_predict': num_predict},
+            'options': {'num_predict': num_predict, 'temperature': (kwargs or {}).get('temperature', 0.2)},
         }
+        if (kwargs or {}).get('system_instruction'):
+            payload['system'] = kwargs['system_instruction']
         rf = (kwargs or {}).get('response_format')
         if isinstance(rf, dict) and rf.get('type') == 'json_object':
-            payload['format'] = 'json'
+            payload['format'] = (kwargs or {}).get('response_schema') or 'json'
+            if (kwargs or {}).get('response_schema'):
+                # The router schema and reference history exceed Ollama's 4K default.
+                payload['options']['num_ctx'] = 8192
         response = requests.post(endpoint + '/api/generate', json=payload, timeout=timeout, allow_redirects=False)
         response.raise_for_status()
         body = response.json()
@@ -628,6 +707,10 @@ class LLMManager:
             generation_config["responseMimeType"] = "application/json"
             
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        if kwargs.get('system_instruction'):
+            payload['systemInstruction'] = {'parts': [{'text': kwargs['system_instruction']}]}
+        if 'temperature' in kwargs:
+            generation_config['temperature'] = kwargs['temperature']
         if generation_config:
             payload["generationConfig"] = generation_config
             
@@ -654,6 +737,8 @@ class LLMManager:
                 response.raise_for_status()
             raise ValueError('Gemini no respondió')
         data = response.json()
+        if hasattr(self, '_response_meta'):
+            self._response_meta.set({'provider': 'gemini', 'model': data.get('modelVersion', m)})
 
         candidates = data.get("candidates") or []
         if not candidates:

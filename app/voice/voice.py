@@ -63,6 +63,8 @@ async def lifespan(app):
             inbox_worker.cancel()
         await asyncio.gather(*inbox_workers, return_exceptions=True)
         manager.coordinator.stopping = True
+        if getattr(manager, 'model_transitions', None) is not None:
+            manager.model_transitions.shutdown(wait=False)
         await worker
 
 
@@ -271,13 +273,13 @@ def _command(manager, source, text):
     if name in {'/help', '/?'}:
         return {'text': HELP_TEXT, 'buttons': HELP_BUTTONS}
     if name in {'/mode', '/m', '/mode?', '/m?'}:
-        ctrl = getattr(manager, 'dolphin', None) or getattr(manager, 'brain', None) or getattr(manager, 'llm', None)
+        ctrl = getattr(manager, 'brain', None) or getattr(manager, 'dolphin', None) or getattr(manager, 'llm', None)
         if ctrl is None or not hasattr(ctrl, 'set_mode'):
             raise ValueError('Controlador de inferencia no configurado')
         arg = '?' if name.endswith('?') else (parts[1].lower() if len(parts) >= 2 else '?')
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid'}
         target_mode = aliases.get(arg, arg)
-        if target_mode in {'low', 'mid', 'high'} and hasattr(c, 'notify') and c.notify:
+        if not getattr(manager, 'model_transitions', None) and target_mode in {'low', 'mid', 'high'} and hasattr(c, 'notify') and c.notify:
             c.notify(f"[Conectando con Modo {target_mode}]")
         return ctrl.set_mode(arg, notifier=getattr(c, 'notify', None))
     if name in {'/pixy', '/p', '/pixy?', '/p?'}:
@@ -375,14 +377,18 @@ def _command(manager, source, text):
         if len(parts) == 2:
             c.cancel(parts[1], source)
             return f'Cancelación solicitada para {parts[1]}.'
+        transition = (manager.brain.cancel_transition() if getattr(manager, 'model_transitions', None)
+                      else {'ids': []})
         active = [t for t in c.store.all()
                   if t.get('state') not in {'COMPLETED', 'FAILED', 'CANCELLED', 'EXHAUSTED', 'UNFULFILLABLE'}
                   or c._agent_active(t)]
         if not active:
+            if transition['ids']:
+                return 'Cambio de modelo cancelado: ' + ', '.join(transition['ids'])
             return 'No hay objetivos en curso para detener.'
         for idx, t in enumerate(active):
             c.cancel(t['id'], f'{source}:stop:{idx}')
-        return 'Cancelación solicitada: ' + ', '.join(t['id'] for t in active)
+        return 'Cancelación solicitada: ' + ', '.join([t['id'] for t in active] + transition['ids'])
     if name == '/restart':
         targets = ([parts[1].lower()]
                    if len(parts) >= 2 and parts[1].lower() in {'core', 'proxy'}
