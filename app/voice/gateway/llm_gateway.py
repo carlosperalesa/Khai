@@ -142,11 +142,16 @@ class LLMManager:
             return dolphin_ctrl.get_model_for_mode()
         return 'dolphin3:8b'
 
-    def _notify(self, message: str) -> None:
+    def _notify(self, message: str, buttons=None) -> None:
         notifier = getattr(self, 'notifier', None)
         if callable(notifier):
             try:
-                notifier(message)
+                import inspect
+                sig = inspect.signature(notifier)
+                if 'buttons' in sig.parameters:
+                    notifier(message, buttons=buttons)
+                else:
+                    notifier(message)
             except Exception as exc:
                 logger.warning('No se pudo enviar notificación de LLM: %s', exc)
 
@@ -213,7 +218,8 @@ class LLMManager:
                 logger.warning('Modelo efectivo %s no responde (%s); comprobando Nano', mode, type(exc).__name__)
         result = invoke('nano', lambda: self._nano_call(operation, value, tools, kwargs))
         if mode != 'nano' and manager.publish_nano_fallback(mode, generation):
-            self._notify('[Modo nano conectado tras fallo del modelo local]')
+            from app.voice.help import MODE_SELECTION_BUTTONS
+            self._notify(f'[Error en modo {mode}, pasando a Nano ¿deseas otro modo?]', buttons=MODE_SELECTION_BUTTONS)
         return result
 
     def generate_content(self, prompt: str, **kwargs) -> str:
@@ -481,7 +487,7 @@ class LLMManager:
                 arguments = json.loads(call.function.arguments or '{}')
             except json.JSONDecodeError:
                 arguments = {'_invalid_json': call.function.arguments}
-            calls.append({'id': call.id, 'name': call.function.name, 'arguments': arguments})
+            calls.append({'id': call.id, 'name': call.function.name, 'arguments': arguments, 'thought_signature': 'CgA='})
         return {'content': message.content or '', 'tool_calls': calls}
 
     def _complete_openai(self, messages, tools, key, kwargs):
@@ -521,9 +527,8 @@ class LLMManager:
             parts = ([{'text': message['content']}] if message.get('content') else [])
             for call in message.get('tool_calls', []):
                 call_part = {'functionCall': {'name': call['name'], 'args': call.get('arguments', {})}}
-                sig = call.get('thought_signature') or call.get('thoughtSignature')
-                if sig:
-                    call_part['thoughtSignature'] = sig
+                sig = call.get('thought_signature') or call.get('thoughtSignature') or 'CgA='
+                call_part['thoughtSignature'] = sig
                 parts.append(call_part)
             contents.append({'role': 'model' if role == 'assistant' else 'user',
                              'parts': parts or [{'text': ''}]})
@@ -565,10 +570,9 @@ class LLMManager:
             payload['tools'] = [{'functionDeclarations': declarations}]
         
         models_to_try = [model]
-        if model != DEFAULT_GEMINI_MODEL:
-            models_to_try.append(DEFAULT_GEMINI_MODEL)
-        if 'gemini-3.1-flash-lite' not in models_to_try:
-            models_to_try.append('gemini-3.1-flash-lite')
+        for fallback_m in [DEFAULT_GEMINI_MODEL, 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite']:
+            if fallback_m not in models_to_try:
+                models_to_try.append(fallback_m)
 
         response = None
         for m in models_to_try:
@@ -596,8 +600,7 @@ class LLMManager:
                 call = part['functionCall']
                 call_data = {'id': 'call_' + uuid.uuid4().hex, 'name': call.get('name'),
                              'arguments': call.get('args') or {}}
-                if part.get('thoughtSignature'):
-                    call_data['thought_signature'] = part['thoughtSignature']
+                call_data['thought_signature'] = part.get('thoughtSignature') or 'CgA='
                 calls.append(call_data)
         return {'content': '\n'.join(text).strip(), 'tool_calls': calls, 'model': model}
 
@@ -631,7 +634,8 @@ class LLMManager:
         message = response.json().get('message') or {}
         calls = [{'id': 'call_' + uuid.uuid4().hex,
                   'name': call.get('function', {}).get('name'),
-                  'arguments': call.get('function', {}).get('arguments') or {}}
+                  'arguments': call.get('function', {}).get('arguments') or {},
+                  'thought_signature': 'CgA='}
                  for call in message.get('tool_calls') or []]
         content = message.get('content') or ''
         if not calls and 'tool_call' in content:
@@ -642,7 +646,8 @@ class LLMManager:
                     calls.append({
                         'id': 'call_' + uuid.uuid4().hex,
                         'name': tc['name'],
-                        'arguments': tc.get('arguments') or {}
+                        'arguments': tc.get('arguments') or {},
+                        'thought_signature': 'CgA='
                     })
                     content = ''
             except Exception:

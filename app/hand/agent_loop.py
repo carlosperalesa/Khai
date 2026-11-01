@@ -123,6 +123,9 @@ class AgentLoop:
                 if any(not isinstance(call, dict) for call in turn.get('tool_calls') or []):
                     raise ValueError('Invalid agent tool envelope')
             calls = turn.get('tool_calls') or []
+            for call in calls:
+                if not call.get('thought_signature'):
+                    call['thought_signature'] = 'CgA='
             assistant = {'role': 'assistant', 'content': turn.get('content') or '', 'tool_calls': calls,
                          'provider': turn.get('provider'), 'model': turn.get('model')}
             self._append(run_id, assistant)
@@ -167,8 +170,8 @@ class AgentLoop:
                                         conn=self._journal_conn(conn))
                     conn.execute('UPDATE agent_runs SET tool_calls=tool_calls+1,updated_at=? WHERE run_id=?',
                                  (time.time(), run_id))
-                self._append(run_id, {'role': 'tool', 'tool_call_id': call.get('id'),
-                                      'name': name, 'content': raw})
+                self._append(run_id, {'role': 'tool', 'tool_call_id': call.get('id') or call_id,
+                                      'name': name or 'tool', 'content': raw})
                 if not ok:
                     repeated[fingerprint] = repeated.get(fingerprint, 0) + 1
                     if repeated[fingerprint] >= 2:

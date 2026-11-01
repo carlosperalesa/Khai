@@ -6,7 +6,7 @@ La búsqueda conversacional descubrió un error del Core: resolver un binding op
 
 Continuidad de modelos implementada localmente y en validación: [`MODEL_TRANSITIONS.md`](./MODEL_TRANSITIONS.md). La composición de producción conecta `TransitionManager` con Brain y Voice: genera solicitudes durables, cancela mediante generación y publica el modo efectivo en el SQLite de control. La inferencia no arranca VMs ni cambia perfiles automáticamente; confirma Nano antes de publicar un fallback. Los métodos legacy de mutación rechazan llamadas fuera del propietario de transición. Mind entrega esquema nativo a Ollama y separa mensaje actual del historial. Aceptación y limitaciones operativas en CHECKPOINT.
 
-Suite consolidada de esta continuación: 360 pruebas y 39 subpruebas aprobadas (318,21 s). Incluye la verificación de bindings opcionales en recetas, el blindaje de la cascada estricta high>mid>low>nano, la aceleración de I/O de disco (readahead 8192 KB) y la residencia de sesión en GPU (keep_alive 30m). Las pruebas reales se documentan por sus fuentes y recibos.
+Suite consolidada de esta continuación: 362 pruebas y 39 subpruebas aprobadas. Incluye la verificación de bindings opcionales en recetas, el fallback reactivo a Nano con aviso estructurado y botonera interactiva, la homogeneización de thought_signature para compatibilidad universal de herramientas, la aceleración de I/O de disco (readahead 8192 KB) y la residencia de sesión en GPU (keep_alive 30m). Las pruebas reales se documentan por sus fuentes y recibos.
 
 El diario común fue aprobado por el propietario. Implementación y contrato en [`COMMON_JOURNAL.md`](./COMMON_JOURNAL.md): ciclos con raíz/padre, eventos inmutables, enlaces y consulta por ID en el SQLite de control. La auditoría anterior describe el estado previo; sus propuestas pendientes se resuelven según esta implementación. La aceptación conjunta y en servidor se registra en CHECKPOINT.
 
@@ -271,4 +271,4 @@ python -m pytest -v
 # o bien
 make test
 ```
-**Resultado canónico actual:** 360 pruebas y 39 subpruebas pasando al 100% (0 errores, 0 fallos en 318,21 s).
+**Resultado canónico actual:** 362 pruebas y 39 subpruebas pasando al 100% (0 errores, 0 fallos).

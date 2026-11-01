@@ -129,3 +129,29 @@ class ModelContractTests(unittest.TestCase):
         gateway.dolphin.set_mode.assert_not_called()
         brain.cancel_transition()
         gateway.transitions.cancel.assert_called_once()
+    def test_thought_signature_uniformity_and_gemini_serialization(self):
+        gateway = self.gateway()
+        # Test serialization of tool call without thought_signature
+        messages = [
+            {'role': 'user', 'content': 'search weather'},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{'name': 'web_search', 'arguments': {'query': 'weather'}}]},
+            {'role': 'tool', 'name': 'web_search', 'tool_call_id': 'call_1', 'content': 'sunny'}
+        ]
+        contents, system = gateway._gemini_contents(messages)
+        self.assertEqual(len(contents), 3)
+        self.assertEqual(contents[1]['role'], 'model')
+        self.assertEqual(contents[1]['parts'][0]['thoughtSignature'], 'CgA=')
+        self.assertEqual(contents[2]['role'], 'user')
+        self.assertEqual(contents[2]['parts'][0]['functionResponse']['name'], 'web_search')
+
+    def test_local_failure_notifies_nano_fallback_with_mode_buttons(self):
+        gateway = self.gateway()
+        from app.voice.help import MODE_SELECTION_BUTTONS
+        gateway._call_dolphin = Mock(side_effect=requests.ReadTimeout())
+        gateway._generate_gemini = Mock(return_value='nano answer')
+        gateway.generate_content('hello')
+        gateway._notify.assert_called_once_with(
+            '[Error en modo low, pasando a Nano ¿deseas otro modo?]',
+            buttons=MODE_SELECTION_BUTTONS
+        )
+

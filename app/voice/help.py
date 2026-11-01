@@ -35,3 +35,14 @@ HELP_BUTTONS = [
     [{'label': 'Ver modo actual', 'value': '/mode ?'}],
     [{'label': 'Mis Chats', 'value': '/c'}],
 ]
+
+MODE_SELECTION_BUTTONS = [
+    [
+        {'label': 'Modo High (32B GPU)', 'value': '/mode high'},
+        {'label': 'Modo Mid (8B GPU)', 'value': '/mode mid'},
+    ],
+    [
+        {'label': 'Modo Low (CPU)', 'value': '/mode low'},
+        {'label': 'Modo Nano (Gemini)', 'value': '/mode nano'},
+    ],
+]
