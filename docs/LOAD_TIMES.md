@@ -1,5 +1,12 @@
 # Revisión de tiempos de activación — 31 de octubre de 2026
 
+## Optimización de lectura y residencia de tensores (1 de noviembre de 2026)
+
+Para absorber la lectura en frío de `qwen2.5-32b-abliterated` (~19,85 GB) sobre el disco `pd-balanced` de 100 GB (techo de 168 MiB/s) sin incurrir en costos adicionales de almacenamiento ni alterar la política de modelos libres de censura:
+1. **Readahead del kernel:** Configurado a `8192 KB` mediante el `startup-script` de la instancia Spot, acelerando la lectura secuencial de los blobs de tensores mediante `mmap`.
+2. **Residencia de sesión en VRAM:** Establecido `keep_alive: "30m"` en todas las invocaciones a Ollama (`_warmup_model`, `_complete_dolphin`, `_generate_dolphin`), evitando que el modelo sea desalojado de la GPU NVIDIA L4 de 24 GB durante la sesión de trabajo. Las consultas subsiguientes tienen latencia de carga 0 s.
+3. **Presupuesto de precarga:** Timeout de warmup ajustado a 180 s para permitir que la transferencia inicial de 20 GB complete sin falsos positivos de interrupción.
+
 ## Nueva medición con transiciones cancelables
 
 Sin Monitoring, sin otro disco y con la misma precarga de 90 s:

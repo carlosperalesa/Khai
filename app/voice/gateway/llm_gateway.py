@@ -604,7 +604,7 @@ class LLMManager:
     def _complete_dolphin(self, messages, tools, endpoint, kwargs):
         payload = {'model': kwargs.get('_local_model') or self._dolphin_model(),
                    'messages': self._openai_messages(messages), 'tools': tools,
-                   'stream': False, 'options': {'num_predict': 4096, 'temperature': 0.2}}
+                   'stream': False, 'keep_alive': '30m', 'options': {'num_predict': 4096, 'temperature': 0.2}}
         response = requests.post(endpoint + '/api/chat', json=payload,
                                  timeout=min(180, kwargs.get('_timeout', 60)), allow_redirects=False)
         if response.status_code == 400 and 'does not support tools' in response.text:
@@ -622,6 +622,7 @@ class LLMManager:
                 'model': payload['model'],
                 'messages': chat_msgs,
                 'stream': False,
+                'keep_alive': '30m',
                 'options': {'num_predict': 4096, 'temperature': 0.2}
             }
             response = requests.post(endpoint + '/api/chat', json=payload_fallback,
@@ -677,7 +678,7 @@ class LLMManager:
         num_predict = max(256, int(os.getenv('KHAI_DOLPHIN_NUM_PREDICT', '2048')))
         payload = {
             'model': (kwargs or {}).get('_local_model') or self._dolphin_model(),
-            'prompt': prompt, 'stream': False,
+            'prompt': prompt, 'stream': False, 'keep_alive': '30m',
             'options': {'num_predict': num_predict, 'temperature': (kwargs or {}).get('temperature', 0.2)},
         }
         if (kwargs or {}).get('system_instruction'):

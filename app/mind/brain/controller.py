@@ -434,7 +434,7 @@ class ModelController:
 
     def _warmup_model(self, profile: str = 'mid') -> dict:
         """Carga el modelo y exige una inferencia mínima antes de declarar el modo activo."""
-        timeout = max(30, min(120, int(self._cfg('KHAI_DOLPHIN_WARMUP_TIMEOUT', '90'))))
+        timeout = max(30, min(240, int(self._cfg('KHAI_DOLPHIN_WARMUP_TIMEOUT', '180'))))
         model = self.get_model_for_mode(profile)
         response = requests.post(
             f'{self.endpoint}/api/generate',
@@ -442,7 +442,7 @@ class ModelController:
                 'model': model,
                 'prompt': 'Responde solamente OK.',
                 'stream': False,
-                'keep_alive': '10m',
+                'keep_alive': '30m',
                 'options': {'num_predict': 1, 'temperature': 0},
             },
             timeout=timeout,
@@ -645,6 +645,14 @@ class ModelController:
                         'accessConfigs': [{'name': 'External NAT', 'type': 'ONE_TO_ONE_NAT'}],
                     }
                 ],
+                'metadata': {
+                    'items': [
+                        {
+                            'key': 'startup-script',
+                            'value': '#!/bin/bash\nfor dev in /dev/sd[a-z] /dev/vd[a-z] /dev/nvme*n[0-9]; do\n  [ -b "$dev" ] && blockdev --setra 8192 "$dev" 2>/dev/null || true\ndone\n',
+                        }
+                    ]
+                },
             }
             ins_resp = self._mutation('post',
                 self._gce_url('instances'),

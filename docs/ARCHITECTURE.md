@@ -6,7 +6,7 @@ La búsqueda conversacional descubrió un error del Core: resolver un binding op
 
 Continuidad de modelos implementada localmente y en validación: [`MODEL_TRANSITIONS.md`](./MODEL_TRANSITIONS.md). La composición de producción conecta `TransitionManager` con Brain y Voice: genera solicitudes durables, cancela mediante generación y publica el modo efectivo en el SQLite de control. La inferencia no arranca VMs ni cambia perfiles automáticamente; confirma Nano antes de publicar un fallback. Los métodos legacy de mutación rechazan llamadas fuera del propietario de transición. Mind entrega esquema nativo a Ollama y separa mensaje actual del historial. Aceptación y limitaciones operativas en CHECKPOINT.
 
-Suite consolidada de esta continuación: 360 pruebas y 39 subpruebas aprobadas (318,21 s). Incluye la verificación de bindings opcionales en recetas y el blindaje de la cascada estricta high>mid>low>nano. Las pruebas reales se documentan por sus fuentes y recibos.
+Suite consolidada de esta continuación: 360 pruebas y 39 subpruebas aprobadas (318,21 s). Incluye la verificación de bindings opcionales en recetas, el blindaje de la cascada estricta high>mid>low>nano, la aceleración de I/O de disco (readahead 8192 KB) y la residencia de sesión en GPU (keep_alive 30m). Las pruebas reales se documentan por sus fuentes y recibos.
 
 El diario común fue aprobado por el propietario. Implementación y contrato en [`COMMON_JOURNAL.md`](./COMMON_JOURNAL.md): ciclos con raíz/padre, eventos inmutables, enlaces y consulta por ID en el SQLite de control. La auditoría anterior describe el estado previo; sus propuestas pendientes se resuelven según esta implementación. La aceptación conjunta y en servidor se registra en CHECKPOINT.
 

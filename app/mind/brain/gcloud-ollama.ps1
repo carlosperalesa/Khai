@@ -45,7 +45,8 @@ function Start-DolphinNode([string]$MachineType) {
         --provisioning-model=SPOT `
         --instance-termination-action=STOP `
         --maintenance-policy=TERMINATE `
-        --disk="name=$Disk,boot=yes,auto-delete=no"
+        --disk="name=$Disk,boot=yes,auto-delete=no" `
+        --metadata="startup-script=#!/bin/bash`nfor dev in /dev/sd[a-z] /dev/vd[a-z] /dev/nvme*n[0-9]; do [ -b ""`$dev"" ] && blockdev --setra 8192 ""`$dev"" 2>/dev/null || true; done"
 }
 
 switch ($Command) {
