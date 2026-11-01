@@ -138,6 +138,7 @@ def humanize_worker_output(raw_text: str, request: str = None, llm = None) -> st
     # Si hay un LLM disponible y el usuario hizo una pregunta/objetivo concreto,
     # el LLM sintetiza y formatea la respuesta adaptándose a la naturaleza de la solicitud.
     if llm is not None and request and len(text) > 10:
+        token = current_budget.set(None)
         try:
             prompt = (
                 f'Eres Khai, el asistente personal del usuario.\n'
@@ -154,6 +155,8 @@ def humanize_worker_output(raw_text: str, request: str = None, llm = None) -> st
                 return llm_result.strip()
         except Exception as exc:
             logger.warning('Fallo en síntesis con LLM en humanize_worker_output: %s', exc)
+        finally:
+            current_budget.reset(token)
 
     # Fallback determinista limpio
     if text.startswith('```'):
