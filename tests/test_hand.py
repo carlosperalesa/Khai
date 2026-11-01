@@ -41,6 +41,78 @@ def skill(skill_id, inputs, outputs, services=None):
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_agent_journal_keeps_provider_id_collisions_and_timeout_terminal(self):
+        from app.hand.agent_loop import AgentLoop, AgentExhausted
+        from app.kernel.database import connection
+        from app.kernel.journal import Journal
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / 'control.sqlite3'
+            llm = Mock()
+            llm.complete.return_value = {'tool_calls': [
+                {'id': 'provider-reused-id', 'name': 'finish', 'arguments': {}}]}
+            agent = AgentLoop(db, llm)
+            tools = [{'name': 'finish', 'description': 'finish', 'parameters': {},
+                      'handler': lambda _: {'finished': True, 'value': {'done': True}}}]
+            task = agent.journal.start('task', 'task-audit')
+            with agent.journal.activate(task):
+                _, first = agent.run('task-audit', 'first', 'private prompt', tools)
+                _, second = agent.run('task-audit', 'second', 'private prompt', tools)
+                llm.complete.side_effect = TimeoutError('private provider body')
+                with self.assertRaises(TimeoutError):
+                    agent.run('task-audit', 'timeout', 'private prompt', tools)
+                timeout_run = agent.last_run_id
+                llm.complete.side_effect = None
+                llm.complete.return_value = {'content': 'repeated private response'}
+                with self.assertRaises(AgentExhausted):
+                    agent.run('task-audit', 'repeated', 'private prompt', tools)
+                repeated_run = agent.last_run_id
+                interrupted_run = 'agent_interrupted'
+                agent.journal.start('agent', interrupted_run, refs={'task_id': 'task-audit'})
+                with connection(db) as conn:
+                    conn.execute('INSERT INTO agent_runs VALUES (?,?,?,?,?,?,?,?,?,?)',
+                                 (interrupted_run, 'task-audit', 'interrupted', 'running', 1, 1,
+                                  None, None, time.time(), time.time()))
+                llm.complete.reset_mock()
+                with self.assertRaises(RuntimeError):
+                    agent.run('task-audit', 'resume', 'private prompt', tools, run_id=interrupted_run)
+                llm.complete.assert_not_called()
+            with connection(db) as conn:
+                calls = [dict(row) for row in conn.execute('SELECT * FROM agent_tool_calls')]
+                statuses = {row['run_id']: row['status'] for row in conn.execute('SELECT * FROM agent_runs')}
+            self.assertEqual({call['run_id'] for call in calls}, {first, second})
+            self.assertEqual(len({call['call_id'] for call in calls}), 2)
+            self.assertEqual({call['provider_call_id'] for call in calls}, {'provider-reused-id'})
+            self.assertEqual(statuses[timeout_run], 'failed')
+            self.assertEqual(statuses[repeated_run], 'exhausted')
+            self.assertEqual(statuses[interrupted_run], 'unknown')
+            tree = Journal(db).tree(task)
+            branches = {cycle['object_id']: cycle for cycle in tree['cycles']}
+            self.assertEqual(branches[timeout_run]['status'], 'failed')
+            self.assertEqual(branches[repeated_run]['status'], 'exhausted')
+            self.assertEqual(branches[interrupted_run]['status'], 'unknown')
+            self.assertTrue(all(cycle['status'] != 'active' for cycle in tree['cycles'] if cycle['cycle_id'] != task))
+            raw = json.dumps(tree)
+            self.assertNotIn('private prompt', raw)
+            self.assertNotIn('private provider body', raw)
+            self.assertNotIn('repeated private response', raw)
+
+    def test_hand_denied_approval_has_own_terminal_branch_and_operation(self):
+        from app.kernel.database import connection
+        pixy = Mock()
+        pixy.audit_artifact.return_value = {'safe': False, 'reason': 'fixture refusal'}
+        with tempfile.TemporaryDirectory() as folder:
+            hand = Hand(Path(folder) / 'skills', pixy)
+            version = hand.create('audit-denial', '# MODE: SAFE\nprint(1)', {})
+            with self.assertRaises(PermissionError):
+                hand.approve(version['version_id'])
+            with connection(hand.db) as conn:
+                op = dict(conn.execute("SELECT * FROM operations WHERE operation_type='approve'").fetchone())
+                branch = dict(conn.execute("SELECT * FROM journal_cycles WHERE kind='hand_approve'").fetchone())
+            self.assertEqual(op['status'], 'failed')
+            self.assertEqual(op['error'], 'PermissionError')
+            self.assertEqual(branch['status'], 'rejected')
+            self.assertIsNotNone(branch['ended_at'])
+
     def test_creation_tool_history_keeps_failed_and_corrected_calls_after_restart(self):
         from app.kernel.database import connection
         llm = Mock()
@@ -69,7 +141,8 @@ class SkillContractTests(unittest.TestCase):
             self.assertEqual(run['task_id'], 'task-creation-audit')
             self.assertEqual((run['status'], run['turns'], run['tool_calls']), ('completed', 2, 2))
             self.assertEqual(json.loads(run['result'])['code'], code)
-            self.assertEqual([call['call_id'] for call in calls], ['syntax-invalid', 'syntax-corrected'])
+            self.assertEqual([call['provider_call_id'] for call in calls], ['syntax-invalid', 'syntax-corrected'])
+            self.assertEqual(len({call['call_id'] for call in calls}), 2)
             self.assertEqual([call['ok'] for call in calls], [0, 1])
             self.assertEqual(json.loads(calls[0]['result'])['error_type'], 'SyntaxError')
             self.assertTrue(calls[0]['error_fingerprint'])

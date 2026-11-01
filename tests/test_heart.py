@@ -24,6 +24,7 @@ from app.heart.catalog import (
 from app.heart.recovery import Recovery
 from app.kernel.database import connection, migrate
 from app.kernel.events import Events
+from app.kernel.journal import Journal
 from app.pixy.authorization import AuthorizationStore
 from app.pixy.pixy import PixyMind
 from app.senses.senses import OBSERVERS, Senses
@@ -141,6 +142,32 @@ class AuthorizationStoreTests(unittest.TestCase):
                          [auth2['authorization_id'], auth3['authorization_id']])
         self.assertEqual(self.store.pending()['authorization_id'], auth3['authorization_id'])
 
+    def test_expired_decision_and_rejected_check_have_durable_separate_cycles(self):
+        auth = self.store.issue('case-20261025abcd0020', ['HealthCheck'], 'core', 'a'*64, 'owner')
+        with patch('app.pixy.authorization.time.time', return_value=auth['expires_at']+1):
+            with self.assertRaises(PermissionError):
+                self.store.decide(auth['authorization_id'], True, 'owner')
+        self.assertEqual(self.store.get(auth['authorization_id'])['status'], 'expired')
+        cycle = self.store.journal.get(Journal.cycle_id('authorization', auth['authorization_id']))
+        self.assertEqual(cycle['status'], 'cancelled')
+        with connection(self.db) as db:
+            failures = db.execute("SELECT data FROM journal_events WHERE phase='finished' AND status='rejected'").fetchall()
+        self.assertEqual(json.loads(failures[-1][0])['error_type'], 'PermissionError')
+        self.assertNotIn(auth['nonce'], str(failures))
+
+    def test_authority_and_journal_decision_roll_back_together(self):
+        auth = self.store.issue('case-20261025abcd0021', ['HealthCheck'], 'core', 'b'*64, 'owner')
+        original = self.store.journal.finish
+        def fail_transaction(cycle, *args, **kwargs):
+            if kwargs.get('conn') is not None:
+                raise RuntimeError('injected journal failure')
+            return original(cycle, *args, **kwargs)
+        with patch.object(self.store.journal, 'finish', side_effect=fail_transaction):
+            with self.assertRaises(RuntimeError):
+                self.store.decide(auth['authorization_id'], False, 'owner')
+        self.assertEqual(self.store.get(auth['authorization_id'])['status'], 'pending')
+        self.assertEqual(self.store.journal.get(Journal.cycle_id('authorization', auth['authorization_id']))['status'], 'waiting')
+
 
 class SensesEvidenceTests(unittest.TestCase):
     def test_evidence_collection_is_readonly_and_audited(self):
@@ -174,6 +201,82 @@ class HeartRecoveryTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_evidence_survives_slow_diagnosis_exception_and_restart(self):
+        self.senses.evidence.return_value = {'storage': {'marker': 'real evidence'}}
+        def interrupted(evidence):
+            persisted = self.recovery.recent(1)[0]
+            self.assertEqual(persisted['state'], 'COLLECTING_EVIDENCE')
+            self.assertEqual(persisted['evidence'], evidence)
+            raise TimeoutError('provider private body')
+        with patch.object(self.recovery, 'diagnose', side_effect=interrupted):
+            case = self.recovery.open_case('repara memoria', 'owner:interrupted')
+        restarted = Recovery(self.root/'heart.sqlite3', self.senses, self.hand, self.auth_store)
+        self.assertEqual(restarted.get(case['case_id'])['evidence']['storage']['marker'], 'real evidence')
+        branch = restarted.journal.tree(Journal.cycle_id('repair', case['case_id']))
+        self.assertEqual(branch['cycles'][0]['status'], 'failed')
+        self.assertEqual(branch['events'][-1]['data']['error_type'], 'TimeoutError')
+        self.assertNotIn('provider private body', json.dumps(branch))
+
+    def test_process_interrupted_diagnosis_is_reconciled_without_replay(self):
+        self.senses.evidence.return_value = {'storage': {'marker': 'preserved'}}
+        with patch.object(self.recovery, 'diagnose', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.recovery.open_case('repara memoria', 'owner:process')
+        case = self.recovery.recent(1)[0]
+        self.recovery.journal.interrupt_open()
+        self.assertEqual(self.recovery.reconcile_interrupted(), 1)
+        closed = self.recovery.get(case['case_id'])
+        self.assertEqual(closed['state'], 'FAILED')
+        self.assertEqual(closed['evidence']['storage']['marker'], 'preserved')
+        self.assertEqual(self.recovery.reconcile_interrupted(), 0)
+        self.hand.create_recovery.assert_not_called()
+
+    def test_contract_rejection_uses_exact_evidence_without_network_repair(self):
+        task = {'id': 'task_'+'1'*32, 'goal_revision': 0, 'attempt_number': 1,
+                'result': {'stage': 'routing', 'diagnostic': {'id': 'rejection_target'}}}
+        rejection = {'id': 'rejection_target', 'task_id': task['id'], 'goal_revision': 0,
+                     'contract': 'AssistantTurn', 'errors': [{'loc': ['tool_calls'], 'type': 'missing'}]}
+        self.senses.evidence.return_value = {'brain': {'model_rejections': [rejection]},
+            'core_logs': {'text': 'ERROR old network timeout'},
+            'storage': {'vitals': {'ram_percent': 99}, 'integrity': {'status': 'ok'}}}
+        with patch.object(self.recovery, '_llm_analyze_incident') as analyze:
+            case = self.recovery.open_incident_case(task, task['result'])
+        self.assertEqual(case['state'], 'DIAGNOSED')
+        self.assertIsNone(case['plan'])
+        self.assertEqual(case['diagnosis']['findings'][0]['evidence_id'], rejection['id'])
+        analyze.assert_not_called()
+        self.assertEqual(self.recovery.journal.get(Journal.cycle_id('repair', case['case_id']))['status'], 'failed')
+
+    def test_report_reference_selects_case_instead_of_other_recent_errors(self):
+        self.senses.evidence.return_value = {'storage': {'vitals': {'ram_percent': 95}, 'integrity': {'status': 'ok'}}}
+        original = self.recovery.open_case('repara memoria', 'owner:original')
+        report = self.recovery.open_case('informa ' + original['case_id'], 'owner:report',
+                                         propose=False, kind='pixy_report')
+        self.assertEqual(report['diagnosis'], original['diagnosis'])
+        self.assertIsNone(report['plan'])
+        self.assertIsNone(report['authorization_id'])
+        self.assertEqual(self.recovery.journal.get(Journal.cycle_id('pixy_report', report['case_id']))['status'], 'completed')
+
+    def test_incident_journal_evidence_excludes_previous_attempt_and_other_tasks(self):
+        from app.pixy.control import ControlStore
+        db = self.root/'shared-scoped.sqlite3'
+        store = ControlStore(db)
+        task = store.create('owner:scoped', 'fixture', state='FAILED', attempt_number=2, goal_revision=1)
+        old = store.journal.start('task_attempt', f"{task['id']}:1:0",
+                                  parent_id=Journal.cycle_id('task', task['id']),
+                                  refs={'task_id': task['id'], 'attempt_number': 1, 'goal_revision': 0})
+        store.journal.finish(old, 'failed', data={'error_type': 'OldNetworkTimeout'})
+        other = store.create('owner:other', 'other fixture', state='FAILED')
+        recovery = Recovery(db, self.senses, self.hand, self.auth_store)
+        self.senses.evidence.return_value = {'storage': {'vitals': {}, 'integrity': {'status': 'ok'}}}
+        case = recovery.open_incident_case(task, {'error': 'ZeroDivisionError'})
+        evidence = case['evidence']
+        self.assertEqual(evidence['journal_scope']['kind'], 'current_attempt')
+        self.assertEqual(evidence['journal_scope']['attempt_number'], 2)
+        snapshot = json.dumps(evidence['journal'])
+        self.assertNotIn('OldNetworkTimeout', snapshot)
+        self.assertNotIn(other['id'], snapshot)
 
     def test_repair_branches_survive_restart_with_separate_immutable_histories(self):
         self.senses.evidence.return_value = {
@@ -604,7 +707,8 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
         self.assertEqual(coord_mock.retry_task.call_args[1]['authorization_id'], 'auth_123')
         self.assertEqual(coord_mock.retry_task.call_args[1]['order']['plan']['task_id'], tid)
 
-        store.update(tid, expected={'FAILED'}, state='GENERATING')
+        store.update(tid, expected={'FAILED'}, state='GENERATING', attempt_number=2,
+                     goal_revision=1, execution_id=None)
         self.recovery.advance(cid)
         self.assertEqual(self.recovery.get(cid)['state'], 'HAND_EXECUTING')
 
@@ -626,6 +730,9 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 manager.senses.adapters['storage']=lambda: {'vitals':{'ram_percent':30,'disk_free':20*1024**3},'integrity':{'status':'ok'}}
                 manager.senses.legacy_gateway=Mock()
                 manager.senses.legacy_gateway.observe.return_value=json.dumps({'status':'running','running':True,'text':'Fixture healthy'})
+                # Exact lookup must work after evidence leaves the recent-events snapshot.
+                manager.senses.adapters['brain'] = lambda: {'model_rejections': [
+                    {'id': 'unrelated', 'task_id': 'task_other', 'response_excerpt': 'Unrelated old timeout'}]}
                 bad='{"tool_calls":[{"name":"set_default_provider","arguments":{"provider":"brave"}}]}'
                 manager.brain._gateway.generate_content=Mock(return_value=bad)
                 task=c.store.create('fixture:rejection','Set the search provider',state='ROUTING',kind='turn')
@@ -635,6 +742,7 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                     case=manager.heart.recovery.get(failed['recovery_case_id'])
                     self.assertEqual(case['cause_code'],'invalid_result')
                     evidence=case['evidence']['model_rejection']
+                    self.assertEqual([r['id'] for r in case['evidence']['brain']['model_rejections']], [evidence['id']])
                     self.assertEqual(evidence['response_excerpt'],bad)
                     self.assertEqual(evidence['task_id'],task['id'])
                     self.assertEqual(evidence['contract'],'AssistantTurn')
@@ -643,8 +751,9 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                         episode=db.execute('SELECT outcome,stage,run_id FROM episode_notes WHERE task_id=?',(task['id'],)).fetchone()
                     self.assertEqual(tuple(episode),('failure','routing',None))
                     c.advance(failed)
-                    self.assertEqual(manager.heart.recovery.get(case['case_id'])['state'],'WAITING_USER_APPROVAL')
-                    self.assertIsNotNone(manager.pixy.authorizations.pending())
+                    self.assertEqual(manager.heart.recovery.get(case['case_id'])['state'],'DIAGNOSED')
+                    self.assertIsNone(manager.pixy.authorizations.pending())
+                    self.assertIsNone(case['plan'])
                     original_id=case['case_id']
                     task2=dict(failed,attempt_number=2,goal_revision=1)
                     case2=manager.heart.recovery.open_incident_case(task2,failed['result'])
@@ -688,6 +797,12 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                     self.assertEqual(resumed['authorized_hash'],digest)
                     self.assertEqual(resumed['params'],{'path':'fixture.csv'})
                     self.assertEqual(resumed['attempt_number'],2)
+                    root_cycle = manager.journal.cycle_id('task', task['id'])
+                    root_tree = manager.journal.tree(root_cycle)
+                    self.assertEqual(manager.journal.get(root_cycle)['status'], 'active')
+                    attempts = [row for row in root_tree['cycles'] if row['kind'] == 'task_attempt']
+                    self.assertEqual(len(attempts), 2)
+                    self.assertEqual({row['status'] for row in attempts}, {'failed', 'active'})
                     self.assertEqual(resumed['generations'],0)
                     uncertain = dict(task,result=dict(failure,dispatched=True))
                     order={'plan':validate_plan(case['plan']),'header':{'authorization_id':'fixture','case_id':case['case_id'],'order_id':'fixture'}}
@@ -723,7 +838,7 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                 manager.hand.recovery_executor.submit.return_value = {'status': 'completed', 'requested_at': time.time()}
                 manager.hand.recovery_executor.status.return_value = {'status': 'completed'}
 
-                pixy_reply = manager.pixy.direct_response('diagnóstico del sistema', source='telegram:101')
+                pixy_reply = manager.pixy.direct_response('repara el sistema', source='telegram:101')
                 self.assertIn('apruebas: y/n', pixy_reply)
                 pending_auth = manager.pixy.authorizations.pending()
                 self.assertIsNotNone(pending_auth)
@@ -772,7 +887,7 @@ class FullRecoveryCycleIntegrationTests(unittest.TestCase):
                     'pixy': {'recent_tasks': [coordinator.store.get(tid)]}
                 })
 
-                pixy_reply = manager.pixy.direct_response('por que fallo la tarea?', source='telegram:201')
+                pixy_reply = manager.pixy.direct_response('repara la tarea que fallo', source='telegram:201')
                 self.assertIn('apruebas: y/n', pixy_reply)
 
                 pending_auth = manager.pixy.authorizations.pending()

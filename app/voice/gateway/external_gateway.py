@@ -7,6 +7,7 @@ import logging
 import socket
 import ssl
 import time
+import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -14,10 +15,18 @@ import yaml
 from app.voice.files import read_regular
 from app.kernel.database import connection, migrate
 from app.kernel.execution_authority import UnconfirmedDispatch
+from app.kernel.journal import TERMINAL
 
 
 class DispatchRejected(PermissionError):
     """The reviewed operation was rejected before calling its transport."""
+
+
+class ProviderHTTPError(RuntimeError):
+    """Bounded HTTP transport fact, without provider body or credential-bearing URL."""
+    def __init__(self, status):
+        self.http_status = int(status)
+        super().__init__('Provider HTTP request failed')
 
 
 def batch_effects(batch, request_items, reply):
@@ -65,6 +74,7 @@ class ExternalGateway:
         self.calls = defaultdict(deque)
         self.db = db
         self.execution_authority = execution_authority
+        self.journal = None  # Bootstrap supplies the common control journal, not Voice's DB.
         if db:
             migrate(db,[
                 ['CREATE TABLE IF NOT EXISTS gateway_requests(request_id TEXT PRIMARY KEY,task_id TEXT,fingerprint TEXT,status TEXT,reply TEXT)'],
@@ -97,6 +107,58 @@ class ExternalGateway:
                 **(self.registry.active_services() if self.registry is not None else {})}
 
     def _mailbox_request(self, task, request_id, request):
+        if self.journal is None:
+            return self._mailbox_request_impl(task, request_id, request)
+        cycle = self._request_cycle(task, request_id)
+        attempt = self.journal.start('gateway_attempt', 'request_' + uuid.uuid4().hex,
+            parent_id=cycle, refs={'task_id': task['id'], 'execution_id': task['execution_id'],
+                                  'service_id': request.get('service'), 'operation': request.get('operation')})
+        try:
+            with self.journal.activate(attempt):
+                reply = self._mailbox_request_impl(task, request_id, request)
+        except Exception as exc:
+            state = 'rejected' if isinstance(exc, PermissionError) else 'failed'
+            self.journal.finish(attempt, state, data={'error_type': type(exc).__name__})
+            if self.journal.get(cycle)['status'] not in TERMINAL:
+                self.journal.finish(cycle, state, data={'error_type': type(exc).__name__})
+            raise
+        error = reply.get('error')
+        state = ('unknown' if error == 'UnconfirmedPreviousRequest' else
+                 'rejected' if error in {'PermissionError', 'DispatchRejected'} else
+                 'failed' if error else 'completed')
+        if self.db:
+            with connection(self.db) as conn:
+                receipt = conn.execute('SELECT status FROM gateway_receipts WHERE request_id=?',
+                    (task['execution_id'] + ':' + request_id,)).fetchone()
+            if receipt:
+                state = {'sending': 'unknown', 'uncertain': 'unknown', 'partial': 'unknown',
+                         'denied': 'rejected'}.get(receipt['status'], receipt['status'])
+        self.journal.finish(attempt, state, data={'error_type': error} if error else None)
+        if self.journal.get(cycle)['status'] not in TERMINAL:
+            self.journal.finish(cycle, state, data={'error_type': error} if error else None)
+        return reply
+
+    def _request_cycle(self, task, request_id):
+        """Worker mailbox polling runs in another thread; use its real execution parent."""
+        parent = self.journal.cycle_id('skill_use', task['execution_id'])
+        if not self.journal.get(parent):
+            parent = None
+        identity = task['execution_id'] + ':' + request_id
+        if len(identity) > 256:
+            identity = 'request_' + hashlib.sha256(identity.encode()).hexdigest()
+        return self.journal.start('gateway_request', identity, parent_id=parent,
+            trace_id=task.get('trace_id'), source=task.get('source'),
+            refs={'task_id': task['id'], 'execution_id': task['execution_id']})
+
+    def _request_rejected(self, cycle, exc=None, *, reason_code=None):
+        facts = {'error_type': type(exc).__name__} if exc else {'reason_code': reason_code}
+        state = 'rejected' if exc is None or isinstance(exc, PermissionError) else 'failed'
+        attempt = self.journal.start('gateway_attempt', 'request_' + uuid.uuid4().hex, parent_id=cycle)
+        self.journal.finish(attempt, state, data=facts)
+        if self.journal.get(cycle)['status'] not in TERMINAL:
+            self.journal.finish(cycle, state, data=facts)
+
+    def _mailbox_request_impl(self, task, request_id, request):
         if not self.db:
             raise RuntimeError('Durable Voice receipt storage is required')
         if self.execution_authority is None:
@@ -253,6 +315,28 @@ class ExternalGateway:
         return receipts
 
     def request(self, service, operation, params=None, *, expected_version=None):
+        if self.journal is None:
+            return self._request_impl(service, operation, params, expected_version=expected_version)
+        cycle = self.journal.start('provider_request', 'provider_' + uuid.uuid4().hex,
+            refs={'service_id': service, 'operation': operation})
+        started = time.monotonic()
+        try:
+            with self.journal.activate(cycle):
+                reply = self._request_impl(service, operation, params, expected_version=expected_version)
+        except Exception as exc:
+            cause = exc
+            while cause.__cause__ is not None:
+                cause = cause.__cause__
+            facts = {'error_type': type(cause).__name__, 'elapsed_seconds': time.monotonic() - started}
+            if getattr(cause, 'http_status', None) is not None:
+                facts['http_status'] = cause.http_status
+            self.journal.finish(cycle, 'rejected' if isinstance(exc, PermissionError) else 'failed', data=facts)
+            raise
+        self.journal.finish(cycle, data={'elapsed_seconds': time.monotonic() - started,
+                                       'byte_count': len(reply['body'])})
+        return reply
+
+    def _request_impl(self, service, operation, params=None, *, expected_version=None):
         spec = self.services.get(service,{}).get('operations',{}).get(operation)
         if expected_version is not None and (not spec or spec.get('version') != expected_version):
             raise DispatchRejected('Approved service version is no longer active')
@@ -312,7 +396,7 @@ class ExternalGateway:
             connection.request(method,path,body=body,headers=headers)
             response = connection.getresponse()
             if not 200 <= response.status < 300:
-                raise RuntimeError('Provider returned HTTP '+str(response.status))
+                raise ProviderHTTPError(response.status)
             mime = (response.getheader('Content-Type') or '').split(';')[0].lower()
             if mime not in spec.get('content_types',['application/json']):
                 raise PermissionError('Unexpected response type')
@@ -337,7 +421,7 @@ class ExternalGateway:
         except (PermissionError,ValueError):
             raise
         except Exception as exc:
-            raise RuntimeError('Voice provider request failed: '+type(exc).__name__) from None
+            raise RuntimeError('Voice provider request failed: '+type(exc).__name__) from exc
         finally:
             connection.close()
 
@@ -350,8 +434,12 @@ class ExternalGateway:
             response = path.with_name(path.name.replace('.request.json','.response.json'))
             if response.exists():
                 continue
+            cycle = self._request_cycle(task, path.name) if self.journal else None
             if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or path.stat().st_size > 16384:
+                if cycle:
+                    self._request_rejected(cycle, reason_code='unsafe_mailbox_file')
                 continue
+            entered_gateway = False
             try:
                 if 'Network' not in task.get('manifest',{}).get('capabilities',[]) or task.get('authorized_hash') != task['artifact_hash']:
                     raise PermissionError('Task has no reviewed network capability')
@@ -371,9 +459,12 @@ class ExternalGateway:
                 operation = self.services.get(requested[0], {}).get('operations', {}).get(requested[1])
                 if not operation or (requested[0], requested[1], operation.get('version')) not in approved:
                     raise PermissionError('Service operation or version is outside task approval')
+                entered_gateway = True
                 reply = self._mailbox_request(task,path.name,request)
             except Exception as exc:
                 reply = {'error':type(exc).__name__}
+                if cycle and not entered_gateway:
+                    self._request_rejected(cycle, exc)
             try:
                 # Exclusive creation refuses worker-created symlinks and overwrites.
                 with response.open('x',encoding='utf-8') as stream:

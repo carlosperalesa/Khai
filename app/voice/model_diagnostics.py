@@ -54,3 +54,8 @@ class ModelDiagnostics:
             rows = conn.execute('SELECT document FROM model_rejections ORDER BY created_at DESC LIMIT ?',
                                 (max(1, min(20, limit)),)).fetchall()
         return [json.loads(r['document']) for r in rows]
+
+    def get(self, reference):
+        with connection(self.path) as conn:
+            row = conn.execute('SELECT document FROM model_rejections WHERE id=?', (reference,)).fetchone()
+        return json.loads(row['document']) if row else None

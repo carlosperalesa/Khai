@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import requests
@@ -16,10 +17,89 @@ from app.kernel.execution_authority import VoiceExecutionPort
 from app.mind.conversation import ReplyResult
 from app.pixy.skill_approvals import SkillApprovalStore
 from app.pixy.authorization import AuthorizationStore
+from app.pixy.pixy import PixyMind
+from app.heart.recovery import Recovery
+from app.kernel.journal import Journal
 from app.kernel.tracing import trace_scope
 from app.voice.gateway.external_gateway import ExternalGateway
 from app.voice.secrets import SecretCaptureService, Secrets
 from app.voice.voice import command
+
+
+class CommonPixyJournalTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name)/'control.sqlite3'
+        self.manager = SimpleNamespace(llm=Mock(), telegram=Mock(), audit_db=self.db)
+        self.pixy = PixyMind(self.manager)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reviews_record_ast_rejection_and_model_exception_separately(self):
+        denied = self.pixy.review('import subprocess\nsubprocess.run(["private payload"])',
+                                 {'purpose': 'test', 'capabilities': []})
+        self.assertFalse(denied['safe'])
+        self.manager.llm.generate_content.side_effect = TimeoutError('private provider body')
+        with self.assertRaises(TimeoutError):
+            self.pixy.review('# MODE: SAFE\nprint(1)', {'purpose': 'test', 'capabilities': []})
+        with connection(self.db) as db:
+            rows = db.execute("SELECT cycle_id,status FROM journal_cycles WHERE kind='pixy_review' ORDER BY started_at").fetchall()
+            audits = db.execute("SELECT kind,safe FROM pixy_audits").fetchall()
+        self.assertEqual([r['status'] for r in rows], ['rejected', 'failed'])
+        self.assertEqual([tuple(r) for r in audits], [('review', 0)])
+        self.assertNotIn('private provider body', json.dumps(self.pixy.journal.tree(rows[1]['cycle_id'])))
+
+    def test_report_does_not_request_authority_even_when_repair_is_available(self):
+        senses = Mock()
+        senses.evidence.return_value = {'storage': {'vitals': {'ram_percent': 95},
+                                                   'integrity': {'status': 'ok'}}}
+        self.manager.heart = SimpleNamespace(recovery=Recovery(self.db, senses, Mock(), self.pixy.authorizations))
+        report = self.pixy.direct_response('informe del estado y errores', source='owner:report')
+        self.assertNotIn('apruebas', report)
+        self.assertIsNone(self.pixy.authorizations.pending())
+        case = self.manager.heart.recovery.recent(1)[0]
+        self.assertEqual(case['case_kind'], 'pixy_report')
+        self.assertIsNone(case['plan'])
+        reply = self.pixy.direct_response('repara el sistema', source='owner:repair')
+        self.assertIn('apruebas: y/n', reply)
+        self.assertIsNotNone(self.pixy.authorizations.pending())
+        with connection(self.db) as db:
+            requests = db.execute("SELECT object_id,status FROM journal_cycles WHERE kind='pixy_request' AND source LIKE 'owner:%'").fetchall()
+        self.assertIn(('owner:report', 'completed'), [tuple(r) for r in requests])
+
+    def test_unavailable_evidence_reports_failure_and_keeps_report_id(self):
+        senses = Mock()
+        senses.evidence.side_effect = ConnectionError('private transport body')
+        self.manager.heart = SimpleNamespace(recovery=Recovery(self.db, senses, Mock(), self.pixy.authorizations))
+        report = self.pixy.direct_response('estado', source='owner:missing-evidence')
+        self.assertIn('No fue posible completar', report)
+        self.assertNotIn('No se detectaron', report)
+        case = self.manager.heart.recovery.recent(1)[0]
+        branch = self.pixy.journal.tree(Journal.cycle_id('pixy_report', case['case_id']))
+        self.assertEqual(branch['cycles'][0]['status'], 'failed')
+        self.assertEqual(branch['events'][-1]['data']['error_type'], 'ConnectionError')
+        self.assertNotIn('private transport body', json.dumps(branch))
+
+    def test_exact_journal_report_survives_restart_without_heart_or_model(self):
+        journal = self.pixy.journal
+        first = journal.start('task', 'task_'+'1'*32, trace_id='req_first')
+        failed = journal.start('skill_use', 'run_'+'1'*32, parent_id=first,
+                               refs={'task_id': 'task_'+'1'*32})
+        journal.finish(failed, 'failed', data={'error_type': 'TimeoutError'})
+        other = journal.start('task', 'task_'+'2'*32, trace_id='req_second')
+        journal.finish(other)
+        self.pixy = PixyMind(self.manager)
+        reply = self.pixy.direct_response('informe ' + first, source='owner:exact-report')
+        self.assertIn('skill_use', reply)
+        self.assertIn('failed', reply)
+        self.assertNotIn('task_'+'2'*32, reply)
+        self.manager.llm.generate_content.assert_not_called()
+        with connection(self.db) as db:
+            reports = db.execute("SELECT cycle_id,status FROM journal_cycles WHERE kind='pixy_report'").fetchall()
+            links = db.execute("SELECT to_id FROM journal_links WHERE relation='reports_on'").fetchall()
+        self.assertEqual([r['status'] for r in reports], ['completed'])
+        self.assertEqual([r['to_id'] for r in links], [first])
 
 
 class ReusableSkillApprovalTests(Fixture):

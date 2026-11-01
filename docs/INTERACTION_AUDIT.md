@@ -1,5 +1,7 @@
 # Auditoría de ciclos de interacción — 31 de octubre de 2026
 
+Este informe conserva el estado previo del commit `9d6e66a`. Después, el propietario aprobó el diario común; implementación y límites actuales en [`COMMON_JOURNAL.md`](./COMMON_JOURNAL.md). Las referencias siguientes a diseño pendiente y trazabilidad no implementada describen el momento de esta auditoría.
+
 ## Resultado y alcance
 
 **La trazabilidad completa por ramas todavía no está implementada.** Hay recibos y registros durables útiles en los órganos, pero no un árbol común que relacione de forma obligatoria cada interacción, sus suboperaciones y su cierre. Esta auditoría distingue garantías verificadas, defectos reproducidos y diseño propuesto; las pruebas positivas no certifican los huecos como resueltos.

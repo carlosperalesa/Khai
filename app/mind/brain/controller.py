@@ -8,6 +8,8 @@ import tempfile
 import time
 import uuid
 from contextvars import ContextVar
+from functools import wraps
+from app.kernel.journal import Journal
 from app.kernel.tracing import get_trace_id
 from urllib.parse import quote
 
@@ -99,12 +101,34 @@ def _sign_rs256(private_key_pem: str, signing_input: bytes) -> bytes:
                 pass
 
 
+def _model_audit(kind):
+    """Give every command, fallback and remote wait its own durable branch."""
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(self, *args, **kwargs):
+            refs = {'operation': fn.__name__}
+            if fn.__name__ in {'set_mode', 'start'}:
+                value = str(args[0] if args else kwargs.get('mode', kwargs.get('profile', 'mid'))).lower()
+                if value in PROFILES or value == 'nano':
+                    refs['profile'] = value
+            object_id = str(args[0]) if fn.__name__ == '_wait_operation' else uuid.uuid4().hex
+            with self.journal.scope(kind, object_id, refs=refs) as cycle:
+                result = fn(self, *args, **kwargs)
+                if kind in {'model_change', 'model_stop', 'model_fallback', 'model_rollback'}:
+                    self.journal.event(cycle, 'effective_mode_observed',
+                                       data={'effective_mode': self.get_active_mode()})
+                return result
+        return wrapped
+    return decorate
+
+
 class ModelController:
     """Administra el modo conversacional (low=Gemini, mid=Dolphin CPU Spot, high=Dolphin GPU Spot)."""
 
-    def __init__(self, data_dir: str, secrets=None):
+    def __init__(self, data_dir: str, secrets=None, journal=None):
         self.data_dir = str(data_dir)
         self.secrets = secrets
+        self.journal = journal or Journal(os.path.join(self.data_dir, 'control.sqlite3'))
         self.project = self._cfg('KHAI_DOLPHIN_GCP_PROJECT', 'gen-lang-client-0149640270')
         self.zone = self._cfg('KHAI_DOLPHIN_GCP_ZONE', 'us-west1-a')
         self.instance = self._cfg('KHAI_DOLPHIN_GCP_INSTANCE', 'dolphin-node')
@@ -155,8 +179,10 @@ class ModelController:
         with connection(self.db_path) as conn:
             conn.execute('INSERT INTO model_transition_events(created_at,document) VALUES (?,?)',
                          (event['created_at'], json.dumps(event)))
-            conn.execute('DELETE FROM model_transition_events WHERE id NOT IN '
-                         '(SELECT id FROM model_transition_events ORDER BY id DESC LIMIT 500)')
+        if _attempt.get():
+            self.journal.event(Journal.cycle_id('model_attempt', _attempt.get()), phase,
+                               data={'profile': profile, 'model': event['model'],
+                                     **{key: detail[key] for key in ('error_type', 'elapsed_seconds') if key in detail}})
 
     def transition_snapshot(self):
         with connection(self.db_path) as conn:
@@ -182,6 +208,7 @@ class ModelController:
                     (active_mode,),
                 )
 
+    @_model_audit('model_fallback')
     def mark_fallback_to_nano(self) -> None:
         """Registra que Dolphin se apagó/no está disponible y vuelve a modo nano (Gemini)."""
         self._record_stop()
@@ -278,6 +305,7 @@ class ModelController:
         resp.raise_for_status()
         return resp.json()
 
+    @_model_audit('model_remote_operation')
     def _wait_operation(self, op_name: str, timeout_sec: int = 90) -> None:
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
@@ -396,6 +424,7 @@ class ModelController:
         self._warmup_model(profile)
         self._transition_event(profile, 'warmup_completed')
 
+    @_model_audit('model_vm_delete')
     def _delete_instance(self, *, wait: bool = True) -> None:
         current = self.get_instance()
         if current is None:
@@ -426,6 +455,7 @@ class ModelController:
             f'Khai continúa con Gemini. {detail}'
         )
 
+    @_model_audit('model_rollback')
     def _rollback_activation(self) -> None:
         self._record_stop()
         self._set_mode_state('nano', mark_notified=True)
@@ -434,6 +464,7 @@ class ModelController:
         except Exception as exc:
             logger.warning('No se pudo limpiar la VM tras una activacion fallida (%s)', type(exc).__name__)
 
+    @_model_audit('model_change')
     def set_mode(self, mode: str, notifier=None) -> str:
         mode = (mode or '?').strip().lower()
         aliases = {'h': 'high', 'm': 'mid', 'l': 'low', 'medium': 'mid', 'n': 'nano', 'off': 'nano'}
@@ -471,17 +502,26 @@ class ModelController:
     def start(self, profile: str = 'mid') -> str:
         token = _attempt.set(uuid.uuid4().hex)
         started = time.monotonic()
+        cycle = self.journal.start('model_attempt', _attempt.get(),
+                                   refs={'profile': profile if profile in PROFILES else 'unrecognized'})
+        try:
+            with self.journal.activate(cycle):
+                return self._audited_start(profile, started, cycle)
+        finally:
+            _attempt.reset(token)
+
+    def _audited_start(self, profile, started, cycle):
         try:
             self._transition_event(profile, 'activation_started')
             result = self._start(profile)
             self._transition_event(profile, 'activation_completed', elapsed_seconds=time.monotonic()-started)
+            self.journal.finish(cycle, data={'effective_mode': self.get_active_mode()})
             return result
         except Exception as exc:
             self._transition_event(profile, 'activation_failed', error_type=type(exc).__name__,
                                    reason=_format_error_reason(exc), elapsed_seconds=time.monotonic()-started)
+            self.journal.finish(cycle, 'failed', data={'error_type': type(exc).__name__})
             raise
-        finally:
-            _attempt.reset(token)
 
     def _start(self, profile: str = 'mid') -> str:
         profile = (profile or 'mid').strip().lower()
@@ -573,6 +613,7 @@ class ModelController:
             raise last_create_err
         raise RuntimeError(f'No se pudo activar ningún tipo de máquina para {profile}')
 
+    @_model_audit('model_stop')
     def stop(self) -> str:
         current = self.get_instance()
         self._record_stop()

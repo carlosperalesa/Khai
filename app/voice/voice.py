@@ -6,7 +6,7 @@ import os
 import re
 import threading
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 
@@ -39,6 +39,8 @@ async def lifespan(app):
     owner_lock.acquire()
     try:
         manager = ModuleManager(config_dir='config', data_dir=os.getenv('DATA_DIR', 'data'))
+        manager.journal.interrupt_open()
+        manager.heart.recovery.reconcile_interrupted()
         manager.coordinator = Coordinator(manager)
         manager.coordinator.lock = owner_lock
         if hasattr(manager, 'heart') and hasattr(manager.heart, 'recovery') and manager.heart.recovery:
@@ -150,6 +152,14 @@ def urgent_command(text):
 
 
 def process_ordinary(manager, source, trace_id, text):
+    journal = getattr(manager.coordinator.store, 'journal', None)
+    if journal is None:
+        return _process_ordinary(manager, source, trace_id, text)
+    with journal.scope('interaction', source, trace_id=trace_id, source=source):
+        return _process_ordinary(manager, source, trace_id, text)
+
+
+def _process_ordinary(manager, source, trace_id, text):
     from app.mind.conversation import current_turn
     c = manager.coordinator
     turn = c.conversations.turn(source)
@@ -420,8 +430,12 @@ async def webhook(request: Request):
             source, text, user_id, chat_id = authenticated_private_context(
                 data, manager.telegram.user_id)
             if text.split(maxsplit=1)[0].lower() in {'/us', '/pas', '/api'}:
-                reply = await asyncio.to_thread(secret_command, manager, text, user_id, chat_id)
-                await asyncio.to_thread(manager.coordinator.notify, reply)
+                journal = getattr(manager.coordinator, 'journal', None)
+                scope = (journal.scope('interaction', source, trace_id=trace_id, source=source)
+                         if journal is not None else nullcontext())
+                with scope:
+                    reply = await asyncio.to_thread(secret_command, manager, text, user_id, chat_id)
+                    await asyncio.to_thread(manager.coordinator.notify, reply)
             elif hasattr(manager, 'voice_mailbox') and manager.voice_mailbox:
                 msg = data.get('message') or (data.get('callback_query') or {}).get('message') or {}
                 conversation_chat = str((msg.get('chat') or {}).get('id', user_id))

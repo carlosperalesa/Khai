@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from app.kernel.database import connection
 from app.kernel.events import Events
+from app.kernel.journal import Journal
 from app.kernel.control_plane import ControlPlane
 from app.mind.identity import Identity
 from app.mind.memory import MemoryEngine
@@ -38,6 +39,7 @@ class ModuleManager:
     def __init__(self, config_dir='config', data_dir='data'):
         self.data_dir = Path(data_dir).resolve()
         self.control_db = self.data_dir/'control.sqlite3'
+        self.journal = Journal(self.control_db)
         self.events = Events(self.control_db)
         self.control = ControlPlane(self.control_db, self.events)
         self.voice_mailbox = VoiceMailbox(self.control_db)
@@ -58,8 +60,10 @@ class ModuleManager:
         self.secret_capture = SecretCaptureService(self.secrets, self.secret_port)
         self.telegram = TelegramHandler(self.secrets.get('TELEGRAM_BOT_TOKEN'),self.secrets.get('TELEGRAM_USER_ID'))
         self.model_controller = ModelController(str(self.data_dir), self.secrets)
+        self.model_controller.journal = self.journal
         self.dolphin = self.model_controller  # Backward compatibility alias
         provider = LLMManager(config_dir, str(self.data_dir/'voice'), self.memory, self.secrets, self.data_dir/'voice'/'voice.sqlite3', dolphin=self.model_controller)
+        provider.journal = self.journal
         self.brain = Brain(provider, controller=self.model_controller)
         self.llm = self.brain
         self.mind = Mind(self.brain, self.memory)
@@ -76,6 +80,7 @@ class ModuleManager:
         self.gateway = ExternalGateway(Path(config_dir)/'gateways.yaml',self.secrets,self.events,
                                        self.data_dir/'voice'/'voice.sqlite3',registry=self.voice_services,
                                        execution_authority=self.control.voice_execution)
+        self.gateway.journal = self.journal
         encoder = None
         backend, model = os.getenv('KHAI_EMBED_BACKEND'), os.getenv('KHAI_EMBED_MODEL')
         if backend and model:
@@ -98,6 +103,7 @@ class ModuleManager:
         self.dreams = Dreams(self.control_db, self.rules, self.events, memory=self.memory)
         self.heart = Beat(self.data_dir,self.events)
         adapters = {name:lambda name=name:self._domain_snapshot(name) for name in OBSERVERS}
+        adapters['model_rejection'] = self.brain.contract_rejection
         self.senses = Senses(self.data_dir/'senses'/'senses.sqlite3',adapters,CoreEyes(str(self.data_dir)))
         self.heart.recovery = Recovery(self.control_db,self.senses,self.hand,self.heart_control,self.events)
 

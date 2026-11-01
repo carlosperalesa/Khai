@@ -59,6 +59,78 @@ CODE = '# MODE: SAFE\nprint(42)'
 MANIFEST = {'purpose': 'compute', 'capabilities': []}
 
 
+class CommonJournalTests(unittest.TestCase):
+    def test_transaction_rollback_immutable_events_and_bounded_technical_envelope(self):
+        from app.kernel.journal import Journal
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'control.sqlite3'
+            journal = Journal(path)
+            with self.assertRaises(RuntimeError), connection(path) as db:
+                journal.start('interaction', 'rolled-back', conn=db)
+                raise RuntimeError('rollback domain and audit together')
+            self.assertEqual(journal.find('rolled-back'), [])
+            root = journal.start('interaction', 'telegram:one', trace_id='req_one')
+            event = journal.event(root, 'accepted', event_id='fixed-event')
+            self.assertEqual(event, journal.event(root, 'accepted', event_id='fixed-event'))
+            with self.assertRaises(ValueError):
+                journal.event(root, 'changed', event_id='fixed-event')
+            with self.assertRaises(ValueError):
+                journal.event(root, 'unsafe', data={'prompt': 'private message'})
+            with self.assertRaises(ValueError):
+                journal.event(root, 'unsafe', data={'reason_code': 'x' * 257})
+            journal.finish(root)
+            with self.assertRaises(ValueError):
+                journal.event(root, 'reopen', status='active')
+            with connection(path) as db:
+                for statement in ('DELETE FROM journal_events',
+                                  "UPDATE journal_events SET phase='changed'",
+                                  'DELETE FROM journal_cycles'):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        db.execute(statement)
+            self.assertEqual(Journal(path).get(root)['status'], 'completed')
+
+    def test_parallel_branches_and_exact_subtree_never_mix_other_interactions(self):
+        from app.kernel.journal import Journal
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Journal(Path(folder) / 'control.sqlite3')
+            roots = [journal.start('interaction', f'telegram:{n}', trace_id=f'req_{n}') for n in range(2)]
+            def work(n):
+                with journal.activate(roots[n]), journal.scope('model_call', f'call:{n}') as child:
+                    journal.event(child, 'transport_returned', data={'model': 'fixture'})
+                return child
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                children = list(pool.map(work, range(2)))
+            for n in range(2):
+                tree = journal.tree(roots[n])
+                self.assertEqual({c['cycle_id'] for c in tree['cycles']}, {roots[n], children[n]})
+                self.assertEqual({c['trace_id'] for c in tree['cycles']}, {f'req_{n}'})
+                self.assertEqual({c['root_id'] for c in tree['cycles']}, {roots[n]})
+                self.assertEqual([c['cycle_id'] for c in journal.tree(children[n])['cycles']], [children[n]])
+            with self.assertRaises(ValueError):
+                journal.start('bad_child', 'bad', parent_id=roots[0], trace_id='req_1')
+            self.assertTrue(journal.tree(roots[0], max_cycles=1)['truncated'])
+            self.assertIsNone(journal.current())
+
+    def test_restart_preserves_waiting_and_receipts_without_replaying_open_work(self):
+        from app.kernel.journal import Journal
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'control.sqlite3'
+            journal = Journal(path)
+            root = journal.start('interaction', 'restart', trace_id='req_restart')
+            waiting = journal.start('authorization', 'auth_fixture', parent_id=root)
+            journal.event(waiting, 'approval_requested', status='waiting')
+            done = journal.start('delivery', 'delivery_fixture', parent_id=root)
+            journal.finish(done, data={'message_id': 77})
+            reopened = Journal(path)
+            self.assertEqual(reopened.interrupt_open(), 1)
+            self.assertEqual(reopened.get(root)['status'], 'unknown')
+            self.assertEqual(reopened.get(waiting)['status'], 'waiting')
+            self.assertEqual(reopened.get(done)['status'], 'completed')
+            events = reopened.tree(done)['events']
+            self.assertEqual(events[-1]['data'], {'message_id': 77})
+            self.assertEqual(reopened.interrupt_open(), 0)
+
+
 class ArchitectureFixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

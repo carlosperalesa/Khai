@@ -4,7 +4,9 @@ import json
 import time
 import uuid
 
+from pathlib import Path
 from app.kernel.database import connection, migrate
+from app.kernel.journal import Journal
 
 
 def _canonical(value):
@@ -15,9 +17,14 @@ class AgentExhausted(RuntimeError):
     pass
 
 
+class AgentReconciliationRequired(RuntimeError):
+    pass
+
+
 class AgentLoop:
-    def __init__(self, db_path, llm, *, max_turns=16, max_tools=40, timeout=600):
+    def __init__(self, db_path, llm, *, max_turns=16, max_tools=40, timeout=600, journal=None):
         self.db_path, self.llm = db_path, llm
+        self.journal = journal or Journal(db_path)
         self.max_turns, self.max_tools, self.timeout = max_turns, max_tools, timeout
         migrate(db_path, [[
             '''CREATE TABLE IF NOT EXISTS agent_runs(
@@ -31,7 +38,8 @@ class AgentLoop:
             '''CREATE TABLE IF NOT EXISTS agent_tool_calls(
                call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL,
                result TEXT NOT NULL, ok INTEGER NOT NULL, error_fingerprint TEXT, created_at REAL NOT NULL)''',
-        ]], component='hand-agent-loop')
+        ], ['ALTER TABLE agent_tool_calls ADD COLUMN provider_call_id TEXT',
+            'UPDATE agent_tool_calls SET provider_call_id=call_id']], component='hand-agent-loop')
 
     def _append(self, run_id, message):
         with connection(self.db_path) as conn:
@@ -47,7 +55,34 @@ class AgentLoop:
                                 (run_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def _journal_conn(self, conn):
+        return conn if Path(self.journal.path).resolve() == Path(self.db_path).resolve() else None
+
     def run(self, task_id, purpose, system_prompt, tools, *, run_id=None):
+        run_id = run_id or ('agent_' + uuid.uuid4().hex)
+        self.last_run_id = run_id
+        cycle = self.journal.start('agent', run_id, refs={'task_id': task_id, 'agent_run_id': run_id})
+        with self.journal.activate(cycle):
+            try:
+                result = self._run(task_id, purpose, system_prompt, tools, run_id=run_id)
+            except Exception as exc:
+                status = 'exhausted' if isinstance(exc, AgentExhausted) else 'failed'
+                if isinstance(exc, AgentReconciliationRequired):
+                    previous = self.journal.get(cycle)['status']
+                    status = previous if previous in {'completed', 'failed', 'exhausted', 'rejected', 'cancelled'} else 'unknown'
+                with connection(self.db_path) as conn:
+                    if not isinstance(exc, AgentReconciliationRequired) or status == 'unknown':
+                        conn.execute('UPDATE agent_runs SET status=?,error=?,updated_at=? WHERE run_id=?',
+                                     (status, type(exc).__name__, time.time(), run_id))
+                    self.journal.finish(cycle, status, data={'error_type': type(exc).__name__},
+                                        conn=self._journal_conn(conn))
+                raise
+            else:
+                if self.journal.get(cycle)['status'] != 'completed':
+                    self.journal.finish(cycle)
+                return result
+
+    def _run(self, task_id, purpose, system_prompt, tools, *, run_id=None):
         handlers = {tool['name']: tool['handler'] for tool in tools}
         schemas = [{'name': tool['name'], 'description': tool['description'],
                     'parameters': tool['parameters']} for tool in tools]
@@ -57,6 +92,10 @@ class AgentLoop:
         created = False
         with connection(self.db_path) as conn:
             existing = conn.execute('SELECT * FROM agent_runs WHERE run_id=?', (run_id,)).fetchone()
+            if existing and existing['status'] == 'completed':
+                return json.loads(existing['result']), run_id
+            if existing:
+                raise AgentReconciliationRequired('An existing unfinished agent run requires reconciliation')
             if not existing:
                 conn.execute('INSERT INTO agent_runs VALUES (?,?,?,?,?,?,?,?,?,?)',
                              (run_id, task_id, purpose, 'running', 0, 0, None, None, now, now))
@@ -76,7 +115,13 @@ class AgentLoop:
                     conn.execute('UPDATE agent_runs SET status="exhausted",error=?,updated_at=? WHERE run_id=?',
                                  (error, time.time(), run_id))
                 raise AgentExhausted(error)
-            turn = self.llm.complete(self._messages(run_id), schemas)
+            with self.journal.scope('agent_model_call', run_id + ':' + str(state['turns']),
+                                    refs={'task_id': task_id, 'agent_run_id': run_id}):
+                turn = self.llm.complete(self._messages(run_id), schemas)
+                if not isinstance(turn, dict) or not isinstance(turn.get('tool_calls') or [], list):
+                    raise ValueError('Invalid agent turn envelope')
+                if any(not isinstance(call, dict) for call in turn.get('tool_calls') or []):
+                    raise ValueError('Invalid agent tool envelope')
             calls = turn.get('tool_calls') or []
             assistant = {'role': 'assistant', 'content': turn.get('content') or '', 'tool_calls': calls,
                          'provider': turn.get('provider'), 'model': turn.get('model')}
@@ -94,11 +139,17 @@ class AgentLoop:
                 continue
             for call in calls:
                 name, arguments = call.get('name'), call.get('arguments') or {}
+                call_id = 'call_' + uuid.uuid4().hex
+                tool_cycle = self.journal.start('agent_tool', call_id, refs={
+                    'task_id': task_id, 'agent_run_id': run_id,
+                    'tool_name': str(name) if name in handlers else 'unknown',
+                    'provider_call_id': str(call.get('id') or '')[:256]})
                 ok = True
                 try:
                     if name not in handlers:
                         raise ValueError('Unknown tool: ' + str(name))
-                    result = handlers[name](arguments)
+                    with self.journal.activate(tool_cycle):
+                        result = handlers[name](arguments)
                     if not isinstance(result, dict):
                         result = {'result': result}
                     result = {'ok': True, **result}
@@ -108,9 +159,12 @@ class AgentLoop:
                 raw = _canonical(result)
                 fingerprint = None if ok else hashlib.sha256(raw.encode()).hexdigest()[:16]
                 with connection(self.db_path) as conn:
-                    conn.execute('INSERT OR REPLACE INTO agent_tool_calls VALUES (?,?,?,?,?,?,?,?)',
-                                 (call.get('id') or ('call_' + uuid.uuid4().hex), run_id, str(name),
-                                  _canonical(arguments), raw, int(ok), fingerprint, time.time()))
+                    conn.execute('INSERT INTO agent_tool_calls VALUES (?,?,?,?,?,?,?,?,?)',
+                                 (call_id, run_id, str(name), _canonical(arguments), raw, int(ok),
+                                  fingerprint, time.time(), call.get('id')))
+                    self.journal.finish(tool_cycle, 'completed' if ok else 'failed',
+                                        data={} if ok else {'error_type': result['error_type']},
+                                        conn=self._journal_conn(conn))
                     conn.execute('UPDATE agent_runs SET tool_calls=tool_calls+1,updated_at=? WHERE run_id=?',
                                  (time.time(), run_id))
                 self._append(run_id, {'role': 'tool', 'tool_call_id': call.get('id'),
@@ -127,4 +181,6 @@ class AgentLoop:
                     with connection(self.db_path) as conn:
                         conn.execute('UPDATE agent_runs SET status="completed",result=?,updated_at=? WHERE run_id=?',
                                      (_canonical(payload), time.time(), run_id))
+                        self.journal.finish(Journal.cycle_id('agent', run_id),
+                                            conn=self._journal_conn(conn))
                     return payload, run_id

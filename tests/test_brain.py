@@ -35,6 +35,29 @@ class _Memory:
 
 
 class BrainTests(unittest.TestCase):
+    def test_common_model_tree_contains_cascade_stop_and_cleanup_failure(self):
+        from app.kernel.journal import Journal
+        with tempfile.TemporaryDirectory() as directory:
+            controller = ModelController(directory, {})
+            root = controller.journal.start('interaction', 'telegram:model-audit')
+            with controller.journal.activate(root):
+                with patch.object(controller, '_start', side_effect=[TimeoutError('cold'), 'connected']):
+                    self.assertEqual(controller.set_mode('high'), 'connected')
+                with patch.object(controller, 'get_instance', return_value=None):
+                    controller.set_mode('nano')
+                with patch.object(controller, 'get_instance', side_effect=TimeoutError('provider body')):
+                    controller._rollback_activation()
+            tree = Journal(controller.journal.path).tree(root)
+            changes = [c for c in tree['cycles'] if c['kind'] == 'model_change']
+            self.assertEqual(len(changes), 2)
+            attempts = [c for c in tree['cycles'] if c['kind'] == 'model_attempt']
+            self.assertEqual([c['status'] for c in attempts], ['failed', 'completed'])
+            self.assertEqual({c['parent_id'] for c in attempts}, {changes[0]['cycle_id']})
+            self.assertEqual([c['status'] for c in tree['cycles'] if c['kind'] == 'model_stop'], ['completed'])
+            self.assertEqual([c['status'] for c in tree['cycles'] if c['kind'] == 'model_vm_delete'], ['failed'])
+            self.assertTrue(all(c['ended_at'] is not None for c in tree['cycles'] if c['cycle_id'] != root))
+            self.assertNotIn('provider body', json.dumps(tree))
+
     def test_mode_command_cascade_retains_attempts_after_controller_restart(self):
         """One request can fail a candidate and connect another without losing either receipt."""
         from app.kernel.tracing import trace_scope
@@ -357,10 +380,10 @@ class BrainTests(unittest.TestCase):
     def test_pixy_natural_language_and_llm_fallback(self):
         from app.pixy.pixy import PixyMind
         recovery_mock = SimpleNamespace(
-            all_cases=lambda: [{'case_id': 'case-1', 'state': 'DIAGNOSED', 'request': 'clima',
+            recent=lambda limit=3: [{'case_id': 'case-1', 'state': 'DIAGNOSED', 'request': 'clima',
                                 'diagnosis': {'findings': [{'kind': 'task_failure', 'detail': 'Missing action'}]},
                                 'plan': {'action': 'retry_task', 'target': 'task', 'summary': 'Reintentar', 'requires_approval': False}}],
-            open_case=lambda req, requested_by='telegram': {
+            open_case=lambda req, requested_by='telegram', propose=False, kind='pixy_report': {
                 'case_id': 'case-2',
                 'diagnosis': {'findings': [{'kind': 'task_failure', 'detail': 'Missing action'}]},
                 'plan': {'action': 'retry_task', 'target': 'task', 'summary': 'Reintentar', 'requires_approval': False},
@@ -369,7 +392,6 @@ class BrainTests(unittest.TestCase):
         llm_mock = SimpleNamespace(generate_content=MagicMock(side_effect=[
             json.dumps({'action': 'REPLY', 'reply': 'Significa que falló la planificación de la tarea.'}),
             json.dumps({'action': 'DIAGNOSE', 'reply': ''}),
-            'Heart detectó fallo en la tarea y propone reintentarla.',
             ValueError('Unified Fallback agotó todos los intentos y llaves.'),
         ]))
         mgr = SimpleNamespace(
@@ -388,7 +410,7 @@ class BrainTests(unittest.TestCase):
         )
         pixy = PixyMind(mgr)
         self.assertEqual(pixy.direct_response('que significa eso?'), 'Significa que falló la planificación de la tarea.')
-        self.assertEqual(pixy.direct_response('que pasó recién?'), 'Heart detectó fallo en la tarea y propone reintentarla.')
+        self.assertEqual(pixy.direct_response('que paso recien?'), 'task_failure: Missing action')
         fallback_reply = pixy.direct_response('dime algo cuando el LLM cae')
         self.assertIn('Pixy (modo contingencia sin LLM)', fallback_reply)
         self.assertIn('task_1', fallback_reply)

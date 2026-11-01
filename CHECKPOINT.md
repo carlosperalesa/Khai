@@ -1,5 +1,15 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Diario común aprobado — continuación del 31 de octubre
+
+- El propietario aprobó expresamente el diario común. Implementación en curso: `app/kernel/journal.py`, SQLite de control con ciclos, eventos inmutables y enlaces. Contrato y límites en `docs/COMMON_JOURNAL.md`; ya no está pendiente elegir entre los dos diseños.
+- Integración de los siete caminos, referencias hasta entregas y recibos por fragmento; IDs internos de herramientas evitan sobrescribir historia de otro run. Heart conserva evidencia antes de inferir, consulta el intento exacto y no propone una reparación de red para un rechazo de formato sin sustento. Informes por ID son consultas deterministas independientes de reparación.
+- La cancelación de transiciones/puente nano y el cambio de contrato nativo de Ollama no forman parte de esta implementación. La auditoría no reconstruye logs antiguos perdidos ni implica reparación completa del fallo conversacional de low.
+- Suites específicas aprobadas; suite conjunta y aceptación en servidor en curso. No declarar despliegue antes de registrar sus evidencias.
+- Primer conjunto completo: 328 pruebas y 30 subpruebas aprobadas en 278,79 s; 7 comprobaciones adicionales aprobaron timeout→Heart, búsqueda exacta de rechazo fuera de la ventana reciente y recuperación con intentos separados. Verificación final del código consolidado en curso (329 pruebas recogidas).
+- Respaldo previo a migración: `/opt/khai/data/backups/common-journal-20261101T012151Z`, cuatro bases verificadas. La lectura inicial sin sudo no pudo inspeccionar el WAL del runtime; el respaldo verificado se hizo con el propietario de los archivos y no indicó corrupción.
+- Validación consolidada: 329 pruebas y 30 subpruebas aprobadas en 273,40 s. Último endurecimiento de aislamiento: la prueba adicional de rechazo exacto aprobó que el caso descarte respuestas antiguas de otras tareas. Cambios listos para despliegue; aceptación real de la imagen y webhook todavía pendiente.
+
 ## Continuación del 31 de octubre: busca, dependencias, parser y disco
 - Auditoría de los siete caminos terminada: 16 pruebas nuevas; suite conjunta 303 pruebas y 25 subpruebas aprobadas en 191,73 s, diff sin errores. Informe `docs/INTERACTION_AUDIT.md` con garantías, defectos reproducidos, prioridades y ejemplo de los dos diseños. Sin cambios de código runtime en esta auditoría. El propietario pidió más información antes de elegir el diseño; no asumir que aprobó el diario común.
 - Auditoría por caminos autorizada expresamente: seis agentes especializados revisan modelo, chat, creación de skill, gobierno Pixy, informes Pixy y uso de skill; el coordinador revisa reparación y cruces. Informe en `docs/INTERACTION_AUDIT.md`, con pruebas nuevas en suites canónicas. Hay IDs durables por órgano, pero falta un árbol común de ramas y cierres; no declarar completada esa implementación. Elección de diario común Events/SQLite frente a índice sobre diarios separados pendiente del propietario.

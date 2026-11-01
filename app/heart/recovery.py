@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from app.kernel.database import connection, migrate
+from app.kernel.journal import Journal
 from app.heart.catalog import (
     plan_hash, requires_approval, validate_plan, validate_case_id,
     CAUSE_TAXONOMY, cause_fingerprint
@@ -22,7 +23,7 @@ STATES = {'RECEIVED', 'COLLECTING_EVIDENCE', 'DIAGNOSED', 'SOLUTION_PROPOSED', '
 TRANSITIONS = {
     'RECEIVED': {'COLLECTING_EVIDENCE', 'FAILED'},
     'COLLECTING_EVIDENCE': {'DIAGNOSED', 'FAILED'},
-    'DIAGNOSED': {'SOLUTION_PROPOSED'},
+    'DIAGNOSED': {'SOLUTION_PROPOSED', 'FAILED'},
     'SOLUTION_PROPOSED': {'WAITING_USER_APPROVAL', 'AUTHORIZED', 'DENIED'},
     'WAITING_USER_APPROVAL': {'AUTHORIZED', 'DENIED'},
     'AUTHORIZED': {'HAND_CREATING', 'HAND_EXECUTING', 'FAILED', 'DENIED'},
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 class Recovery:
     def __init__(self, path, senses, hand, authorizations, events=None):
         self.path, self.senses, self.hand = path, senses, hand
+        self.journal = Journal(path)
         self.authorizations, self.events = authorizations, events
         migrate(path, [[
             '''CREATE TABLE IF NOT EXISTS recovery_cases(case_id TEXT PRIMARY KEY, question TEXT NOT NULL,
@@ -60,6 +62,8 @@ class Recovery:
             'ALTER TABLE recovery_cases ADD COLUMN run_id TEXT',
             'CREATE INDEX IF NOT EXISTS idx_recovery_cases_incident ON recovery_cases(incident_key, state)',
             'CREATE INDEX IF NOT EXISTS idx_recovery_cases_task ON recovery_cases(task_id, state)',
+        ], [
+            "ALTER TABLE recovery_cases ADD COLUMN case_kind TEXT NOT NULL DEFAULT 'repair'",
         ]], component='heart-recovery')
 
     # ------------------------------------------------------------------ storage
@@ -90,7 +94,7 @@ class Recovery:
             raise ValueError('Estado de caso inválido')
         with connection(self.path) as conn:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute('SELECT state FROM recovery_cases WHERE case_id=?', (case_id,)).fetchone()
+            row = conn.execute('SELECT state,task_id,run_id,case_kind FROM recovery_cases WHERE case_id=?', (case_id,)).fetchone()
             if not row:
                 raise KeyError(case_id)
             current = row['state']
@@ -106,10 +110,74 @@ class Recovery:
             if current != to_state:
                 conn.execute('INSERT INTO recovery_transitions(case_id,from_state,to_state,detail,created_at) VALUES (?,?,?,?,?)',
                              (case_id, current, to_state, json.dumps(detail or {}, ensure_ascii=False), time.time()))
+            refs = {'case_id': case_id, 'task_id': fields.get('task_id', row['task_id']),
+                    'execution_id': fields.get('run_id', row['run_id'])}
+            cycle = self.journal.start(row['case_kind'], case_id, refs=refs, conn=conn)
+            status = {'RECOVERED': 'completed', 'FAILED': 'failed', 'DENIED': 'rejected',
+                      'UNKNOWN': 'unknown', 'SOLUTION_PROPOSED': 'waiting',
+                      'WAITING_USER_APPROVAL': 'waiting'}.get(to_state, 'active')
+            data = {'case_id': case_id, 'status': to_state}
+            for key in ('error_type', 'reason_code'):
+                if (detail or {}).get(key):
+                    data[key] = detail[key]
+            for key in ('authorization_id', 'execution_order_id'):
+                if fields.get(key):
+                    data['order_id' if key == 'execution_order_id' else key] = fields[key]
+            self.journal.event(cycle, to_state.lower(), status=status, data=data, conn=conn)
         if self.events and current != to_state:
             self.events.emit('heart', 'recovery_state', correlation_id=case_id,
                              metadata={'from': current, 'to': to_state})
         return self.get(case_id)
+
+    def _finish_diagnosis(self, case):
+        diagnosis = case.get('diagnosis') or {}
+        if case['case_kind'] == 'pixy_report':
+            status, phase = 'completed', 'report_generated'
+        else:
+            status = ('unknown' if diagnosis.get('status') == 'unknown' else
+                      'failed' if diagnosis.get('findings') else 'cancelled')
+            phase = 'diagnosed_without_repair'
+        self.journal.finish(Journal.cycle_id(case['case_kind'], case['case_id']), status,
+                            phase=phase, data={'case_id': case['case_id'], 'status': 'DIAGNOSED',
+                                               'reason_code': 'no_repair_plan'})
+        return case
+
+    def _diagnosis_failure(self, case_id, exc):
+        return self._move(case_id, 'FAILED', error='Diagnóstico interrumpido: ' + type(exc).__name__,
+                          detail={'error_type': type(exc).__name__})
+
+    def _scoped_journal(self, evidence, task):
+        task_id = task.get('id') if isinstance(task, dict) else task
+        if not task_id:
+            return
+        if isinstance(task, dict):
+            object_id = f"{task_id}:{task.get('attempt_number', 1)}:{task.get('goal_revision', 0)}"
+            exact = Journal.cycle_id('task_attempt', object_id)
+            if self.journal.get(exact):
+                evidence['journal'] = self.journal.tree(exact)
+                evidence['journal_scope'] = {'kind': 'current_attempt', 'task_id': task_id,
+                    'attempt_number': task.get('attempt_number', 1), 'goal_revision': task.get('goal_revision', 0)}
+                return
+        evidence['journal'] = self.journal.tree(Journal.cycle_id('task', task_id))
+        evidence['journal_scope'] = {'kind': 'historical_task_context', 'task_id': task_id}
+
+    def reconcile_interrupted(self):
+        """The process owner first marks open journal branches uncertain.
+
+        A diagnostic interrupted before its result has no external side effect
+        to replay. Keep its evidence and close it explicitly instead.
+        """
+        with connection(self.path) as conn:
+            rows = conn.execute("SELECT case_id,case_kind FROM recovery_cases WHERE state IN "
+                                "('RECEIVED','COLLECTING_EVIDENCE')").fetchall()
+        count = 0
+        for row in rows:
+            cycle = self.journal.get(Journal.cycle_id(row['case_kind'], row['case_id']))
+            if cycle and cycle['status'] == 'unknown':
+                self._move(row['case_id'], 'FAILED', error='Diagnóstico interrumpido por reinicio; evidencia conservada.',
+                           detail={'error_type': 'ProcessInterrupted', 'reason_code': 'process_restart'})
+                count += 1
+        return count
 
     @staticmethod
     def select_evidence_resources(question):
@@ -209,6 +277,10 @@ class Recovery:
                           incident_key, cause_code, task_id, run_id))
             conn.execute('INSERT INTO recovery_transitions(case_id,from_state,to_state,detail,created_at) VALUES (?,?,?,?,?)',
                          (case_id, None, 'RECEIVED', json.dumps({'requested_by': str(requested_by), 'incident_key': incident_key, 'cause': cause_code}), now))
+            self.journal.start('repair', case_id, source=str(requested_by), refs={
+                'case_id': case_id, 'task_id': task_id, 'execution_id': run_id,
+                'goal_revision': task.get('goal_revision', 0) if isinstance(task, dict) else 0,
+                'attempt_number': task.get('attempt_number', 1) if isinstance(task, dict) else 1}, conn=conn)
 
         self._move(case_id, 'COLLECTING_EVIDENCE', expected={'RECEIVED'})
         try:
@@ -217,39 +289,92 @@ class Recovery:
                 needed.append('brain')
             evidence = self.senses.evidence('Heart ' + case_id + ': ' + str(question)[:200], 'before', resources=needed)
         except Exception as exc:
-            return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__)
+            return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__,
+                              detail={'error_type': type(exc).__name__})
 
         if isinstance(failure_info, dict) and failure_info.get('diagnostic'):
             reference = failure_info['diagnostic'].get('id')
             candidates = (evidence.get('brain') or {}).get('model_rejections', [])
             evidence['model_rejection'] = next((e for e in candidates if e.get('id') == reference
-                                                and e.get('task_id') == task_id), None)
-        diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail, 'task_id': task_id, 'task': task if isinstance(task, dict) else None})
-        case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, evidence=evidence, diagnosis=diagnosis)
-        plan = self.design(case_id, diagnosis)
+                                                and e.get('task_id') == task_id
+                                                and e.get('goal_revision', 0) ==
+                                                    (task.get('goal_revision', 0) if isinstance(task, dict) else 0)), None)
+            if evidence['model_rejection'] is None:
+                lookup = getattr(self.senses, 'model_rejection', None)
+                if callable(lookup):
+                    revision = task.get('goal_revision', 0) if isinstance(task, dict) else 0
+                    try:
+                        exact = lookup(reference, task_id, revision)
+                    except Exception:
+                        exact = None
+                    if (isinstance(exact, dict) and exact.get('id') == reference
+                            and exact.get('task_id') == task_id
+                            and exact.get('goal_revision', 0) == revision):
+                        evidence['model_rejection'] = exact
+            # Recent observations are an index, not evidence from this branch.
+            if isinstance(evidence.get('brain'), dict):
+                evidence['brain']['model_rejections'] = ([evidence['model_rejection']]
+                    if evidence['model_rejection'] is not None else [])
+        self._scoped_journal(evidence, task)
+        # Evidence is durable before the potentially slow diagnosis/model call.
+        self._move(case_id, 'COLLECTING_EVIDENCE', expected={'COLLECTING_EVIDENCE'}, evidence=evidence)
+        try:
+            with self.journal.activate(Journal.cycle_id('repair', case_id)):
+                diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail, 'task_id': task_id, 'task': task if isinstance(task, dict) else None})
+                case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, diagnosis=diagnosis)
+                plan = self.design(case_id, diagnosis)
+        except Exception as exc:
+            return self._diagnosis_failure(case_id, exc)
         if not plan:
-            return case
+            return self._finish_diagnosis(case)
         return self._move(case_id, 'SOLUTION_PROPOSED', expected={'DIAGNOSED'}, plan=plan,
                           plan_hash=plan_hash(case_id, plan))
 
-    def open_case(self, question, requested_by):
+    def open_case(self, question, requested_by, *, propose=True, kind='repair'):
+        if kind not in {'repair', 'pixy_report'}:
+            raise ValueError('Tipo de caso inválido')
         case_id = 'case-' + time.strftime('%Y%m%d') + uuid.uuid4().hex[:8]
         now = time.time()
         with connection(self.path) as conn:
-            conn.execute('''INSERT INTO recovery_cases(case_id,question,requested_by,state,created_at,updated_at)
-                            VALUES (?,?,?,?,?,?)''', (case_id, str(question)[:2000], str(requested_by), 'RECEIVED', now, now))
+            conn.execute('''INSERT INTO recovery_cases(case_id,question,requested_by,state,created_at,updated_at,case_kind)
+                            VALUES (?,?,?,?,?,?,?)''', (case_id, str(question)[:2000], str(requested_by), 'RECEIVED', now, now, kind))
             conn.execute('INSERT INTO recovery_transitions(case_id,from_state,to_state,detail,created_at) VALUES (?,?,?,?,?)',
                          (case_id, None, 'RECEIVED', json.dumps({'requested_by': str(requested_by)}), now))
+            self.journal.start(kind, case_id, source=str(requested_by), refs={'case_id': case_id}, conn=conn)
         self._move(case_id, 'COLLECTING_EVIDENCE', expected={'RECEIVED'})
         try:
             needed = self.select_evidence_resources(question)
             evidence = self.senses.evidence('Heart ' + case_id + ': ' + str(question)[:200], 'before', resources=needed)
         except Exception as exc:
-            return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__)
+            return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__,
+                              detail={'error_type': type(exc).__name__})
         tasks = (evidence.get('pixy') or {}).get('recent_tasks') or evidence.get('tasks') or []
         requested_ids = re.findall(r'\btask_[a-f0-9]{32}\b', str(question))
-        if requested_ids:
+        requested_cases = re.findall(r'\bcase-[a-zA-Z0-9_-]+\b', str(question))
+        requested_runs = re.findall(r'\brun_[a-f0-9]{32}\b', str(question))
+        requested_traces = re.findall(r'\b(?:req_|req-|trace-|tr-)[a-zA-Z0-9_-]+\b', str(question))
+        referenced = None
+        if requested_cases:
+            try:
+                referenced = self.get(requested_cases[0])
+            except KeyError:
+                evidence['reference_unobserved'] = True
+            if referenced:
+                evidence['referenced_case'] = referenced
+                requested_ids = [referenced['task_id']] if referenced.get('task_id') else []
+                candidates = [t for t in tasks if t.get('id') in requested_ids]
+                if not candidates:
+                    observed = (referenced.get('diagnosis') or {}).get('observed_task')
+                    candidates = [observed] if isinstance(observed, dict) else []
+                evidence['journal'] = self.journal.tree(Journal.cycle_id(referenced['case_kind'], referenced['case_id']))
+            else:
+                candidates = []
+        elif requested_ids:
             candidates = [task for task in tasks if task.get('id') in requested_ids]
+        elif requested_runs:
+            candidates = [task for task in tasks if task.get('execution_id') in requested_runs]
+        elif requested_traces:
+            candidates = [task for task in tasks if task.get('trace_id') in requested_traces]
         elif re.search(r'\b(?:modelo|modelos|modo|modos|conexi[oó]n|transici[oó]n|brain)\b', question, re.IGNORECASE):
             candidates = []
             evidence['incident_scope'] = 'model_transition'
@@ -263,11 +388,28 @@ class Recovery:
         else:
             candidates = []
         evidence['focus_task'] = max(candidates, key=lambda task: task.get('created_at') or 0) if candidates else None
-        diagnosis = self.diagnose(evidence)
-        case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, evidence=evidence, diagnosis=diagnosis)
-        plan = self.design(case_id, diagnosis)
+        focus = evidence['focus_task'] or {}
+        self._scoped_journal(evidence, focus)
+        self._move(case_id, 'COLLECTING_EVIDENCE', expected={'COLLECTING_EVIDENCE'}, evidence=evidence,
+                   task_id=focus.get('id'), run_id=focus.get('execution_id'))
+        try:
+            with self.journal.activate(Journal.cycle_id(kind, case_id)):
+                if referenced and not propose:
+                    diagnosis = referenced.get('diagnosis') or {'status': 'unknown', 'findings': [{
+                        'code': 'evidence_unavailable', 'severity': 'warning', 'remedy': None,
+                        'detail': 'El caso referido no terminó su diagnóstico; estado: ' + referenced['state']}]}
+                elif evidence.get('reference_unobserved') or ((requested_ids or requested_runs or requested_traces) and not candidates):
+                    diagnosis = {'status': 'unknown', 'findings': [{
+                        'code': 'reference_unobserved', 'severity': 'warning', 'remedy': None,
+                        'detail': 'No se encontró evidencia vinculada al identificador solicitado.'}]}
+                else:
+                    diagnosis = self.diagnose(evidence)
+                case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, diagnosis=diagnosis)
+                plan = self.design(case_id, diagnosis) if propose else None
+        except Exception as exc:
+            return self._diagnosis_failure(case_id, exc)
         if not plan:
-            return case  # DIAGNOSED is terminal when no automated, safe plan exists.
+            return self._finish_diagnosis(case)
         return self._move(case_id, 'SOLUTION_PROPOSED', expected={'DIAGNOSED'}, plan=plan,
                           plan_hash=plan_hash(case_id, plan))
 
@@ -350,6 +492,29 @@ class Recovery:
     def diagnose(self, evidence, failure_override=None):
         findings = []
         from app.heart.catalog import task_binding
+        rejection = evidence.get('model_rejection')
+        target = (failure_override or {}).get('task') or evidence.get('focus_task') or {}
+        failure = target.get('result') or {}
+        if failure.get('stage') == 'routing' and failure.get('diagnostic') and not rejection:
+            return {'status': 'unknown', 'findings': [{
+                'code': 'model_rejection_unobserved', 'severity': 'warning', 'remedy': None,
+                'detail': 'El rechazo de Brain está referenciado pero no se recuperó su evidencia exacta; '
+                          'no es seguro atribuir otra causa ni repetir la solicitud.'}],
+                'observed_task': target, 'task_binding': task_binding(target)}
+        if isinstance(rejection, dict) and rejection.get('id'):
+            # A rejected Brain contract is observed evidence, not a network
+            # hypothesis. Historical timeouts cannot justify replay or repair.
+            task = (failure_override or {}).get('task') or evidence.get('focus_task')
+            locations = [str(e.get('loc')) for e in rejection.get('errors', [])[:8]
+                         if isinstance(e, dict)]
+            return {'status': 'degraded', 'findings': [{
+                'code': 'invalid_result', 'severity': 'high', 'remedy': None,
+                'detail': ('Brain devolvió una respuesta incompatible con el contrato '
+                           + str(rejection.get('contract', 'AssistantTurn')) + '. Campos rechazados: '
+                           + ', '.join(locations) + '. Se requiere corregir y validar la integración '
+                           'antes de repetir; no hay evidencia de fallo de red en esta rama.'),
+                'evidence_id': rejection['id']}],
+                'observed_task': task, 'task_binding': task_binding(task)}
         def add(code, severity, detail, remedy=None, corrective_instruction=None, steps=None, task_binding_info=None):
             item = {'code': code, 'severity': severity, 'detail': detail, 'remedy': remedy}
             if corrective_instruction:
@@ -629,6 +794,13 @@ class Recovery:
 
     def advance(self, case_id):
         case = self.get(case_id)
+        cycle = self.journal.start(case['case_kind'], case_id,
+                                  refs={'case_id': case_id, 'task_id': case.get('task_id')})
+        with self.journal.activate(cycle):
+            return self._advance(case_id)
+
+    def _advance(self, case_id):
+        case = self.get(case_id)
         state = case['state']
         if state == 'AUTHORIZED':
             # Verificación explícita de la autorización de Pixy antes de ordenar a Hand
@@ -844,10 +1016,15 @@ class Recovery:
         for case_id in active:
             try:
                 self.advance(case_id)
-            except (ConnectionError, OSError, TimeoutError):
+            except (ConnectionError, OSError, TimeoutError) as exc:
+                case = self.get(case_id)
+                self.journal.event(Journal.cycle_id(case['case_kind'], case_id), 'transport_interrupted',
+                                   status='unknown', data={'error_type': type(exc).__name__})
                 continue  # Transport uncertainty: keep state and retry; never replay a side effect.
-            except Exception:
-                logger.exception('Heart no pudo avanzar el caso %s; se reintenta', case_id)
+            except Exception as exc:
+                logger.exception('Heart no pudo avanzar el caso %s', case_id)
+                self._move(case_id, 'FAILED', error='Reparación interrumpida: ' + type(exc).__name__,
+                           detail={'error_type': type(exc).__name__})
         with connection(self.path) as conn:
             ids = [r[0] for r in conn.execute(
                 'SELECT case_id FROM recovery_cases WHERE reported_at IS NULL AND state IN ("RECOVERED","FAILED","UNKNOWN","DENIED") '

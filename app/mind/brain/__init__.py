@@ -1,4 +1,6 @@
 """Brain module: reasoning facade, inference cascade and model/VM coordination."""
+import uuid
+import time
 from app.mind.brain.controller import (
     ModelController,
     DolphinController,
@@ -21,10 +23,39 @@ class Brain:
         self.controller = controller or getattr(gateway, 'dolphin', None)
 
     def generate_content(self, prompt, **kwargs):
-        return self._gateway.generate_content(prompt, **kwargs)
+        return self._infer('generate_content', lambda: self._gateway.generate_content(prompt, **kwargs))
 
     def complete(self, messages, tools=None, **kwargs):
-        return self._gateway.complete(messages, tools or [], **kwargs)
+        return self._infer('complete', lambda: self._gateway.complete(messages, tools or [], **kwargs))
+
+    def _infer(self, operation, call):
+        from app.kernel.journal import Journal
+        from app.pixy.budget import current_goal_revision
+        journal = getattr(self._gateway, 'journal', None)
+        if not isinstance(journal, Journal):
+            return call()
+        goal = current_goal_revision.get()
+        refs = {'operation': operation}
+        if self.controller is not None:
+            profile = self.controller.get_active_mode()
+            if isinstance(profile, str):
+                refs['profile'] = profile
+        if goal:
+            refs.update(task_id=goal[0], goal_revision=goal[1])
+        with journal.scope('model_call', uuid.uuid4().hex, refs=refs) as cycle:
+            started = time.monotonic()
+            result = call()
+            meta = getattr(self._gateway, '_response_meta', None)
+            technical = {'elapsed_seconds': time.monotonic() - started}
+            if meta is not None:
+                technical.update({key: value for key, value in meta.get().items()
+                                  if key in {'model', 'provider'} and isinstance(value, str)})
+                meta.set({**meta.get(), 'cycle_id': cycle})
+            if isinstance(result, dict):
+                technical.update({key: value for key, value in result.items()
+                                  if key in {'model', 'provider'} and isinstance(value, str)})
+            journal.event(cycle, 'inference_returned', data=technical)
+            return result
 
     def web_search(self, query, **kwargs):
         return self._gateway.web_search(query, **kwargs)
@@ -37,6 +68,9 @@ class Brain:
 
     def diagnostic_snapshot(self):
         return self._gateway.diagnostic_snapshot()
+
+    def contract_rejection(self, reference):
+        return self._gateway.contract_rejection(reference)
 
     def test_all_connections(self):
         return self._gateway.test_all_connections()

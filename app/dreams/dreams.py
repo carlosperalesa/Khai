@@ -38,7 +38,7 @@ class Dreams:
         tid = task.get('id')
         if run and isinstance(success, bool) and self.memory and hasattr(self.memory, 'record_episode'):
             self.memory.record_episode(
-                tid, task.get('agent_run_id'), task.get('request', ''),
+                tid, run, task.get('request', ''),
                 'success' if success else 'failure', 'execution',
                 ('Ejecucion verificada correctamente' if success
                  else 'Ejecucion verificada con fallo'), evidence)

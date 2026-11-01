@@ -134,6 +134,7 @@ class Coordinator:
         if not isinstance(session_db, (str, Path)):
             session_db = ':memory:' 
         self.conversations = ConversationStore(session_db)
+        self.journal = self.conversations.journal
         mailbox = getattr(manager, 'voice_mailbox', None)
         if mailbox is not None:
             mailbox.on_delivered = self._notification_delivered
@@ -158,7 +159,16 @@ class Coordinator:
                    else context.get('task_id'))
         task = self.store.get(task_id) if task_id else None
         sid = (task or {}).get('conversation_id') or context.get('conversation_id')
-        metadata = {'conversation_id': sid, 'task_id': task_id}
+        metadata = {'conversation_id': sid, 'task_id': task_id,
+                    'execution_id': (task or {}).get('execution_id'),
+                    'trace_id': (task or {}).get('trace_id') or context.get('trace_id') or get_trace_id(),
+                    'source': context.get('source') or (task or {}).get('source'),
+                    'cycle_id': self.journal.current()}
+        if not metadata['cycle_id'] and task:
+            attempt = f"{task_id}:{task.get('attempt_number', 1)}:{task.get('goal_revision', 0)}"
+            candidate = self.journal.cycle_id('task_attempt', attempt)
+            if self.journal.get(candidate):
+                metadata['cycle_id'] = candidate
         if buttons:
             metadata['buttons'] = buttons
         th_id = message_thread_id or context.get('thread_id') or context.get('message_thread_id')
@@ -296,6 +306,12 @@ class Coordinator:
                 pass
         except (requests.RequestException, ConnectionError) as exc:
             self.store.event(task['id'], 'transport_error', {'type': type(exc).__name__})
+            current = self.store.get(task['id'])
+            if not current.get('execution_id') and current['state'] not in TERMINAL:
+                failure = {'status': 'failed', 'stage': current['state'].lower(),
+                           'dispatched': False, 'error': type(exc).__name__}
+                self.store.update(task['id'], expected={current['state']}, state='DIAGNOSING',
+                                  result=failure, feedback=failure)
         except Exception as exc:
             current = self.store.get(task['id'])
             if (current['state'] not in {'CANCELLED', 'CANCELLING'}
@@ -1550,8 +1566,17 @@ class Coordinator:
         trace = task.get('trace_id') or tid
         token = current_goal_revision.set((tid, task.get('goal_revision', 0)))
         try:
-            with trace_scope(trace):
-                self._advance_scoped(task)
+            attempt = f"{tid}:{task.get('attempt_number', 1)}:{task.get('goal_revision', 0)}"
+            cid = self.journal.cycle_id('task_attempt', attempt)
+            if not self.journal.get(cid):
+                self.store.ensure_journal(task)
+            with trace_scope(trace), self.journal.activate(cid):
+                try:
+                    self._advance_scoped(task)
+                except Exception as exc:
+                    self.journal.event(cid, 'step_error', data={'error_type': type(exc).__name__,
+                                                              'phase': state})
+                    raise
         finally:
             current_goal_revision.reset(token)
 
@@ -1814,7 +1839,7 @@ class Coordinator:
                 planner = getattr(self.manager, 'action_planner', None)
                 if planner is not None:
                     proposal = planner.propose(intent.get('extracted_goal') or request, lambda spec:
-                        spec['runtime'] != 'AGENT' and not spec['dependencies']
+                        spec['runtime'] != 'AGENT'
                         and self._services_available(spec['services']),
                         correction_context=task.get('effect_constraints'),
                         conversation_context=(history if history is not None else self.manager.memory.get_chat_history(limit=12)),
@@ -1895,7 +1920,7 @@ class Coordinator:
                         return
                 selected = selector.select(request, lambda spec:
                     spec['runtime'] in {'SAFE', 'AGENT', 'GOD'}
-                    and not spec['dependencies'] and self._services_available(spec['services']),
+                    and self._services_available(spec['services']),
                     capability=capability, provider=provider)
                 if selected is not None:
                     version = self.manager.hand.version(selected['version_id'])
@@ -1992,7 +2017,7 @@ class Coordinator:
                                                        {'feedback': task.get('feedback')})
                     failures = task.get('hand_failures', 0) + 1
                     self.store.update(tid, expected={'GENERATING'},
-                                      state='DIAGNOSING' if failures >= 2 else 'GENERATING',
+                                      state='DIAGNOSING',
                                       feedback={'error': str(exc), 'stage': 'service_research',
                                                 'agent_run_id': run_id},
                                       agent_run_id=run_id, hand_failures=failures)
@@ -2056,7 +2081,7 @@ class Coordinator:
                                                    {'feedback': task.get('feedback')})
                 failures = task.get('hand_failures', 0) + 1
                 self.store.update(tid, expected={'GENERATING'},
-                                  state='DIAGNOSING' if failures >= 2 else 'GENERATING',
+                                  state='DIAGNOSING',
                                   feedback={'error': str(exc), 'stage': 'skill_generation',
                                             'agent_run_id': run_id},
                                   agent_run_id=run_id, hand_failures=failures)

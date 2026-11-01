@@ -7,6 +7,7 @@ import re
 import time
 
 from app.kernel.database import connection, migrate
+from app.kernel.journal import Journal
 
 
 current_turn = ContextVar('khai_conversation_turn', default=None)
@@ -22,6 +23,7 @@ class ReplyResult:
 class ConversationStore:
     def __init__(self, path):
         self.path = path
+        self.journal = Journal(path)
         migrate(path, [
             [
                 '''CREATE TABLE IF NOT EXISTS conversations(
@@ -116,6 +118,7 @@ class ConversationStore:
         sid = self.session(owner_id, chat_id, thread_id=thread_id)
         with connection(self.path) as conn:
             conn.execute('BEGIN IMMEDIATE')
+            self.journal.start('interaction', source, trace_id=trace_id, source=source, conn=conn)
             conn.execute('INSERT OR IGNORE INTO conversation_turns VALUES (?,?,?,?,?,NULL,?,NULL)',
                          (source, sid, trace_id, message_id, reply_to, 'pending'))
             row = conn.execute(
@@ -361,11 +364,30 @@ class ConversationStore:
             conn.execute('UPDATE conversation_turns SET task_id=?,status=? WHERE source=?',
                          (task_id, 'routed', source))
             conn.execute('UPDATE conversation_messages SET task_id=? WHERE source=?', (task_id, source))
+            interaction = self.journal.cycle_id('interaction', source)
+            task = self.journal.cycle_id('task', task_id)
+            if self.journal.get(interaction, conn=conn) and self.journal.get(task, conn=conn):
+                self.journal.link(interaction, task, 'routes_to', conn=conn)
+                self.journal.event(interaction, 'routed', data={'task_id': task_id}, conn=conn)
 
     def complete(self, source, receipt):
         with connection(self.path) as conn:
             conn.execute('UPDATE conversation_turns SET status=?,receipt=? WHERE source=?',
                          ('completed', json.dumps(receipt, ensure_ascii=False), source))
+            cid = self.journal.cycle_id('interaction', source)
+            if self.journal.get(cid, conn=conn):
+                # This closes ingress handling, not a still-running task or its delivery.
+                self.journal.event(cid, 'conversation_resolved', conn=conn)
+            row = conn.execute('SELECT task_id FROM conversation_turns WHERE source=?', (source,)).fetchone()
+            if row and row['task_id']:
+                siblings = conn.execute("SELECT source FROM conversation_turns WHERE task_id=? AND status='routed'",
+                                        (row['task_id'],)).fetchall()
+                for sibling in siblings:
+                    conn.execute("UPDATE conversation_turns SET status='completed',receipt=? WHERE source=?",
+                                 (json.dumps(receipt, ensure_ascii=False), sibling['source']))
+                    branch = self.journal.cycle_id('interaction', sibling['source'])
+                    if self.journal.get(branch, conn=conn):
+                        self.journal.event(branch, 'coalesced_conversation_resolved', conn=conn)
 
     def record_call(self, source, call):
         call_id = 'call_' + hashlib.sha256(source.encode()).hexdigest()[:32]
@@ -400,6 +422,14 @@ class ConversationStore:
                          '(id,conversation_id,kind,subject_id,revision,state,status,created_at) '
                          'VALUES (?,?,?,?,?,?,?,?)',
                          (qid, sid, kind, subject_id, revision, state, 'queued', time.time()))
+            parent = None
+            for domain in ('authorization', 'task'):
+                candidate = self.journal.cycle_id(domain, subject_id)
+                if self.journal.get(candidate, conn=conn):
+                    parent = candidate
+                    break
+            cid = self.journal.start('question', qid, parent_id=parent, refs={'question_id': qid}, conn=conn)
+            self.journal.event(cid, 'decision_queued', status='waiting', conn=conn)
         return qid
 
     def attach(self, question_id, delivery_id):
@@ -460,7 +490,16 @@ class ConversationStore:
         with connection(self.path) as conn:
             conn.execute("UPDATE conversation_questions SET status='answered',answered_by=? "
                          "WHERE id=? AND status='open'", (source, qid))
+            cid = self.journal.cycle_id('question', qid)
+            if self.journal.get(cid, conn=conn):
+                self.journal.finish(cid, phase='answered', conn=conn)
+                incoming = self.journal.cycle_id('interaction', source)
+                if self.journal.get(incoming, conn=conn):
+                    self.journal.link(incoming, cid, 'answers', conn=conn)
 
     def stale(self, qid):
         with connection(self.path) as conn:
             conn.execute("UPDATE conversation_questions SET status='stale' WHERE id=? AND status='open'", (qid,))
+            cid = self.journal.cycle_id('question', qid)
+            if self.journal.get(cid, conn=conn):
+                self.journal.finish(cid, 'cancelled', phase='superseded', conn=conn)

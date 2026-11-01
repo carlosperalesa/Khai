@@ -22,6 +22,21 @@ from unittest.mock import patch
 
 
 class ConversationFlowTests(Fixture):
+    def test_pre_dispatch_transport_timeout_stops_generation_for_heart_diagnosis(self):
+        import requests
+        task = self.store.create('fixture:pre-dispatch-timeout', 'Create fixture capability',
+                                 state='GENERATING', kind='objective')
+        self.c._advance_scoped = Mock(side_effect=requests.ReadTimeout('fixture timeout'))
+        self.c._run_task(task)
+        failed = self.store.get(task['id'])
+        self.assertEqual(failed['state'], 'DIAGNOSING')
+        self.assertEqual(failed['result']['error'], 'ReadTimeout')
+        self.assertFalse(failed['result']['dispatched'])
+        branch = self.c.journal.find(task['id'])[0]
+        errors = [e for e in self.c.journal.tree(branch['cycle_id'])['events'] if e['phase'] == 'step_error']
+        self.assertEqual(errors[0]['data']['error_type'], 'ReadTimeout')
+        self.c._advance_scoped.assert_called_once()
+
     def test_slow_heart_diagnosis_does_not_race_a_second_task_owner(self):
         entered, release=threading.Event(),threading.Event()
         recovery=Mock()
@@ -168,6 +183,8 @@ class ConversationFlowTests(Fixture):
         recovery.get.side_effect = lambda _: dict(case)
         recovery.await_approval.side_effect = lambda *_: case.update(state='WAITING_USER_APPROVAL')
         task = self.goal('DIAGNOSING', recovery_case_id=case['case_id'])
+        recovery.journal = self.c.journal
+        recovery.journal.start('repair', case['case_id'], refs={'task_id': task['id']})
         self.c.advance(task)
         self.c._mailbox_job.result(timeout=5)
         self.c.advance(self.store.get(task['id']))

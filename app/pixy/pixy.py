@@ -8,6 +8,7 @@ import yaml
 import time
 import uuid
 from app.kernel.database import connection, migrate
+from app.kernel.journal import Journal
 from app.pixy.skill_approvals import SkillApprovalStore
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,9 @@ class PixyMind:
         self.llm, self.telegram = manager.llm, manager.telegram
         self.audit_db = getattr(manager, 'audit_db', None)
         approval_db = self.audit_db or getattr(getattr(manager, 'state', None), 'db_path', None)
+        self.journal = getattr(manager, 'journal', None)
+        if not isinstance(self.journal, Journal):
+            self.journal = Journal(approval_db) if approval_db else None
         self.skill_approvals = SkillApprovalStore(approval_db) if approval_db else None
         self.authorizations = getattr(manager, 'pixy_control', None) or getattr(manager, 'authorizations', None)
         if self.authorizations is None and self.audit_db:
@@ -30,12 +34,17 @@ class PixyMind:
                 'CREATE TABLE IF NOT EXISTS pixy_audits(audit_id TEXT PRIMARY KEY, kind TEXT, artifact_hash TEXT, safe INTEGER, reason TEXT, created_at REAL)',
             ]], component='pixy-audits')
 
-    def _audit(self, kind, result, artifact_hash=''):
+    def _audit(self, kind, result, artifact_hash='', cycle_id=None):
         result = dict(result, audit_id=uuid.uuid4().hex)
         if self.audit_db:
             with connection(self.audit_db) as conn:
                 conn.execute('INSERT INTO pixy_audits VALUES (?,?,?,?,?,?)',
                     (result['audit_id'],kind,artifact_hash,int(result['safe']),result.get('reason',''),time.time()))
+                if self.journal:
+                    cycle = cycle_id or self.journal.start('pixy_review', result['audit_id'],
+                        refs={'evidence_id': result['audit_id'], 'operation': kind}, conn=conn)
+                    self.journal.finish(cycle, 'completed' if result['safe'] else 'rejected',
+                        phase='reviewed', data={'evidence_id': result['audit_id'], 'operation': kind}, conn=conn)
         return result
 
     def preflight(self, manifest):
@@ -143,6 +152,16 @@ class PixyMind:
             return {'safe': False, 'reason': str(exc)}
 
     def review(self, code, manifest, context=None):
+        if not self.journal:
+            return self._review(code, manifest, context)
+        refs = {'operation': 'review'}
+        for key in ('task_id', 'execution_id', 'goal_revision', 'attempt_number', 'version_id'):
+            if isinstance(context, dict) and context.get(key) is not None:
+                refs[key] = context[key]
+        with self.journal.scope('pixy_review', uuid.uuid4().hex, refs=refs) as cycle:
+            return self._audit('review', self._review(code, manifest, context), cycle_id=cycle)
+
+    def _review(self, code, manifest, context=None):
         result = self._analyze_code_ast(code, manifest)
         if not result['safe']:
             return result
@@ -177,6 +196,15 @@ class PixyMind:
         return self.direct_response(message)
 
     def _conversational_governance(self, request, source):
+        if self.journal and (request.lower().startswith('service ')
+                             or re.search(r'\b(?:rule_[a-zA-Z0-9_-]+|[a-f0-9]{64})\b', request)
+                             or any(w in request.lower() for w in ('regla', 'descriptor', 'servicio'))):
+            with self.journal.scope('pixy_governance', uuid.uuid4().hex, source=source,
+                                    refs={'operation': 'interpret_governance'}):
+                return self._conversational_governance_impl(request, source)
+        return self._conversational_governance_impl(request, source)
+
+    def _conversational_governance_impl(self, request, source):
         """Permite gestionar reglas y descriptores de servicio conversando con Pixy."""
         lower = request.lower().strip()
         service_command = request.split()
@@ -269,6 +297,13 @@ class PixyMind:
         return candidates[-1] if candidates else None
 
     def _apply_governance(self, action, target_id, source):
+        if self.journal:
+            with self.journal.scope('pixy_governance', uuid.uuid4().hex, source=source,
+                                    refs={'operation': action, 'evidence_id': target_id}):
+                return self._apply_governance_impl(action, target_id, source)
+        return self._apply_governance_impl(action, target_id, source)
+
+    def _apply_governance_impl(self, action, target_id, source):
         c = getattr(self.manager, 'coordinator', None)
         if action in {'APPROVE_RULE', 'ROLLBACK_RULE'}:
             statuses = {'proposed'} if action == 'APPROVE_RULE' else {'active'}
@@ -312,16 +347,16 @@ class PixyMind:
         cases_summary = "Sin casos de recuperación recientes."
         if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
             try:
-                cases = self.manager.heart.recovery.all_cases()[-3:]
+                cases = self.manager.heart.recovery.recent(3)
                 if cases:
                     cases_summary = "\n".join(
                         f"- {cs['case_id']}: estado={cs['state']}, solicitud=\"{cs.get('request', '')[:60]}\", "
                         f"hallazgos={json.dumps((cs.get('diagnosis') or {}).get('findings', []), ensure_ascii=False)}, "
                         f"plan={json.dumps(cs.get('plan'), ensure_ascii=False)}, error={cs.get('error') or 'ninguno'}"
-                        for cs in reversed(cases)
+                        for cs in cases
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                cases_summary = 'No se pudieron consultar los casos: ' + type(exc).__name__
 
         rules_summary = "\n".join(
             f"- {r['rule_id']} [{r['status']}]: {r['content']}"
@@ -335,6 +370,13 @@ class PixyMind:
         return tasks_summary, cases_summary, rules_summary, services_summary
 
     def direct_response(self, message, source='telegram'):
+        if self.journal:
+            object_id = source if source != 'telegram' else uuid.uuid4().hex
+            with self.journal.scope('pixy_request', object_id, source=source):
+                return self._direct_response(message, source)
+        return self._direct_response(message, source)
+
+    def _direct_response(self, message, source='telegram'):
         request = message.strip()
         if not request:
             return 'Pixy directa. Usa `/p diagnóstico`, `/p explica el último error` o `/p ayuda`.'
@@ -434,7 +476,7 @@ class PixyMind:
         lowered = request.lower().strip()
         if any(term in lowered for term in (
                 'diagn', 'estado', 'error', 'log', 'salud', 'health', 'status',
-                'recuper', 'fallo', 'falló', 'tarea', 'task', 'repar', 'solucion', 'arregl', 'heart')):
+                'informe', 'report', 'recuper', 'fallo', 'falló', 'tarea', 'task', 'repar', 'solucion', 'arregl', 'heart')):
             return self.diagnose(request, source=source)
 
         tasks_summary, cases_summary, rules_summary, services_summary = self._recent_context_summary()
@@ -498,9 +540,11 @@ class PixyMind:
         findings = (case.get('diagnosis') or {}).get('findings') or []
         if findings:
             f0 = findings[0]
-            detail = f"{f0.get('kind', 'fallo')}: {f0.get('detail', 'sin detalle')}"
+            detail = f"{f0.get('code') or f0.get('kind', 'fallo')}: {f0.get('detail', 'sin detalle')}"
         else:
-            detail = "No se detectaron anomalías activas."
+            detail = ("No fue posible completar la evaluación: " + str(case.get('error') or case['state'])
+                      if case.get('state') in {'FAILED', 'UNKNOWN'} else
+                      "No se detectaron anomalías activas en la evidencia disponible.")
         lines = [detail]
         task = (case.get('diagnosis') or {}).get('task')
         if task:
@@ -516,15 +560,28 @@ class PixyMind:
         plan = case['plan']
         if not self.authorizations or case['state'] != 'SOLUTION_PROPOSED':
             raise ValueError('No hay una propuesta de Heart disponible para aprobar')
-        auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'],
-                                         case['plan_hash'], requested_by=source)
-        self.manager.heart.recovery.await_approval(case['case_id'], auth)
+        recovery = self.manager.heart.recovery
+        with recovery.journal.activate(Journal.cycle_id('repair', case['case_id'])):
+            auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'],
+                                             case['plan_hash'], requested_by=source)
+            recovery.await_approval(case['case_id'], auth)
         return auth
 
     def diagnose(self, request, source='telegram'):
+        # Reports may inspect incidents; only an explicit repair instruction
+        # can create a plan and ask Pixy for authority.
+        repair = bool(re.search(r'\b(?:repara\w*|arregl\w*|soluciona\w*|remedia\w*|repair|fix)\b',
+                                request, re.IGNORECASE))
+        reference = re.search(r'\b(?:cycle_|task_|run_|auth_|order_|req_|req-|trace-|tr-|case-)[a-zA-Z0-9_-]+\b'
+                              r'|\btelegram:[0-9]+\b', request)
+        if reference and not repair and self.journal:
+            return self._journal_report(reference.group(0), source)
         if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
-            case = self.manager.heart.recovery.open_case(request, requested_by=source)
+            case = self.manager.heart.recovery.open_case(request, requested_by=source,
+                        propose=repair, kind='repair' if repair else 'pixy_report')
             plan = case.get('plan')
+            if case.get('state') in {'FAILED', 'UNKNOWN'}:
+                return self._fallback_diagnosis_text(case, None, None)
             if (case.get('diagnosis') or {}).get('status') == 'unknown' and not plan:
                 return self._fallback_diagnosis_text(case, None, None)
             auth = None
@@ -560,6 +617,10 @@ class PixyMind:
                 'Solo describe como propuesta autorizable el plan concreto de Heart; '
                 'si no hay plan, no solicites aprobación ni anuncies remediaciones.'
             )
+            if not repair:
+                # An explanatory model cannot smuggle a proposal/approval into
+                # a report. The report is derived solely from stored evidence.
+                return self._fallback_diagnosis_text(case, None, None)
             try:
                 raw = self.llm.generate_content(prompt, response_format=None)
                 explanation = str(raw).strip()
@@ -570,6 +631,37 @@ class PixyMind:
                 explanation += '\n\napruebas: y/n'
             return explanation
         return 'Servicio médico de Heart no disponible. Pixy no genera diagnósticos clínicos independientes.'
+
+    def _journal_report(self, reference, source):
+        """A query is its own branch; it never grants authority or launches repair."""
+        found = self.journal.find(reference, limit=100)
+        with self.journal.scope('pixy_report', uuid.uuid4().hex, source=source,
+                                refs={'evidence_id': reference}) as report_id:
+            if not found:
+                self.journal.event(report_id, 'reference_unobserved', data={'reason_code': 'reference_unobserved'})
+                return 'No hay registros del diario vinculados a ' + reference + '. Informe: ' + report_id
+            ids = {record['cycle_id'] for record in found}
+            roots = [r for r in found if r['parent_id'] not in ids]
+            cycles, events, truncated = {}, {}, len(found) >= 100
+            for record in roots:
+                self.journal.link(report_id, record['cycle_id'], 'reports_on')
+                tree = self.journal.tree(record['cycle_id'])
+                cycles.update((row['cycle_id'], row) for row in tree['cycles'])
+                events.update((row['event_id'], row) for row in tree['events'])
+                truncated = truncated or tree['truncated']
+            lines = ['Informe del diario para ' + reference + ':',
+                     f'{len(cycles)} ramas, {len(events)} eventos. Informe: {report_id}']
+            latest = {row['cycle_id']: row for row in sorted(events.values(), key=lambda e: e['sequence'])}
+            for row in sorted(cycles.values(), key=lambda r: r['started_at'])[:15]:
+                last = latest.get(row['cycle_id']) or {}
+                detail = last.get('phase', '')
+                error = (last.get('data') or {}).get('error_type')
+                if error:
+                    detail += ': ' + str(error)
+                lines.append(f"- {row['kind']} {row['object_id']}: {row['status']}; {detail} ({row['cycle_id']}).")
+            if truncated or len(cycles) > 15:
+                lines.append('Vista acotada; consulta el ID de una rama para ver su detalle.')
+            return '\n'.join(lines)
 
     def trigger_panic_mode(self, reason):
         coordinator = getattr(self.manager, 'coordinator', None)

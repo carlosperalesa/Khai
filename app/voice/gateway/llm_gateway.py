@@ -30,7 +30,9 @@ class LLMManager:
         self.provider_db = provider_db
         self.dolphin = dolphin
         from app.voice.model_diagnostics import ModelDiagnostics
+        from app.kernel.journal import Journal
         self.model_diagnostics = ModelDiagnostics(provider_db or os.path.join(data_dir, 'model-diagnostics.sqlite3'), secrets)
+        self.journal = Journal(provider_db or os.path.join(data_dir, 'model-diagnostics.sqlite3'))
         self._response_meta = ContextVar('model_response_metadata', default={})
         if provider_db:
             from app.kernel.database import connection
@@ -72,7 +74,16 @@ class LLMManager:
             logger.warning("No se encontraron API keys en el entorno (Gemini, Azure, OpenAI).")
 
     def record_contract_failure(self, contract, raw, errors, schema):
-        return self.model_diagnostics.record(contract, raw, errors, schema, self._response_meta.get())
+        context = self._response_meta.get()
+        reference = self.model_diagnostics.record(contract, raw, errors, schema, context)
+        parent = context.get('cycle_id')
+        cycle = self.journal.start('model_validation', reference['id'], parent_id=parent,
+            refs={'evidence_id': reference['id'], 'response_sha256': reference['response_sha256']})
+        self.journal.finish(cycle, 'rejected', data={'error_type': 'ValidationError'})
+        return reference
+
+    def contract_rejection(self, reference):
+        return self.model_diagnostics.get(reference)
 
     def diagnostic_snapshot(self):
         return {'model_rejections': self.model_diagnostics.recent()}

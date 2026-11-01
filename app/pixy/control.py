@@ -7,6 +7,8 @@ from app.kernel.database import connect
 import time
 import uuid
 from pathlib import Path
+from app.kernel.journal import Journal
+from app.kernel.journal import TERMINAL as TERMINAL_JOURNAL
 
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "EXHAUSTED", "UNKNOWN", "UNVERIFIED",
             "UNFULFILLABLE"}
@@ -38,6 +40,7 @@ class ControlStore:
             ''')
         from app.kernel.database import adopt_schema
         adopt_schema(self.db_path,'control',['control_tasks','control_events','control_commands','event_outbox'])
+        self.journal = Journal(self.db_path)
 
     @contextlib.contextmanager
     def connection(self):
@@ -68,14 +71,20 @@ class ControlStore:
     def create(self, source, request, **extra):
         task = self.document(source, request, **extra)
         with self.connection() as conn:
-            conn.execute("INSERT OR IGNORE INTO control_tasks VALUES (?, ?, ?)",
+            inserted = conn.execute("INSERT OR IGNORE INTO control_tasks VALUES (?, ?, ?)",
                          (task["id"], source, json.dumps(task)))
+            if inserted.rowcount:
+                self._audit_task(conn, task, 'created')
             return json.loads(conn.execute("SELECT document FROM control_tasks WHERE source=?", (source,)).fetchone()[0])
 
     def get(self, task_id):
         with self.connection() as conn:
             row = conn.execute("SELECT document FROM control_tasks WHERE id=?", (task_id,)).fetchone()
             return json.loads(row[0]) if row else None
+
+    def ensure_journal(self, task):
+        with self.connection() as conn:
+            self._audit_task(conn, task, 'observed_existing_state')
 
     def all(self):
         with self.connection() as conn:
@@ -101,10 +110,53 @@ class ControlStore:
             return task
 
     def _queue_event(self, conn, task, kind):
+        self._audit_task(conn, task, kind)
         event = dict(event_id=uuid.uuid4().hex,correlation_id=task['id'],task_id=task['id'],
                      execution_id=task.get('execution_id'),skill_name=task.get('skill_name'),version_id=task.get('version_id'),
                      metadata={'state':task['state'],'revision':task['revision']},event_type=kind)
         conn.execute('INSERT INTO event_outbox VALUES (?,?)',(event['event_id'],json.dumps(event)))
+
+    def _audit_task(self, conn, task, phase):
+        refs = {k: task[k] for k in ('execution_id', 'goal_revision', 'attempt_number',
+                                     'skill_name', 'version_id') if task.get(k) is not None}
+        refs['task_id'] = task['id']
+        root = self.journal.start('interaction', task['source'], source=task['source'],
+                                  trace_id=task.get('trace_id'), conn=conn)
+        cid = self.journal.start('task', task['id'], parent_id=root, refs={'task_id': task['id']}, conn=conn)
+        attempt_id = f"{task['id']}:{task.get('attempt_number', 1)}:{task.get('goal_revision', 0)}"
+        aid = self.journal.start('task_attempt', attempt_id, parent_id=cid, refs=refs, conn=conn)
+        state = task['state']
+        status = ({'COMPLETED': 'completed', 'FAILED': 'failed', 'CANCELLED': 'cancelled',
+                   'EXHAUSTED': 'exhausted', 'UNKNOWN': 'unknown', 'UNFULFILLABLE': 'failed'}
+                  .get(state, 'waiting' if state.startswith('WAITING') or state == 'UNVERIFIED' else 'active'))
+        # Each authorized revision/attempt is a separate branch. A closed attempt is never overwritten.
+        self.journal.event(aid, phase, status=status, data={**refs, 'phase': state}, conn=conn)
+        root_state = self.journal.get(cid, conn=conn)['status']
+        recovery = (task.get('recovery_attempt') or {}).get('authorization_id')
+        if phase == 'recovery_dispatched' and recovery:
+            self.journal.event(cid, 'authorized_attempt_started', status=status,
+                               data={**refs, 'authorization_id': recovery}, conn=conn)
+        else:
+            self.journal.event(cid, state, status=status if root_state not in TERMINAL_JOURNAL else None,
+                               data=refs, conn=conn)
+        if state == 'ROUTING':
+            self.journal.start('routing', attempt_id, parent_id=aid, refs=refs, conn=conn)
+        else:
+            routing = self.journal.cycle_id('routing', attempt_id)
+            row = self.journal.get(routing, conn=conn)
+            if row and row['status'] == 'active':
+                failed = (task.get('result') or {}).get('stage') == 'routing'
+                self.journal.finish(routing, 'failed' if failed else 'completed', conn=conn)
+        if state == 'GENERATING':
+            self.journal.start('skill_creation', attempt_id, parent_id=aid, refs=refs, conn=conn)
+        creation = self.journal.cycle_id('skill_creation', attempt_id)
+        row = self.journal.get(creation, conn=conn)
+        if row and row['status'] not in TERMINAL_JOURNAL and (task.get('artifact_hash') or state in TERMINAL):
+            self.journal.finish(creation, 'completed' if task.get('artifact_hash') else status, conn=conn)
+        if task.get('execution_id'):
+            use = self.journal.start('skill_use', task['execution_id'], parent_id=aid, refs=refs, conn=conn)
+            observed = task.get('runtime_status')
+            self.journal.event(use, observed or state, status=status, data=refs, conn=conn)
 
     def flush_events(self):
         if not self.events:
@@ -153,6 +205,7 @@ class ControlStore:
                 return task
             task.update(runtime_status=status, runtime_result=result, runtime_observed_at=time.time())
             conn.execute('UPDATE control_tasks SET document=? WHERE id=?', (json.dumps(task), task['id']))
+            self._queue_event(conn, task, 'runtime_observed')
             return task
 
     def event(self, task_id, kind, data):
@@ -199,6 +252,11 @@ class ControlStore:
                 conn.execute("UPDATE conversation_turns SET status='completed',task_id=?,receipt=? WHERE source=?",
                              (task_id, json.dumps({'question_id': expected_question[2],
                                                   'task_id': task_id, 'state': task['state']}), source))
+                question_cycle = self.journal.cycle_id('question', expected_question[2])
+                if self.journal.get(question_cycle, conn=conn):
+                    self.journal.finish(question_cycle, phase='answered', data={'actor': source}, conn=conn)
+                    incoming = self.journal.start('interaction', source, source=source, conn=conn)
+                    self.journal.link(incoming, question_cycle, 'answers', conn=conn)
             self._queue_event(conn,task,'owner_command')
             return task
 

@@ -7,6 +7,7 @@ records; they are not bearer credentials.
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from functools import wraps
 import json
 from pathlib import Path
 import secrets
@@ -17,6 +18,15 @@ from app.kernel.database import connect, connection, migrate
 from app.pixy.authorization import AuthorizationStore
 from app.pixy.control import ControlStore
 from app.kernel.execution_authority import VoiceExecutionPort
+
+
+def _audited_authority(method):
+    @wraps(method)
+    def audited(self, *args, **kwargs):
+        with self.journal.scope('authority_check', uuid.uuid4().hex,
+                                refs={'operation': method.__name__}):
+            return method(self, *args, **kwargs)
+    return audited
 
 
 class Authority(str, Enum):
@@ -132,6 +142,13 @@ class CoordinatorPort:
 
     def __init__(self, store):
         self.__store = store
+
+    @property
+    def journal(self):
+        return self.__store.journal
+
+    def ensure_journal(self, task):
+        return self.__store.ensure_journal(task)
 
     def create(self, *args, **kwargs):
         return self.__store.create(*args, **kwargs)
@@ -306,6 +323,7 @@ class ControlPlane:
         ]], component="secret-capture")
         self.tasks = ControlStore(self.path, events)
         self.authorizations = AuthorizationStore(self.path, ttl=authorization_ttl)
+        self.journal = self.tasks.journal
         self.uow = ControlUnitOfWork(self.path)
         self.ports = ControlPorts(
             coordinator=CoordinatorPort(self.tasks),
@@ -435,11 +453,13 @@ class ControlPlane:
         result['capabilities'] = json.loads(result['capabilities'])
         return result
 
+    @_audited_authority
     def decide_and_enable_order(self, authorization_id, approve, decided_by):
         """Resolve Pixy's decision and enable Hand's exact order atomically."""
         now = time.time()
         with self.uow.transaction() as repos:
             conn = repos.decisions.conn
+            self.authorizations._expire(conn)
             conn.execute(
                 'UPDATE pixy_authorizations SET status="expired" '
                 'WHERE status IN ("pending","approved") AND expires_at<=?',
@@ -456,6 +476,11 @@ class ControlPlane:
                     (desired, now, str(decided_by), authorization_id),
                 )
                 record.update(status=desired, decided_at=now, decided_by=str(decided_by))
+                cycle = self.journal.start('authorization', authorization_id,
+                    trace_id=record.get('trace_id'), refs={'authorization_id': authorization_id,
+                    'case_id': record['case_id']}, conn=conn)
+                self.journal.event(cycle, desired, status='waiting' if approve else 'rejected',
+                                   data={'actor': str(decided_by)}, conn=conn)
             elif record['status'] != desired:
                 raise PermissionError('La decisión ya fue resuelta con otro resultado')
             if approve:
@@ -476,8 +501,14 @@ class ControlPlane:
                     order_id = existing['order_id']
                 record['order_id'] = order_id
                 record['operation_id'] = operation_id
+                parent = self.journal.cycle_id('authorization', authorization_id)
+                order_cycle = self.journal.start('execution_order', order_id, parent_id=parent,
+                    refs={'authorization_id': authorization_id, 'case_id': record['case_id'],
+                          'order_id': order_id}, conn=conn)
+                self.journal.event(order_cycle, 'enabled', status='waiting', conn=conn)
         return record
 
+    @_audited_authority
     def claim_authorized_order(self, order_id, authorization_id, nonce, case_id,
                                capabilities, target, plan_hash, consumer):
         """Atomically consume Pixy's grant and claim the matching Hand order."""
@@ -489,6 +520,7 @@ class ControlPlane:
                      capabilities, target, plan_hash, consumer):
         now = time.time()
         conn = repos.decisions.conn
+        self.authorizations._expire(conn)
         conn.execute(
             'UPDATE pixy_authorizations SET status="expired" '
             'WHERE status IN ("pending","approved") AND expires_at<=?',
@@ -524,8 +556,16 @@ class ControlPlane:
             'WHERE order_id=? AND status="enabled"',
             (now, order_id),
         )
+        authorization_cycle = self.journal.start('authorization', authorization_id,
+            trace_id=auth.get('trace_id'), refs={'authorization_id': authorization_id,
+                                              'case_id': case_id}, conn=conn)
+        self.journal.finish(authorization_cycle, phase='consumed', conn=conn)
+        order_cycle = self.journal.start('execution_order', order_id, parent_id=authorization_cycle,
+            refs={'order_id': order_id, 'authorization_id': authorization_id, 'case_id': case_id}, conn=conn)
+        self.journal.event(order_cycle, 'claimed', status='active', conn=conn)
         return dict(repos.orders.get(order_id))
 
+    @_audited_authority
     def dispatch_task_recovery(self, header, plan, transition):
         """Spend Hand's order and schedule the new attempt in the same transaction."""
         from app.heart.catalog import validate_plan, plan_hash
@@ -556,4 +596,6 @@ class ControlPlane:
             self.tasks._queue_event(conn, updated, 'recovery_dispatched')
             conn.execute('UPDATE execution_orders SET status="completed",receipt=?,completed_at=? WHERE order_id=?',
                          (json.dumps({'task': updated}), time.time(), header['order_id']))
+            self.journal.finish(self.journal.cycle_id('execution_order', header['order_id']),
+                                phase='task_dispatched', conn=conn)
             return updated

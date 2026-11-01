@@ -8,6 +8,9 @@ import time
 import uuid
 import zipfile
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
+from app.kernel.journal import Journal
 from pathlib import Path, PurePosixPath
 from app.kernel.database import connection, migrate
 from app.heart.catalog import FINAL_STEP, canonical, plan_hash, validate_case_id, validate_plan
@@ -28,13 +31,51 @@ def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+_operation_stack = ContextVar('hand_operation_stack', default=None)
+
+
+def _hand_audit(fn):
+    """Audit intent before validation, including denials with no artifact mutation."""
+    @wraps(fn)
+    def wrapped(self, *args, **kwargs):
+        refs = {'operation': fn.__name__}
+        if args and isinstance(args[0], dict) and args[0].get('id'):
+            refs['task_id'] = args[0]['id']
+        correlation = kwargs.get('correlation_id')
+        if correlation:
+            refs['task_id'] = correlation
+        cycle = self.journal.start('hand_' + fn.__name__, uuid.uuid4().hex, refs=refs)
+        operations = []
+        token = _operation_stack.set(operations)
+        with self.journal.activate(cycle):
+            try:
+                result = fn(self, *args, **kwargs)
+            except Exception as exc:
+                for op in operations:
+                    self._finish(op, type(exc).__name__)
+                self.journal.finish(cycle, 'rejected' if isinstance(exc, PermissionError) else 'failed',
+                                    data={'error_type': type(exc).__name__})
+                raise
+            else:
+                for op in operations:
+                    self._finish(op)
+                status = 'failed' if fn.__name__ == 'describe' and result is None else 'completed'
+                self.journal.finish(cycle, status,
+                                    data={'reason_code': 'metadata_unavailable'} if status == 'failed' else None)
+                return result
+            finally:
+                _operation_stack.reset(token)
+    return wrapped
+
+
 class Hand:
     def __init__(self, root, pixy, events=None, recovery_executor=None, llm=None,
-                 db_path=None, authorization_port=None, service_proposals=None, capabilities=None):
+                 db_path=None, authorization_port=None, service_proposals=None, capabilities=None, journal=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = Path(db_path).resolve() if db_path else self.root/'hand.sqlite3'
         self.pixy, self.events, self.llm = pixy, events, llm
+        self.journal = journal or Journal(self.db)
         self.authorization_port = authorization_port
         self.service_proposals = service_proposals
         self.recovery_executor = recovery_executor
@@ -69,7 +110,7 @@ class Hand:
                BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
         ]], component='hand-recovery')
         self.catalog = SkillCatalog(self.db)
-        self.agent = AgentLoop(self.db, self.llm) if self.llm is not None else None
+        self.agent = AgentLoop(self.db, self.llm, journal=self.journal) if self.llm is not None else None
         self.last_agent_run_id = None
         self.recover()
 
@@ -100,10 +141,19 @@ class Hand:
                 if v['status']=='approved':
                     if folder.exists() and self.tree_hash(folder)==v['artifact_hash'] and not draft.exists():
                         with connection(self.db) as conn:
+                            pending = conn.execute('SELECT operation_id FROM operations WHERE target_version_id=? '
+                                                   'AND completed_at IS NULL', (v['version_id'],)).fetchall()
                             conn.execute('UPDATE versions SET status="archived" WHERE skill_name=? AND status="active"', (v['skill_name'],))
                             conn.execute('UPDATE versions SET status="active",activated_at=? WHERE version_id=?',(time.time(),v['version_id']))
                             conn.execute('UPDATE operations SET status="completed",completed_at=? WHERE target_version_id=? AND completed_at IS NULL',
                                          (time.time(),v['version_id']))
+                            journal_conn = conn if Path(self.journal.path).resolve() == self.db else None
+                            for operation in pending:
+                                cycle = Journal.cycle_id('hand_operation', operation['operation_id'])
+                                previous = self.journal.get(cycle, conn=journal_conn)
+                                if previous and previous['status'] in {'active', 'unknown'}:
+                                    self.journal.finish(cycle, phase='activation_reconciled', conn=journal_conn,
+                                                        data={'version_id': v['version_id']})
                     elif not folder.exists() and old.exists() and draft.exists():
                         old.rename(folder)
                         continue
@@ -128,6 +178,7 @@ class Hand:
             finally:
                 lock.release()
 
+    @_hand_audit
     def generate(self, task, guidelines, hypothesis=None, capabilities=None):
         if not self.llm:
             raise RuntimeError('Hand requiere un proveedor LLM para generar código')
@@ -237,6 +288,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 raise ValueError('Artefacto existente alterado')
         return str(path.resolve()), sha_val
 
+    @_hand_audit
     def describe(self, task, name, mode, dependencies):
         """Ask for reusable metadata; failure leaves the code as a one-off artifact."""
         planned = task.get('planned_skill_spec')
@@ -267,7 +319,8 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                   "Objetivo: " + str(task['request']) + "\n"
                   "Servicio disponible: " + json.dumps(services, ensure_ascii=False))
         try:
-            raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
+            with self.journal.scope('hand_model_call', uuid.uuid4().hex, refs={'task_id': task.get('id')}):
+                raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
             proposed = json.loads(raw) if isinstance(raw, str) else raw
             in_s = proposed.get('input_schema') or proposed.get('inputs') or {}
             out_s = proposed.get('output_schema') or proposed.get('outputs') or {'result': 'string'}
@@ -300,11 +353,13 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         except Exception:
             return None
 
+    @_hand_audit
     def propose_service(self, descriptor):
         if self.service_proposals is None:
             raise RuntimeError('Hand has no service proposal port')
         return self.service_proposals.propose(descriptor)
 
+    @_hand_audit
     def describe_service(self, task):
         """Research and propose one Voice operation; validation errors feed the loop."""
         if self.llm is None:
@@ -402,12 +457,25 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         with connection(self.db) as conn:
             conn.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                 (op,kind,name,source,target,'pending',correlation_id,reason,time.time(),None,None))
+            self.journal.start('hand_operation', op,
+                               refs={'operation': kind, 'skill_name': name, 'version_id': target or source,
+                                     'task_id': correlation_id},
+                               conn=conn if Path(self.journal.path).resolve() == self.db else None)
+        pending = _operation_stack.get()
+        if pending is not None:
+            pending.append(op)
         return op
 
     def _finish(self, op, error=None):
         with connection(self.db) as conn:
+            row = conn.execute('SELECT completed_at FROM operations WHERE operation_id=?', (op,)).fetchone()
+            if row and row['completed_at'] is not None:
+                return
             conn.execute('UPDATE operations SET status=?,completed_at=?,error=? WHERE operation_id=?',
                          ('failed' if error else 'completed',time.time(),error,op))
+            self.journal.finish(Journal.cycle_id('hand_operation', op), 'failed' if error else 'completed',
+                                data={'error_type': error} if error else None,
+                                conn=conn if Path(self.journal.path).resolve() == self.db else None)
 
     def _files(self, folder):
         if folder.is_symlink() or {p.name for p in folder.iterdir()} != {'SKILL.md','app','data','other'}:
@@ -430,6 +498,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         return sha(json.dumps([(p.relative_to(folder).as_posix(),sha(p.read_bytes()))
                                for p in self._files(folder)],separators=(',',':')).encode())
 
+    @_hand_audit
     def create(self, name, code, manifest, *, correlation_id=None, restored_from=None, version_number=None,
                skill_metadata=None):
         name = self._name(name)
@@ -474,6 +543,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 raise
             return self.version(vid)
 
+    @_hand_audit
     def edit(self, vid, code):
         with self.locked():
             v = self.version(vid)
@@ -486,11 +556,13 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 conn.execute('UPDATE versions SET artifact_hash=? WHERE version_id=?',(self.tree_hash(folder),vid))
             self._finish(op)
 
+    @_hand_audit
     def update(self, name, code, manifest, **kwargs):
         if not self.active(name):
             raise ValueError('Update requires an active skill')
         return self.create(name,code,manifest,**kwargs)
 
+    @_hand_audit
     def reject(self, vid, reason='Rejected'):
         with self.locked():
             v = self.version(vid)
@@ -505,6 +577,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 conn.execute('UPDATE versions SET status="rejected" WHERE version_id=?',(vid,))
             self._finish(op)
 
+    @_hand_audit
     def finish_one_off(self, vid):
         """Retain a verified artifact without making it a reusable skill."""
         with self.locked():
@@ -573,6 +646,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         op = self._operation('archive',v['skill_name'],v['version_id'])
         self._finish(op)
 
+    @_hand_audit
     def approve(self, vid, *, user_approved=False, correlation_id=None):
         with self.locked():
             v = self.version(vid)
@@ -584,6 +658,8 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             draft, active = self.root/('.'+name),self.root/name
             if self.tree_hash(draft) != v['artifact_hash']:
                 raise ValueError('Draft changed after review')
+            current = self.active(name)
+            op = self._operation('approve',name,current and current['version_id'],vid,correlation_id)
             audit = self.pixy.audit_artifact(draft,json.loads(v['manifest']),v['artifact_hash'])
             if not audit['safe']:
                 raise PermissionError(audit.get('reason','Artifact not safe'))
@@ -592,7 +668,6 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             current = self.active(name)
             if active.exists() and not current:
                 raise ValueError('Unregistered active directory')
-            op = self._operation('approve',name,current and current['version_id'],vid,correlation_id)
             old = self.root/('.previous-'+vid)
             try:
                 if current:
@@ -628,6 +703,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             raise ValueError('Unsafe skill deletion')
         shutil.rmtree(folder)
 
+    @_hand_audit
     def archive(self, name):
         with self.locked():
             v = self.active(name)
@@ -636,6 +712,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             self._archive(v)
             return self.version(v['version_id'])
 
+    @_hand_audit
     def delete(self, name):
         with self.locked():
             v = self.active(name)
@@ -648,6 +725,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 conn.execute('UPDATE versions SET status="archived" WHERE version_id=?',(v['version_id'],))
             self._finish(op)
 
+    @_hand_audit
     def restore(self, vid, *, user_approved=False, rollback=False):
         v = self.version(vid)
         if not v['archive_name']:
@@ -692,9 +770,11 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             self._finish(op,type(exc).__name__)
             raise
 
+    @_hand_audit
     def rollback(self, vid, **kwargs):
         return self.restore(vid,rollback=True,**kwargs)
 
+    @_hand_audit
     def use(self, name, correlation_id=None):
         v = self.active(name)
         if not v or self.tree_hash(self.root/name) != v['artifact_hash']:
@@ -703,6 +783,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         self._finish(op)
         return v
 
+    @_hand_audit
     def prepare_execution(self, vid, eid, code_hash, *, user_approved=False):
         if not re.fullmatch('run_[a-f0-9]{32}',eid):
             raise ValueError('Invalid execution ID')
@@ -728,6 +809,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                     raise ValueError('Skill changed during snapshot')
             return str(target)
 
+    @_hand_audit
     def publication(self, name, asset_id, published=True):
         v = self.active(name)
         if not v:
@@ -766,6 +848,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
     def _authorization_terms(self, header, case_id, core, h):
         return (header['authorization_id'],header['nonce'],case_id,core['capabilities'],core['target'],h)
 
+    @_hand_audit
     def remediate_task(self, order, transition):
         """Hand dispatches an exact grant; Coordinator supplies the task transition."""
         header, case_id, core, h = self._recovery_order(order)
@@ -791,6 +874,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             raise PermissionError('La skill de recuperación no coincide con la orden autorizada')
         return folder
 
+    @_hand_audit
     def create_recovery(self, order):
         header,case_id,core,h = self._recovery_order(order)
         authorizations = self.authorization_port or getattr(self.pixy,'authorizations',None)
@@ -865,6 +949,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 'steps':[{'index':s['step_index'],'action':s['action'],'target':s['target'],'action_id':s['action_id'],
                           'status':s['status'],'receipt':s['receipt']} for s in steps]}
 
+    @_hand_audit
     def advance_recovery(self, order):
         """Idempotent: spend the authorization once, then submit/poll each step exactly once."""
         header,case_id,core,h = self._recovery_order(order)

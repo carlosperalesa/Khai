@@ -25,6 +25,20 @@ class Senses:
                          (name,time.time(),json.dumps(snapshot)))
         return snapshot
 
+    def model_rejection(self, reference, task_id, goal_revision=0):
+        """Retrieve exact redacted evidence even after it leaves a recent-events window."""
+        adapter = self.adapters.get('model_rejection')
+        if not adapter:
+            return None
+        record = adapter(reference)
+        if (isinstance(record, dict) and record.get('id') == reference
+                and record.get('task_id') == task_id
+                and record.get('goal_revision', 0) == goal_revision):
+            self._record('model_rejection', {'reference': reference, 'task_id': task_id,
+                                           'goal_revision': goal_revision})
+            return record
+        return None
+
     def __getattr__(self, name):
         if name.startswith('listen_') and name[7:] in OBSERVERS:
             return lambda: self.listen(name[7:])

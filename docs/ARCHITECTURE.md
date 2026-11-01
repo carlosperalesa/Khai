@@ -1,5 +1,9 @@
 # Manual Técnico y Arquitectura de Khai
 
+El diario común fue aprobado por el propietario. Implementación y contrato en [`COMMON_JOURNAL.md`](./COMMON_JOURNAL.md): ciclos con raíz/padre, eventos inmutables, enlaces y consulta por ID en el SQLite de control. La auditoría anterior describe el estado previo; sus propuestas pendientes se resuelven según esta implementación. La aceptación conjunta y en servidor se registra en CHECKPOINT.
+
+Validación del diario común: 329 pruebas y 30 subpruebas aprobadas; comprobación adicional del descarte de evidencia ajena aprobada. Los límites de transacciones entre bases y la reconciliación sin replay están descritos en el contrato.
+
 Este documento consolida la arquitectura del sistema, contratos, almacenamiento, seguridad, decisiones históricas (ADRs), procedimientos de operaciones, la infraestructura híbrida acelerada (Brain) y la arquitectura canónica de pruebas.
 
 Auditoría de siete caminos y contrato propuesto de trazabilidad: [`INTERACTION_AUDIT.md`](./INTERACTION_AUDIT.md). Los IDs de tareas, casos, autorizaciones, herramientas y entregas existentes no acreditan todavía un árbol completo padre/hijo con cierre de cada rama. Se detectaron pérdida por colisión de IDs externos en AgentLoop, cierres ausentes o prematuros y contaminación de diagnóstico por evidencia histórica ajena. Las pruebas nuevas conservan garantías actuales; la implementación del diario común permanece pendiente de decisión.

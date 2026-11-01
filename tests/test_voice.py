@@ -127,6 +127,10 @@ class ResearchSearchTests(unittest.TestCase):
             self.assertNotIn('dummy-secret-value',json.dumps(row))
             self.assertNotIn('must not persist',json.dumps(row))
             self.assertLessEqual(len(row['response_excerpt']),16000)
+            for number in range(12):
+                journal.record('AssistantTurn', '{}', [], {'type': 'object'}, {'model': str(number)})
+            self.assertNotIn(ref['id'], [r['id'] for r in journal.recent()])
+            self.assertEqual(journal.get(ref['id'])['task_id'], 'task_fixture')
             with connection(path) as conn, self.assertRaises(sqlite3.IntegrityError):
                 conn.execute('DELETE FROM model_rejections')
 
@@ -223,9 +227,190 @@ class VoiceMailboxTests(unittest.TestCase):
         self.assertEqual(self.mailbox.pending_counts()['inbox']['unknown'], 1)
         self.assertTrue(delivery.startswith('delivery-'))
 
+    def test_delivery_chunks_keep_acknowledged_receipts_after_later_failure_and_restart(self):
+        from app.kernel.database import connection
+        journal = self.mailbox.journal
+        root = journal.start('interaction', 'telegram:chunks', source='telegram:chunks', trace_id='trace-chunks')
+        task = journal.start('task', 'task-chunks', parent_id=root, refs={'task_id': 'task-chunks'})
+        delivery = self.mailbox.enqueue('private content ' * 400,
+            {'cycle_id': task, 'task_id': 'task-chunks', 'source': 'telegram:chunks'})
+        sender = Mock(side_effect=[{'ok': True, 'result': {'message_id': 401}}, TimeoutError('not persisted')])
+        with self.assertRaises(TimeoutError):
+            self.mailbox.deliver_one(sender)
+        restarted = VoiceMailbox(self.db)
+        self.assertFalse(restarted.deliver_one(sender))
+        with connection(self.db) as conn:
+            row = conn.execute('SELECT status,message_ids FROM voice_outbox WHERE delivery_id=?', (delivery,)).fetchone()
+            cycle = conn.execute('SELECT * FROM journal_cycles WHERE object_id=?', (delivery,)).fetchone()
+            events = conn.execute('SELECT phase,data FROM journal_events WHERE cycle_id=? ORDER BY sequence',
+                                  (cycle['cycle_id'],)).fetchall()
+        self.assertEqual(row['status'], 'unknown')
+        self.assertEqual(json.loads(row['message_ids']), [401])
+        self.assertEqual(cycle['parent_id'], task)
+        self.assertEqual(cycle['root_id'], root)
+        self.assertEqual(cycle['status'], 'unknown')
+        receipts = [json.loads(event['data']) for event in events if event['phase'] == 'chunk_delivered']
+        self.assertEqual([receipt['message_id'] for receipt in receipts], [401])
+        self.assertNotIn('private content', json.dumps([dict(event) for event in events]))
+
+    def test_invalid_telegram_receipt_never_claims_delivered(self):
+        for receipt in [None, {'ok': True}, {'ok': False, 'result': {'message_id': 8}},
+                        {'result': {'message_id': True}}, {'result': {'message_id': 0}}]:
+            with self.subTest(receipt=receipt):
+                self.mailbox.enqueue('answer')
+                with self.assertRaises(ValueError):
+                    self.mailbox.deliver_one(Mock(return_value=receipt))
+        self.assertEqual(self.mailbox.pending_counts()['outbox'], {'unknown': 5})
+
+    def test_sender_type_error_is_not_retried_after_possible_side_effect(self):
+        sender = Mock(side_effect=TypeError('raised inside sender'))
+        self.mailbox.enqueue('answer')
+        with self.assertRaises(TypeError):
+            self.mailbox.deliver_one(sender)
+        self.assertEqual(sender.call_count, 1)
+        self.assertFalse(self.mailbox.deliver_one(sender))
+
+    def test_inbox_handler_closure_does_not_close_its_pending_delivery(self):
+        from app.kernel.database import connection
+        self.mailbox.accept('telegram:branches', 'trace-branches', 'private request')
+        delivery_ids = []
+        self.mailbox.process_one(lambda *_: delivery_ids.append(self.mailbox.enqueue('pending answer')))
+        with connection(self.db) as conn:
+            root = conn.execute("SELECT * FROM journal_cycles WHERE kind='interaction'").fetchone()
+            delivery = conn.execute("SELECT * FROM journal_cycles WHERE kind='delivery'").fetchone()
+        self.assertEqual(root['status'], 'completed')
+        self.assertEqual(delivery['parent_id'], root['cycle_id'])
+        self.assertEqual(delivery['status'], 'active')
+        self.mailbox.deliver_one(lambda _: {'result': {'message_id': 91}})
+        with connection(self.db) as conn:
+            self.assertEqual(conn.execute('SELECT status FROM journal_cycles WHERE cycle_id=?',
+                (delivery['cycle_id'],)).fetchone()[0], 'completed')
+
+    def test_restart_records_interruption_without_replaying_inbox_or_delivery(self):
+        from app.kernel.database import connection
+        self.mailbox.accept('telegram:interrupted', 'trace-interrupted', 'input')
+        delivery = self.mailbox.enqueue('answer')
+        with connection(self.db) as conn:
+            conn.execute("UPDATE voice_inbox SET status='processing'")
+            conn.execute("UPDATE voice_outbox SET status='sending'")
+        restarted = VoiceMailbox(self.db)
+        self.assertFalse(restarted.process_one(Mock()))
+        self.assertFalse(restarted.deliver_one(Mock()))
+        with connection(self.db) as conn:
+            cycles = conn.execute('SELECT kind,status FROM journal_cycles').fetchall()
+            interrupted = conn.execute("SELECT COUNT(*) FROM journal_events WHERE phase='interrupted'").fetchone()[0]
+        self.assertEqual({row['kind']: row['status'] for row in cycles},
+                         {'interaction': 'unknown', 'delivery': 'unknown'})
+        self.assertEqual(interrupted, 2)
+
 
 class HttpReceiptTests(unittest.TestCase):
+    def test_common_journal_preserves_http_error_and_separates_transport_branches(self):
+        from app.kernel.journal import Journal
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            control = Path(folder) / 'control.sqlite3'
+            journal = Journal(control)
+            root = journal.start('interaction', 'telegram:http', trace_id='trace-http', source='telegram:http')
+            task_cycle = journal.start('task', 'task-http', parent_id=root, refs={'task_id': 'task-http'})
+            gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
+                db=Path(folder) / 'voice.sqlite3', execution_authority=Mock())
+            gateway.journal = journal
+            gateway._static_services = {'search': {'operations': {'query': {
+                'url': 'https://example.org/search', 'parameters': ['q'], 'effect': 'read', 'version': 'v1'}}}}
+            transport = Mock()
+            transport.getresponse.return_value.status = 429
+            task = {'id': 'task-http', 'execution_id': 'run-http', 'deadline': time.time() + 60}
+            with patch('app.voice.gateway.external_gateway.socket.getaddrinfo',
+                       return_value=[(None, None, None, None, ('8.8.8.8', 443))]), \
+                 patch('app.voice.gateway.external_gateway.socket.create_connection'), \
+                 patch('app.voice.gateway.external_gateway.ssl.create_default_context'), \
+                 patch('app.voice.gateway.external_gateway.http.client.HTTPSConnection', return_value=transport):
+                reply = gateway._mailbox_request(task, 'search-1',
+                    {'service': 'search', 'operation': 'query', 'params': {'q': 'private search text'}})
+            self.assertEqual(reply, {'error': 'RuntimeError'})
+            with connection(control) as conn:
+                mailbox = conn.execute("SELECT * FROM journal_cycles WHERE kind='gateway_request'").fetchone()
+                provider = conn.execute("SELECT * FROM journal_cycles WHERE kind='provider_request'").fetchone()
+                facts = [json.loads(row[0]) for row in conn.execute(
+                    'SELECT data FROM journal_events WHERE cycle_id=?', (provider['cycle_id'],))]
+                all_data = json.dumps([dict(row) for row in conn.execute('SELECT * FROM journal_events')])
+            self.assertEqual(mailbox['parent_id'], task_cycle)
+            provider_parent = journal.get(provider['parent_id'])
+            self.assertEqual(provider_parent['kind'], 'gateway_attempt')
+            self.assertEqual(provider_parent['parent_id'], mailbox['cycle_id'])
+            self.assertEqual(provider['status'], 'failed')
+            self.assertTrue(any(fact.get('http_status') == 429 and
+                                fact.get('error_type') == 'ProviderHTTPError' for fact in facts))
+            self.assertNotIn('private search text', all_data)
+            self.assertNotIn('https://', all_data)
+
+    def test_worker_thread_links_real_skill_use_and_rejected_replay_keeps_original_success(self):
+        from app.kernel.journal import Journal
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Journal(Path(folder) / 'control.sqlite3')
+            root = journal.start('interaction', 'telegram:worker', trace_id='trace-worker', source='telegram:worker')
+            task_cycle = journal.start('task', 'task-worker', parent_id=root)
+            execution = journal.start('skill_use', 'run-worker', parent_id=task_cycle,
+                refs={'task_id': 'task-worker', 'execution_id': 'run-worker'})
+            gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
+                db=Path(folder) / 'voice.sqlite3', execution_authority=Mock())
+            gateway.journal = journal
+            gateway._static_services = {'search': {'operations': {'query': {'effect': 'read', 'version': 'v1'}}}}
+            gateway.request = Mock(return_value={'content_type': 'application/json', 'body': b'{"items":[]} '})
+            task = {'id': 'task-worker', 'execution_id': 'run-worker', 'deadline': time.time() + 60}
+            request = {'service': 'search', 'operation': 'query', 'params': {'q': 'first'}}
+            outcomes = []
+            errors = []
+            def poll_worker():
+                try:
+                    outcomes.append(gateway._mailbox_request(task, 'request-1', request))
+                except Exception as exc:
+                    errors.append(exc)
+            worker = threading.Thread(target=poll_worker)
+            worker.start(); worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(outcomes, [{'result': {'items': []}}])
+            self.assertEqual(gateway._mailbox_request(task, 'request-1', request), outcomes[0])
+            with self.assertRaises(PermissionError):
+                gateway._mailbox_request(task, 'request-1', {**request, 'params': {'q': 'changed'}})
+            self.assertEqual(gateway.request.call_count, 1)
+            with connection(journal.path) as conn:
+                operation = conn.execute("SELECT * FROM journal_cycles WHERE kind='gateway_request'").fetchone()
+                attempts = conn.execute("SELECT * FROM journal_cycles WHERE kind='gateway_attempt' ORDER BY started_at").fetchall()
+            self.assertEqual(operation['parent_id'], execution)
+            self.assertEqual(operation['trace_id'], 'trace-worker')
+            self.assertEqual(operation['root_id'], root)
+            self.assertEqual(operation['status'], 'completed')
+            self.assertEqual([attempt['status'] for attempt in attempts], ['completed', 'completed', 'rejected'])
+            self.assertTrue(all(attempt['parent_id'] == operation['cycle_id'] for attempt in attempts))
+
+    def test_mailbox_permission_rejection_is_durable_before_response_wrapper(self):
+        from app.kernel.journal import Journal
+        from app.kernel.database import connection
+        with tempfile.TemporaryDirectory() as folder:
+            control = Path(folder) / 'control.sqlite3'
+            gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock())
+            gateway.journal = Journal(control)
+            workspace = Path(folder) / 'workspace'
+            workspace.mkdir()
+            request = workspace / '.voice-rejected.request.json'
+            request.write_text('{}', encoding='utf-8')
+            task = {'id': 'task-rejected', 'execution_id': 'run-rejected',
+                    'artifact_hash': 'hash', 'authorized_hash': 'hash', 'manifest': {'capabilities': []}}
+            gateway.process_mailbox(task, workspace)
+            self.assertEqual(json.loads((workspace / '.voice-rejected.response.json').read_text()),
+                             {'error': 'PermissionError'})
+            with connection(control) as conn:
+                row = conn.execute("SELECT * FROM journal_cycles WHERE kind='gateway_request'").fetchone()
+                events = conn.execute('SELECT data FROM journal_events WHERE cycle_id=?', (row['cycle_id'],)).fetchall()
+            self.assertEqual(row['status'], 'rejected')
+            self.assertIn('PermissionError', json.dumps([dict(event) for event in events]))
+
     def test_failed_write_is_not_recorded_as_completed(self):
+        from app.kernel.journal import Journal
         contract = {'kind': 'create', 'identity': None, 'correction': None,
                     'summary': {'name': 'Envío de correo', 'context': 'Correo solicitado'}}
         with tempfile.TemporaryDirectory() as folder:
@@ -234,6 +419,7 @@ class HttpReceiptTests(unittest.TestCase):
                 'send': {'version': 'v1', 'effect': 'write', 'effect_contract': contract}}}}
             gateway = ExternalGateway(Path(folder) / 'absent.yaml', Mock(),
                                       db=Path(folder) / 'voice.sqlite3', registry=registry, execution_authority=Mock())
+            gateway.journal = Journal(Path(folder) / 'control.sqlite3')
             gateway.request = Mock(side_effect=RuntimeError('provider unavailable'))
             task = {'id': 'task_' + 'a' * 32, 'execution_id': 'run_' + 'b' * 32,
                     'deadline': time.time() + 60}
@@ -243,6 +429,9 @@ class HttpReceiptTests(unittest.TestCase):
                 {'service_id': 'mail', 'operation': 'send', 'version': 'v1'}])[0]
             self.assertEqual(reply, {'error': 'RuntimeError'})
             self.assertEqual(receipt['status'], 'uncertain')
+            branch = gateway.journal.get(gateway.journal.cycle_id('gateway_request',
+                task['execution_id'] + ':send-1'))
+            self.assertEqual(branch['status'], 'unknown')
 
     def test_declared_write_identity_and_correction_guard(self):
         contract = {'kind': 'create', 'identity': {'source': 'response', 'field': 'id'},
