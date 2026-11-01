@@ -69,3 +69,5 @@ No hay purga automática del diario común. La antigua retención de 500 eventos
 ## Validación
 
 Pruebas de árbol e aislamiento concurrente, rollback, inmutabilidad, límites, reinicio incierto, cierres de Hand, IDs externos repetidos, decisiones/órdenes, informes sin reparación, evidencia antes de diagnóstico lento, rechazo exacto, transporte HTTP, acuses parciales y ausencia de replay. Resultado conjunto y aceptación de producción se registran en CHECKPOINT al completar la verificación.
+
+Aceptación completada con código `385f20d`: 329 pruebas y 30 subpruebas locales; 13 pruebas seleccionadas sobre la imagen desplegada en contenedor desechable, sin red ni datos productivos. Dos interacciones reales por webhook (`/help` e informe Pixy por su ID) cerraron con entrega Telegram confirmada, árboles separados y enlace `reports_on`, sin inferencia ni reparación. Salud HTTPS e integridad de las cuatro bases verificadas. Los IDs y reportes reproducibles figuran en CHECKPOINT.

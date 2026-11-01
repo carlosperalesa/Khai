@@ -4,9 +4,11 @@ El diario común fue aprobado por el propietario. Implementación y contrato en 
 
 Validación del diario común: 329 pruebas y 30 subpruebas aprobadas; comprobación adicional del descarte de evidencia ajena aprobada. Los límites de transacciones entre bases y la reconciliación sin replay están descritos en el contrato.
 
+Producción: código `385f20d` en Core/proxy; migración y salud HTTPS/SQLite verificadas. Trece pruebas controladas sobre la imagen desplegada y dos interacciones reales de ingreso/informe/entrega aprobaron. Los fixtures no acreditan la reparación del contrato de low ni del arranque GPU; esas tareas siguen independientes del diario.
+
 Este documento consolida la arquitectura del sistema, contratos, almacenamiento, seguridad, decisiones históricas (ADRs), procedimientos de operaciones, la infraestructura híbrida acelerada (Brain) y la arquitectura canónica de pruebas.
 
-Auditoría de siete caminos y contrato propuesto de trazabilidad: [`INTERACTION_AUDIT.md`](./INTERACTION_AUDIT.md). Los IDs de tareas, casos, autorizaciones, herramientas y entregas existentes no acreditan todavía un árbol completo padre/hijo con cierre de cada rama. Se detectaron pérdida por colisión de IDs externos en AgentLoop, cierres ausentes o prematuros y contaminación de diagnóstico por evidencia histórica ajena. Las pruebas nuevas conservan garantías actuales; la implementación del diario común permanece pendiente de decisión.
+Auditoría histórica de siete caminos: [`INTERACTION_AUDIT.md`](./INTERACTION_AUDIT.md). En ese estado previo, los IDs de tareas, casos, autorizaciones, herramientas y entregas no acreditaban un árbol completo padre/hijo. Se detectaron pérdida por colisión de IDs externos en AgentLoop, cierres ausentes o prematuros y contaminación de diagnóstico por evidencia histórica ajena. Esos hallazgos motivaron la implementación aprobada del diario común; su contrato actual figura arriba.
 
 La auditoría añadió 16 pruebas dentro de las suites canónicas: validación conjunta final 303 pruebas y 25 subpruebas aprobadas (191,73 s). Este resultado no acredita reparación de los huecos enumerados; la auditoría solo cambia documentación y pruebas.
 

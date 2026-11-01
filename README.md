@@ -4,9 +4,11 @@ El propietario aprobó el [diario común de interacciones](./docs/COMMON_JOURNAL
 
 La versión del diario común pasó 329 pruebas y 30 subpruebas. Conserva evidencia de errores y acuses de entrega; no reconstruye registros históricos perdidos ni considera una reparación exitosa sin verificación.
 
+Desplegado con `385f20d`: 13 comprobaciones sobre la imagen en el servidor y dos interacciones reales por webhook confirmaron persistencia, separación de ramas e informe Pixy hasta entrega Telegram. `/health` e integridad SQLite verificados; evidencias en CHECKPOINT.
+
 Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente.
 
-La [auditoría de siete ciclos de interacción](./docs/INTERACTION_AUDIT.md) revisa modelos, chat, creación/uso de skills, Pixy, reparación e informes. Encontró huecos de relación entre ramas, conservación de llamadas y cierre de operaciones; la trazabilidad completa todavía no está implementada. Se añadieron 16 pruebas en las suites existentes: validación conjunta final 303 pruebas y 25 subpruebas aprobadas. El informe contiene ejemplos de los dos diseños propuestos; elección del propietario pendiente.
+La [auditoría de siete ciclos de interacción](./docs/INTERACTION_AUDIT.md) conserva el estado previo de modelos, chat, creación/uso de skills, Pixy, reparación e informes. Encontró huecos de relación entre ramas, conservación de llamadas y cierre de operaciones, y añadió 16 pruebas (303 pruebas y 25 subpruebas entonces). Motivó la implementación aprobada del diario común descrita arriba.
 
 Estado al 31 de octubre: `web-search` y el parser PDF/CSV/XLSX están activos y verificados. Voice prepara wheels fijados y comprobados; los workers reutilizan un entorno sin red. La recuperación real del parser cerró RECOVERED en Heart. Low rechazó inicialmente un turno; la repetición instrumentada produjo un contrato válido y guardó la preferencia Brave/web_search. La aceptación conversacional de `busca <consulta>` sigue en curso.
 
