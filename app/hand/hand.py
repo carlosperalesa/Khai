@@ -387,6 +387,8 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                   "No adivines campos ni cambies de proveedor silenciosamente. Usa web_search tantas veces "
                   "como aporte información; cada error de validate_descriptor debe corregirse. Termina solo "
                   "con finish_descriptor. El descriptor DEBE contener exactamente estos 15 campos: " + field_list + ". "
+                  "Importante: los campos 'service_id', 'operation' y 'version' deben empezar con una letra minúscula y contener solo caracteres [a-z0-9_-] (sin puntos, ejemplo: 'v1', 'v2_5'). "
+                  "Si el servicio requiere API key o autenticación, NO la pases como parámetro en la URL; declara 'credential_ref' con el nombre de la variable de entorno en mayúsculas (ej. 'OPENWEATHER_API_KEY') y 'credential_header' (ej. 'x-api-key'). "
                   "Ejemplo ilustrativo de estructura: " + json.dumps(template, ensure_ascii=False) +
                   "\nObjetivo: " + str(task['request']) +
                   "\nError o evidencia anterior: " + str(task.get('feedback') or 'ninguno') +

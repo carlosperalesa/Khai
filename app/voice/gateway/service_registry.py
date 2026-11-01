@@ -43,7 +43,7 @@ def validate_descriptor(spec):
         raise ValueError(f'ServiceDescriptor fields do not match the contract{detail_msg}')
     for key in ('service_id', 'operation', 'version'):
         if not isinstance(spec[key], str) or not IDENTIFIER.fullmatch(spec[key]):
-            raise ValueError('Invalid service identifier')
+            raise ValueError(f'Invalid {key} identifier: {spec[key]!r} (must match {IDENTIFIER.pattern}, e.g. start with lowercase letter, no dots, e.g. "v1", "v2_5")')
     url = urlsplit(spec['url'])
     if (url.scheme != 'https' or not url.hostname or url.username or url.password
             or url.fragment or url.port not in {None, 443} or len(spec['url']) > 2048):

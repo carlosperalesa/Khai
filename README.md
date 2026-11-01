@@ -4,7 +4,7 @@ Continuidad ya comprobada en el servidor: Nano respondió durante la carga de lo
 
 Continuidad de modelos implementada y en validación: `/mode <perfil>` devuelve un ID y prepara el cambio en segundo plano; `/mode cancel` o `/stop` lo cancelan. Brain conserva el servicio actual o confirma Nano antes de reemplazar la VM compartida. Si Nano falla, solicita elegir un perfil; no arranca otros automáticamente. El contrato de Mind usa el esquema nativo de Ollama y separa la orden actual del historial. Estado real de despliegue y pruebas en [CHECKPOINT](./CHECKPOINT.md).
 
-Validación local consolidada: 363 pruebas y 39 subpruebas aprobadas. Todas aprobadas; incluye el enmascaramiento de mensajes internos, serialización universal de firmas de herramientas y fallback reactivo. Los fixtures de modelos no sustituyen la aceptación real.
+Validación local consolidada: 363 pruebas y 39 subpruebas aprobadas. Todas aprobadas; incluye el enmascaramiento de mensajes internos, precisión diagnóstica en descriptores de servicios, serialización universal de firmas de herramientas y fallback reactivo. Los fixtures de modelos no sustituyen la aceptación real.
 
 El propietario aprobó el [diario común de interacciones](./docs/COMMON_JOURNAL.md). La implementación enlaza modelos, chat, Hand, Pixy, Heart, informes y uso de skills mediante ciclos y eventos persistentes; `/p informe <ID>` consulta una rama sin iniciar reparación. Validación y despliegue de esta continuación se registran en CHECKPOINT.
 
