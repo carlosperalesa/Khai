@@ -1,5 +1,21 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Humanización de la Interfaz, Mind como Wrapper y Localización Métrica — trabajo autorizado
+
+- **Mind como Wrapper Bidireccional y Base de Conocimiento del Usuario:**
+  1. *Inbound Wrapper (Contexto y Perfil de Usuario):* `MemoryEngine` (`app/mind/memory.py`) implementa la gestión persistente del perfil de usuario (`DEFAULT_USER_PROFILE`), configurando idioma (`es`), ciudad base (`Santiago`), país (`Chile`), unidades métricas (`metric`) y zona horaria (`America/Santiago`).
+  2. *Extracción Inteligente de Parámetros:* `ActionPlanner` (`app/mind/action_planner.py`) recibe el contexto del usuario e infiere automáticamente los inputs requeridos a partir de la orden del usuario o desde sus preferencias base, eliminando preguntas redundantes cuando el usuario ya nombró la entidad o cuando existe un valor por defecto en su perfil.
+  3. *Humanización de Preguntas de Requisitos:* `Coordinator` (`app/mind/coordinator.py`) erradica formulaciones técnicas como `¿Qué valores corresponden a city?`, sustituyéndolas por preguntas en lenguaje natural y empático (`¿Podrías indicarme la ciudad para continuar con la consulta?`) y autocompletando datos disponibles desde `MemoryEngine.get_user_profile()`.
+  4. *Outbound Wrapper (Traducción a Humano de Salidas):* Se implementa `humanize_worker_output` en `Coordinator`:
+     - Desempaqueta automáticamente objetos JSON emitidos por las skills (`weather_info`, `result`, etc.) y formatea diccionarios en viñetas limpias sin exponer llaves `{}` ni comillas de sintaxis técnica.
+     - Suprime prefijos mecánicos de depuración (`Paso X:`, `\w+ info:`, `Resultado:`).
+     - Traduce descripciones técnicas residuales de servicios externos (ej. `broken clouds` -> `cielo nuboso`, `light rain` -> `lluvia ligera`).
+- **Directrices de Localización Métrica para Hand (`app/hand/hand.py`):**
+  - Se añade directriz mandatoria en el prompt de generación de código: todo servicio externo debe configurarse con `units='metric'` (grados Celsius) y `lang='es'`, redactando mensajes completos y fluidos para personas, sin prefijos ni emoticones.
+- **Suite de Pruebas Unitarias Aprobada al 100%:**
+  - Nueva suite canónica `tests/test_human_interface.py` (8 pruebas unitarias) cubriendo deserialización limpia de JSON, eliminación de prefijos mecánicos, traducción climática, viñetas multiclave, humanización de preguntas de scope y persistencia de perfiles en `MemoryEngine`.
+  - Suite canónica completa consolidada: **371 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**.
+
 ## Continuidad de modelos, contratos y validación de producción — trabajo autorizado
 
 - **Reanudación y despliegue autorizados por el propietario:** Se ejecutan las 5 acciones prioritarias acordadas: consolidar documentación, commit y push a `origin/main`, despliegue en Azure (`carlos@20.237.211.250`), repetición conversacional de `busca` con Brave en Telegram y verificación de hostkey SSH / telemetría GPU Spot.

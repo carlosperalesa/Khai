@@ -103,6 +103,36 @@ La investigación de infraestructura de Hand usa `config/research.yaml` mediante
 - **Voice:** Concentrador ?nico de conectividad externa con verificaci?n TLS estricta, DNS pineado, resoluci?n multihoming con priorizaci?n IPv4 y tolerancia a fallos de ruta IPv6, y aislamiento absoluto de secretos (`secrets.env`).
 - **Dreams:** Persiste notas de episodios (`episode_notes`), consolida experiencias y formula recomendaciones de evolución de catálogo.
 
+### 1.1. Capa de Humanización y Experiencia de Usuario: Mind como Wrapper
+Mind opera como la capa cognitiva y el envoltorio humano (*Human Interface Wrapper*) bidireccional entre la maquinaria técnica determinista de Khai (Heart, Hand, Workers y Skills) y el usuario:
+
+```text
+[Usuario] <---(Telegram / Voice)---> [ MIND (Coordinator) ]
+                                       | Inbound: Resuelve contexto y perfil del usuario
+                                       v Outbound: Traduce salidas tecnicas a lenguaje humano
+                         +-------------+-------------+
+                         |                           |
+                         v                           v
+                  [ HAND / WORKER ]           [ HEART / PIXY ]
+                  (Ejecuta código,            (Diagnósticos, auditorías,
+                   emite JSON y outputs)       permisos y revisiones)
+```
+
+1. **Inbound Wrapper (Contexto y Base de Conocimiento del Usuario):**
+   - Controla las preferencias y el perfil persistente del usuario (`user_profile` en `MemoryEngine`), incluyendo idioma (`es`), ubicación base (`Santiago, Chile`), sistema métrico (`units: metric`) y zona horaria.
+   - En el enrutamiento y planificación de recetas (`ActionPlanner`), infiere y enlaza automáticamente entidades y parámetros requeridos presentes en el mensaje del usuario o en su perfil de preferencias, suprimiendo turnos y preguntas redundantes de alcance.
+   - Si un parámetro obligatorio falta y no existe en el perfil, formula preguntas en español natural y empático (ej. *"¿Podrías indicarme la ciudad para continuar?"*) erradicando consultas técnicas de variables como `¿Qué valores corresponden a city?`.
+
+2. **Outbound Wrapper (Traducción a Humano):**
+   - Intercepta y normaliza toda salida previa a su notificación en Voice (`Coordinator.notify()`):
+     - Desempaqueta objetos JSON estructurados devueltos por workers y skills (claves estándar como `weather_info`, `result`, `message`), extrayendo el contenido sustantivo y formateando atributos complejos en viñetas limpias sin exponer sintaxis `{}` ni comillas crudas.
+     - Suprime prefijos mecánicos de pipelines y recetas (`Paso X:`, `\w+ info:`, `Resultado:`).
+     - Traduce términos residuales de APIs internacionales (ej. descripciones meteorológicas en inglés) a español claro.
+   - Convierte los diagnósticos y avisos de recuperación de Heart en explicaciones comprensibles, evitando la exposición de números de caso, firmas o trazas internas al usuario.
+
+3. **Directrices de Localización para Hand:**
+   - La generación de código en `Hand.generate` instruye obligatoriamente a parametrizar servicios externos con localización métrica (`units='metric'` para °C y km/h) e idioma español (`lang='es'`), redactando resultados conversacionales completos y prohibiendo emojis o prefijos de depuración interna.
+
 ### Ciclo de Vida de una Solicitud:
 1. **Interpretación (Mind):** Convierte el mensaje en un `Intent` (objetivo, capacidad requerida y proveedor opcional).
 2. **Filtrado de Catálogo:** Busca skills activas que satisfagan la capacidad. Si no hay proveedor explícito, usa una preferencia aprobada persistente; si no existe, consulta al usuario.

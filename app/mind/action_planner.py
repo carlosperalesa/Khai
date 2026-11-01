@@ -165,8 +165,13 @@ class ActionPlanner:
             ],
             "inputs": {}
         }
+        user_profile = getattr(self, 'user_profile', None)
+        if user_profile is None and hasattr(self, 'memory') and hasattr(self.memory, 'get_user_profile'):
+            user_profile = self.memory.get_user_profile()
+        profile_str = json.dumps(user_profile or {"language": "es", "city": "Santiago", "country": "Chile", "units": "metric"}, ensure_ascii=False)
         prompt = (
             f'Objetivo del usuario: "{request}"\n'
+            f'Perfil y contexto del usuario (preferencias por defecto): {profile_str}\n'
             f'Conversación reciente (no acredita acciones): {conversation_context}\n'
             f'Estado real de tareas: {json.dumps(task_context or [], ensure_ascii=False)}\n'
             'Resuelve instrucciones breves como «hazlo» usando el objetivo del contexto. '
@@ -174,10 +179,11 @@ class ActionPlanner:
             'No consideres las promesas del historial como ejecuciones ni autorizaciones.\n'
             'Analiza si alguna de las habilidades disponibles resuelve este objetivo completo o parcial.\n'
             f'Habilidades disponibles: {json.dumps(skill_names, ensure_ascii=False)}\n'
-            'Instrucciones de asignación:\n'
+            'Instrucciones de asignación y extracción de parámetros:\n'
             '1. Si una habilidad existente resuelve el objetivo, asígnala en "use_existing_skill" con su skill_id y "new_skill": null.\n'
-            '2. Si NINGUNA habilidad existente sirve o falta alguna funcionalidad, define una o varias en "new_skill" con una "description" clara de lo que hace (ej: "convierte las imágenes en 0 y 1") y declara en "capabilities" los accesos requeridos (ej: Network, BinaryIO, FileSystem, Database, etc.).\n'
-            '3. El router ya confirmó este objetivo ejecutable. Construye sus acciones; '
+            '2. Si NINGUNA habilidad existente sirve o falta alguna funcionalidad, define una o varias en "new_skill" con una "description" clara de lo que hace y declara en "capabilities" los accesos requeridos.\n'
+            '3. EXTRACCIÓN INTELIGENTE DE ENTRADAS ("inputs"): Extrae en "inputs" los valores concretos que el usuario mencionó en su solicitud (ej. si requiere "city" y dijo "clima en Viña del Mar", asigna "city": "Viña del Mar"). Si el usuario no especificó un parámetro pero este existe en su perfil de contexto (ej. "city": "Santiago"), usa ese valor por defecto en "inputs". Solo omite parámetros no mencionados que tampoco estén en el perfil.\n'
+            '4. El router ya confirmó este objetivo ejecutable. Construye sus acciones; '
             'no lo reclasifiques como charla ni respondas al propietario.\n'
             f'Plantilla JSON a seguir estrictamente:\n'
             f'{json.dumps(template_example, ensure_ascii=False)}\n'

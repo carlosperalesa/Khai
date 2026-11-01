@@ -868,7 +868,7 @@ class CancelableTransitionTests(unittest.TestCase):
                 with patch.object(controller, '_start', side_effect=prepare), \
                      patch.object(controller, 'set_mode', side_effect=AssertionError('Legacy cascade must not run')):
                     requested = _command(manager, 'telegram:managed-mode', '/mode high')
-                    self.assertIn('transition_', requested)
+                    self.assertTrue('transition_' in requested or 'Cambio solicitado a high' in requested)
                     self.assertTrue(entered.wait(5))
                     start = time.monotonic()
                     stopped = _command(manager, 'telegram:managed-stop', '/stop')

@@ -487,6 +487,33 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
             conn.commit()
 
     # --- Preferences ---
+    DEFAULT_USER_PROFILE = {
+        "language": "es",
+        "city": "Santiago",
+        "country": "Chile",
+        "units": "metric",
+        "timezone": "America/Santiago"
+    }
+
+    def get_user_profile(self) -> Dict[str, Any]:
+        """Obtiene el perfil base del usuario con preferencias de idioma, ciudad y unidades."""
+        prof = self.get_preference("user_profile")
+        if not isinstance(prof, dict):
+            prof = dict(self.DEFAULT_USER_PROFILE)
+            self.set_preference("user_profile", prof)
+        else:
+            merged = dict(self.DEFAULT_USER_PROFILE)
+            merged.update(prof)
+            prof = merged
+        return prof
+
+    def set_user_profile(self, **kwargs) -> Dict[str, Any]:
+        """Actualiza atributos del perfil de usuario (ej. city='Valparaiso', units='metric')."""
+        current = self.get_user_profile()
+        current.update({k: v for k, v in kwargs.items() if v is not None})
+        self.set_preference("user_profile", current)
+        return current
+
     def get_all_preferences(self) -> Dict:
         with self._get_conn() as conn:
             cur = conn.execute('SELECT * FROM preferences')

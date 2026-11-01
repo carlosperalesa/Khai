@@ -103,6 +103,83 @@ def normalize_manifest(raw, default_purpose):
 from app.voice.runtime.docker_runtime import DockerRuntime as ProxyClient
 
 
+
+def _humanize_missing_question(missing, schema=None):
+    labels = {
+        'city': 'la ciudad',
+        'ciudad': 'la ciudad',
+        'date': 'la fecha',
+        'fecha': 'la fecha',
+        'query': 'el término o tema a consultar',
+        'consulta': 'el término o tema a consultar',
+        'url': 'el enlace o dirección web',
+        'username': 'el nombre de usuario',
+        'usuario': 'el nombre de usuario',
+    }
+    props = (schema or {}).get('properties', {})
+    items = []
+    for m in missing:
+        desc = props.get(m, {}).get('description') or props.get(m, {}).get('title')
+        if desc and len(desc) < 30:
+            items.append(desc.lower())
+        else:
+            items.append(labels.get(m.lower(), f"'{m}'"))
+    if len(items) == 1:
+        return f"¿Podrías indicarme {items[0]} para continuar con la consulta?"
+    return f"¿Podrías indicarme los siguientes datos necesarios: {', '.join(items)}?"
+
+
+def humanize_worker_output(raw_text: str) -> str:
+    text = str(raw_text or '').strip()
+    if not text:
+        return ""
+    if text.startswith('```'):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == '```':
+            inner = '\n'.join(lines[1:-1]).strip()
+            if inner.startswith('json\n') or inner.startswith('json '):
+                inner = inner[4:].strip()
+            text = inner
+    parsed = None
+    if (text.startswith('{') and text.endswith('}')) or (text.startswith('[') and text.endswith(']')):
+        try:
+            import json
+            parsed = json.loads(text)
+        except Exception:
+            pass
+    if isinstance(parsed, dict):
+        for key in ('weather_info', 'result', 'message', 'summary', 'text', 'output', 'content', 'description'):
+            if key in parsed and isinstance(parsed[key], str) and parsed[key].strip():
+                text = parsed[key].strip()
+                break
+        else:
+            items = []
+            for k, v in parsed.items():
+                k_clean = k.replace('_', ' ').capitalize()
+                items.append(f"• {k_clean}: {v}")
+            if items:
+                text = '\n'.join(items)
+    text = re.sub(r'^(?:Paso\s+\d+:\s*)+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^(?:[a-zA-Z0-9_-]+\s+info:\s*)+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^(?:Resultado:\s*)+', '', text, flags=re.IGNORECASE).strip()
+    weather_translations = {
+        r'\bbroken clouds\b': 'cielo nuboso',
+        r'\bscattered clouds\b': 'nubes dispersas',
+        r'\bfew clouds\b': 'parcialmente nublado',
+        r'\bclear sky\b': 'cielo despejado',
+        r'\bovercast clouds\b': 'completamente nublado',
+        r'\blight rain\b': 'lluvia ligera',
+        r'\bmoderate rain\b': 'lluvia moderada',
+        r'\bheavy rain\b': 'lluvia intensa',
+        r'\bthunderstorm\b': 'tormenta eléctrica',
+        r'\bsnow\b': 'nieve',
+        r'\bmist\b': 'neblina',
+    }
+    for pat, repl in weather_translations.items():
+        text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 class Coordinator:
     def __init__(self, manager, proxy=None):
         self.manager = manager
@@ -154,6 +231,8 @@ class Coordinator:
         cleaned = re.sub(r'\s*Solicitud\s*\.?\s*$', '', cleaned)
         cleaned = re.sub(r'\s*\((syntax_or_code|unknown_contract|uncertain_execution|model_unavailable|schema_violation|execution_uncertain)\)', '', cleaned)
         cleaned = cleaned.replace('plan médico de Heart', 'propuesta de recuperación')
+        cleaned = re.sub(r'^(?:Paso\s+\d+:\s*)+', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'^(?:[a-zA-Z0-9_-]+\s+info:\s*)+', '', cleaned, flags=re.IGNORECASE)
         dolphin = getattr(self.manager, 'dolphin', None)
         if dolphin is not None and not cleaned.startswith('[Mode =') and not cleaned.startswith('[Modo '):
             banner = dolphin.consume_transition_banner(dolphin.get_active_mode())
@@ -1720,10 +1799,20 @@ class Coordinator:
                                                     task.get('missing_input_schema'))
             if task.get('missing_input_schema'):
                 schema = task['missing_input_schema']
-                values = task.get('recipe_input') if task.get('recipe') else task.get('params')
-                missing = sorted(set(schema.get('required', [])) - set(values or {}))
+                values = dict(task.get('recipe_input') if task.get('recipe') else task.get('params') or {})
+                user_prof = {}
+                if hasattr(self.manager, 'memory') and hasattr(self.manager.memory, 'get_user_profile'):
+                    user_prof = self.manager.memory.get_user_profile()
+                for req in schema.get('required', []):
+                    if req not in values and req in user_prof and user_prof[req]:
+                        values[req] = user_prof[req]
+                if task.get('recipe'):
+                    task['recipe_input'] = values
+                else:
+                    task['params'] = values
+                missing = sorted(set(schema.get('required', [])) - set(values))
                 if missing and not questions:
-                    questions = ['¿Qué valores corresponden a ' + ', '.join(missing) + '?']
+                    questions = [_humanize_missing_question(missing, schema)]
             if questions:
                 self.store.update(tid, expected={'SCOPE_PLANNING'}, state='WAITING_SCOPE',
                                   scope_questions=questions)
@@ -1787,7 +1876,7 @@ class Coordinator:
                     missing = sorted(set(schema.get('required', [])) - set(merged))
                     if missing:
                         resolved['missing_questions'].append(
-                            '¿Qué valores corresponden a ' + ', '.join(missing) + '?')
+                            _humanize_missing_question(missing, schema))
                     else:
                         resolved['missing_questions'].append(
                             'Los valores no cumplen los tipos esperados. Indica nuevamente: ' +
@@ -2394,7 +2483,7 @@ class Coordinator:
                 if success is None or success is True:
                     self.store.update(tid, expected={'RUNNING'}, state='UNVERIFIED', result=result,
                                       machine_verification={'success': success, 'evidence': evidence})
-                    stdout_text = str(result.get('stdout', '')).strip()
+                    stdout_text = humanize_worker_output(result.get('stdout', ''))
                     if stdout_text:
                         msg = f"{stdout_text}\n\n¿Es este el resultado esperado? (y/n)"
                     else:
@@ -2447,7 +2536,8 @@ class Coordinator:
             self.store.update(tid, expected={'VERIFYING'}, state='COMPLETED' if v['success'] else 'DIAGNOSING', feedback=v, recovery_case_id=case_id)
             if v['success']:
                 stdout = (task.get('result') or {}).get('stdout', '')
-                out_msg = f"\nResultado:\n{stdout.strip()[:2000]}" if stdout and stdout.strip() else ""
+                clean_stdout = humanize_worker_output(stdout)
+                out_msg = f"\nResultado:\n{clean_stdout[:2000]}" if clean_stdout else ""
                 if task.get('mode') == 'AGENT':
                     self.notify('Resultado aceptado. Estado actual del servicio: '
                                 + str(self.store.get(tid).get('runtime_status', 'desconocido')) + '.' + out_msg)

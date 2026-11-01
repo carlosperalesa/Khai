@@ -216,6 +216,9 @@ Si hay un contrato de acción planificada, implementa solamente esa acción usan
 `khai_input.params` y emite exactamente un objeto JSON en stdout que cumpla su output_schema.
 No incorpores otras acciones del objetivo compuesto dentro de esta skill.
 NO uses emoticones ni emojis en las salidas impresas ni en el código.
+REGLA OBLIGATORIA DE LOCALIZACIÓN Y ESTILO HUMANO:
+Al consumir APIs externas (de clima, noticias, geografía, etc.), configura SIEMPRE parámetros métricos (ej. 'units': 'metric' para obtener grados Celsius en APIs como OpenWeatherMap) y lenguaje español ('lang': 'es'), salvo que el usuario pida explícitamente otra unidad.
+El resultado emitido por la skill debe estar redactado en español conversacional, fluido y claro para una persona. NUNCA incluyas prefijos técnicos ni de depuración en el texto de salida (estrictamente prohibido anteponer 'Paso X:', 'Weather info:', 'Resultado:' o nombres de campos internos).
 Los servicios AGENT escuchan en 8080 dentro del contenedor; no se publican puertos.
 GOD permite la API BaseSkill desde app.hand.base_skill; tampoco da permisos al host.
 No uses BaseSkill en SAFE. No inventes aprobaciones o resultados verificados.
