@@ -791,6 +791,13 @@ class Coordinator:
             if cancelled:
                 task['state'] = 'CANCELLED'
                 return
+            extension = {'kind': 'scope_reply', 'source': source,
+                         'created_at': time.time(), **INITIAL_TASK_BUDGET}
+            task.setdefault('budget_extensions', []).append(extension)
+            task['max_generations'] += extension['generations']
+            task['max_executions'] += extension['executions']
+            task['max_llm_calls'] += extension['llm_calls']
+            task['deadline'] = max(task['deadline'], time.time() + 1800)
             task.setdefault('scope_answers', []).append({
                 'questions': task.get('scope_questions', []), 'answer': answer,
                 'source': source, 'revision': task['revision']})

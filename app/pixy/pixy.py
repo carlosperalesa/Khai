@@ -10,6 +10,7 @@ import uuid
 from app.kernel.database import connection, migrate
 from app.kernel.journal import Journal
 from app.pixy.skill_approvals import SkillApprovalStore
+from app.pixy.control import INITIAL_TASK_BUDGET
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +453,13 @@ class PixyMind:
                         raise ValueError('Solicitud de creación obsoleta')
                     current['state'] = 'SCOPE_PLANNING' if approve else 'CANCELLED'
                     if approve:
+                        extension = {'kind': 'creation_approval', 'source': source,
+                                     'created_at': time.time(), **INITIAL_TASK_BUDGET}
+                        current.setdefault('budget_extensions', []).append(extension)
+                        current['max_generations'] += extension['generations']
+                        current['max_executions'] += extension['executions']
+                        current['max_llm_calls'] += extension['llm_calls']
+                        current['deadline'] = max(current['deadline'], time.time() + 1800)
                         missing = current.get('recipe_missing_specs') or {}
                         allowed_caps = (set(current.get('manifest', {}).get('capabilities', []))
                                         | {cap for action in missing.values()
