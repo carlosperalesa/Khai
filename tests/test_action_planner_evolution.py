@@ -236,6 +236,28 @@ class HeartAntiLoopAndPixyTests(unittest.TestCase):
         self.assertIn('recovery_loop_detected', codes)
         self.assertNotIn('conversation_evidence_insufficient', codes)
 
+    def test_first_failure_not_marked_as_loop_even_with_case_id(self):
+        """Un primer fallo (attempt_number=1, sin recovery_history) NO se marca como bucle aunque tenga un recovery_case_id recién abierto."""
+        task = self.store.create(
+            'owner:test', 'Generar reporte',
+            state='DIAGNOSING',
+            attempt_number=1,
+            recovery_case_id='case-first-opened-1',
+            feedback={'error': 'SyntaxError: unexpected token'}
+        )
+
+        evidence = self.senses.evidence('Heart case: test_first', 'before')
+        evidence['tasks'] = [task]
+
+        diag = self.recovery.diagnose(evidence)
+        codes = [f['code'] for f in diag['findings']]
+
+        self.assertNotIn('recovery_loop_detected', codes)
+        self.assertIn('task_failure', codes)
+        failure_finding = next(f for f in diag['findings'] if f['code'] == 'task_failure')
+        self.assertIsNotNone(failure_finding.get('remedy'))
+
+
 
 class CoordinatorSanitizationTests(unittest.TestCase):
     def test_notify_sanitizes_py_files(self):
@@ -268,6 +290,32 @@ class CoordinatorSanitizationTests(unittest.TestCase):
         self.assertIn('¿Deseas que proceda con esta actualización?', msg)
         self.assertEqual(len(buttons), 2)
         self.assertEqual(buttons[0]['text'], 'Sí, proceder')
+
+    def test_reply_intent_rejects_ambiguous_and_negated_affirmations(self):
+        """Verifica que el fallback determinista no apruebe negaciones compuestas ni fillers ambiguos."""
+        coord = Coordinator.__new__(Coordinator)
+
+        # 1. Negated affirmations must be strictly classified as reject
+        adversarial_rejects = [
+            'claro que no', 'ok no lo hagas', 'bien, cancela',
+            'por favor no', 'bueno, olvídalo', 'no lo hagas',
+            'para nada', 'cancela', 'abortar'
+        ]
+        for phrase in adversarial_rejects:
+            res = coord.classify_reply_intent(None, phrase)
+            self.assertEqual(res['intent'], 'reject', f"Failed to reject: {phrase}")
+            self.assertGreaterEqual(res['confidence'], 0.9)
+
+        # 2. Ambiguous filler words must NOT approve
+        for filler in ['por favor', 'bien', 'bueno']:
+            res = coord.classify_reply_intent(None, filler)
+            self.assertNotEqual(res['intent'], 'approve', f"Filler incorrectly approved: {filler}")
+
+        # 3. Legitimate affirmative cues approve
+        for aff in ['dale', 'ok', 'claro', 'hazlo', 'procede', 'sí', 'afirmativo', 'confirmo']:
+            res = coord.classify_reply_intent(None, aff)
+            self.assertEqual(res['intent'], 'approve', f"Affirmation failed: {aff}")
+
 
 
 if __name__ == '__main__':

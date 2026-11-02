@@ -1,4 +1,4 @@
-"""Brain module: reasoning facade, inference cascade and model/VM coordination."""
+"""Brain module: reasoning facade, model lifecycle and instant continuity fallback."""
 import uuid
 import time
 from app.mind.brain.controller import (
@@ -14,7 +14,7 @@ from app.mind.brain.controller import (
 class Brain:
     """Reasoning and inference coordinator for Khai.
 
-    Coordinates model selection, inference cascade (high > mid > low > nano),
+    Coordinates model selection, instant Nano continuity fallback with interactive model buttons,
     and model lifecycle. Delegates actual network transport and secrets to Voice.
     """
 

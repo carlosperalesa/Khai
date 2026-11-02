@@ -5,7 +5,7 @@
 **Subagentes Auditoría:** `code-auditor` (`teamwork_auditor`), `server-inspector` (`teamwork_explorer`), `qa-tester` (`teamwork_challenger`)  
 **Modo de Auditoría:** Demo — Estrictamente Solo Lectura (Read-Only), sin modificación de código ni reinicios forzados  
 **Repositorio:** `d:\OneDrive\GitHub\dev\Khai`  
-**Servidor de Producción Evaluado:** Azure Linux (`carlos@20.237.211.250`)  
+**Servidor de Producción Evaluado:** Azure Linux (`[AZURE_USER]@[AZURE_SERVER_IP]`)  
 **Dictamen Global:** **SISTEMA OPERATIVO Y ESTRUCTURALMENTE ROBUSTO**, con incidentes críticos de configuración perimetral de credenciales y latencia en GPU Spot, e inconsistencias menores en herramientas de prueba y manejo de excepciones.
 
 ---
@@ -39,7 +39,7 @@ Los hallazgos en esta categoría representan riesgos de seguridad, indisponibili
 - **Evidencia Observable:**
   - Inspección de directorio en raíz: existen `secrets.env` y `GEMINI_API.txt`.
   - En `data/voice/secrets.env` existe un archivo idéntico de 7,024 bytes.
-  - `GEMINI_API.txt` contiene una clave activa de Gemini API (`AQ.Ab8RN6KjMHYC...`).
+  - `GEMINI_API.txt` contiene una clave activa de Gemini API (`[REDACTED_API_KEY]`).
   - `.agents/GEMINI.md` Sección 4 establece taxativamente:
     > *"Gestión de secretos: Los secretos residen exclusivamente en Voice; nunca se exponen en prompts, historiales, descriptores, repositorios ni código."*
   - `docs/ARCHITECTURE.md` Sección 3 ratifica: *"data/voice/secrets.env: Administrado exclusivamente por Voice."*
@@ -118,7 +118,7 @@ Los hallazgos en esta categoría representan riesgos de seguridad, indisponibili
   - El daemon de Docker no está instalado en el host local de Windows (`CommandNotFoundException`).
   - `coordinator.lock` se encuentra libre (`msvcrt.LK_NBLCK` confirma que ningún proceso lo retiene).
 - **Análisis Forense:**
-  Khai opera bajo un esquema desacoplado: el host local de Windows se utiliza para desarrollo estático, edición y ejecución de suites de pruebas (`tests/`), mientras que el entorno de ejecución vivo de producción reside en Azure Linux (`20.237.211.250`). En la máquina local, el servidor está **completamente inactivo/caído**, impidiendo pruebas sintéticas de red en vivo contra un host local sin forzar arranques manuales.
+  Khai opera bajo un esquema desacoplado: el host local de Windows se utiliza para desarrollo estático, edición y ejecución de suites de pruebas (`tests/`), mientras que el entorno de ejecución vivo de producción reside en Azure Linux (`[AZURE_SERVER_IP]`). En la máquina local, el servidor está **completamente inactivo/caído**, impidiendo pruebas sintéticas de red en vivo contra un host local sin forzar arranques manuales.
 - **Acción Correctiva:**
   Documentar explícitamente en `README.md` la separación entre el host de desarrollo (Windows) y el host de ejecución (Azure), y proveer un arnés de simulación local (mock server) para pruebas de integración sin requerir infraestructura remota.
 
@@ -236,7 +236,7 @@ Los hallazgos en esta categoría corresponden a optimizaciones operativas, discr
 ### M-08: Divergencia entre Puertos en `docker-compose.yml` y Reglas de Seguridad en Azure NSG
 - **Componente:** `docker-compose.yml:9` vs Azure Network Security Group.
 - **Evidencia Observable:**
-  `docker-compose.yml` mapea `8000:8000` y `8443:8443`. Sin embargo, pruebas de red hacia `20.237.211.250` confirman que el puerto `8000` está cerrado/filtrado por el firewall de Azure, permitiendo tráfico únicamente por `8443`.
+  `docker-compose.yml` mapea `8000:8000` y `8443:8443`. Sin embargo, pruebas de red hacia `[AZURE_SERVER_IP]` confirman que el puerto `8000` está cerrado/filtrado por el firewall de Azure, permitiendo tráfico únicamente por `8443`.
 - **Recomendación:**
   Documentar en el encabezado de `docker-compose.yml` que el puerto 8000 es de uso exclusivo para inspección interna/local.
 
@@ -305,7 +305,7 @@ Los componentes en esta categoría demuestran madurez, alta confiabilidad, cumpl
 ---
 
 ### E-04: Servidor de Producción Azure Activo y Contenedores Operativos
-- **Componente:** Host Linux Azure (`20.237.211.250`) y Docker runtime.
+- **Componente:** Host Linux Azure (`[AZURE_SERVER_IP]`) y Docker runtime.
 - **Evidencia Observable:**
   - Uptime continuo de 21 días (`00:00:57 up 21 days, load average: 0.01`).
   - Contenedor `khai_core` en ejecución con `make start` -> `python -m app.voice.voice`.
@@ -317,7 +317,7 @@ Los componentes en esta categoría demuestran madurez, alta confiabilidad, cumpl
 ### E-05: Autenticación Criptográfica Estricta en Webhook Ingress (HMAC SHA-256)
 - **Componente:** `app/voice/voice.py:401-402` en puerto HTTPS 8443.
 - **Evidencia Observable:**
-  - Peticiones externas sin token de autenticación a `https://20.237.211.250:8443/webhook` responden unívocamente con `HTTP 401 Unauthorized`.
+  - Peticiones externas sin token de autenticación a `https://[AZURE_SERVER_IP]:8443/webhook` responden unívocamente con `HTTP 401 Unauthorized`.
   - Verificación en código: validación con `hmac.compare_digest` del encabezado `X-Telegram-Bot-Api-Secret-Token`.
 - **Evaluación:** Ingress seguro inmune a accesos anónimos o no autorizados.
 
@@ -459,5 +459,5 @@ Get-Item -Path "secrets.env", "GEMINI_API.txt", "data/voice/secrets.env"
 .venv\Scripts\python.exe -c "import sys, tempfile, sqlite3; sys.path.insert(0, '.'); from pathlib import Path; from app.heart.recovery import Recovery; from unittest.mock import Mock; tmp = tempfile.TemporaryDirectory(); db = Path(tmp.name)/'test.sqlite3'; rec = Recovery(db, Mock(), Mock(), Mock()); rec._move('case-test', 'COLLECTING_EVIDENCE', expected=None); conn = sqlite3.connect(db); conn.execute('DELETE FROM recovery_transitions')"
 
 # 7. Verificar estado de producción en Azure (requiere SSH autorizado) (C-02, E-04, E-05)
-ssh -n -o BatchMode=yes -o ConnectTimeout=5 carlos@20.237.211.250 "uptime && docker ps -a"
+ssh -n -o BatchMode=yes -o ConnectTimeout=5 [AZURE_USER]@[AZURE_SERVER_IP] "uptime && docker ps -a"
 ```

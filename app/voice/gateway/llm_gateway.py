@@ -237,7 +237,17 @@ class LLMManager:
                 self.probe_nano(deadline=kwargs['_deadline'])
                 if manager.publish_nano_fallback(mode, generation):
                     from app.voice.help import MODE_SELECTION_BUTTONS
-                    self._notify(f'[Modo {mode} falló] [Modo nano conectado] Elige otro modelo si lo deseas.', buttons=MODE_SELECTION_BUTTONS)
+                    err_msg = str(exc).lower()
+                    exc_type = type(exc).__name__.lower()
+                    if 'timeout' in err_msg or 'timeout' in exc_type or 'timed out' in err_msg:
+                        reason = 'tiempo de espera agotado'
+                    elif 'spot' in err_msg or 'preempt' in err_msg or 'unavailable' in err_msg:
+                        reason = 'spot no disponible'
+                    elif 'connection' in exc_type or 'refused' in err_msg:
+                        reason = 'conexión rechazada'
+                    else:
+                        reason = (str(exc)[:50] if str(exc) else type(exc).__name__)
+                    self._notify(f'[Modo {mode} falló por: {reason}] [Modo nano conectado] Elige otro modelo si lo deseas.', buttons=MODE_SELECTION_BUTTONS)
         result = invoke('nano', lambda: self._nano_call(operation, value, tools, kwargs))
         return result
 
@@ -252,12 +262,22 @@ class LLMManager:
                 return self._complete_dolphin(value, tools, self._dolphin_endpoint(), kwargs)
             except LLMContentRejected:
                 raise
-            except Exception:
+            except Exception as exc:
                 self.probe_nano()
                 if controller is not None:
                     controller.mark_fallback_to_nano()
                 from app.voice.help import MODE_SELECTION_BUTTONS
-                self._notify('[Modo nano conectado] Elige otro modelo si lo deseas.', buttons=MODE_SELECTION_BUTTONS)
+                err_msg = str(exc).lower()
+                exc_type = type(exc).__name__.lower()
+                if 'timeout' in err_msg or 'timeout' in exc_type or 'timed out' in err_msg:
+                    reason = 'tiempo de espera agotado'
+                elif 'spot' in err_msg or 'preempt' in err_msg or 'unavailable' in err_msg:
+                    reason = 'spot no disponible'
+                elif 'connection' in exc_type or 'refused' in err_msg:
+                    reason = 'conexión rechazada'
+                else:
+                    reason = (str(exc)[:50] if str(exc) else type(exc).__name__)
+                self._notify(f'[Modo {mode} falló por: {reason}] [Modo nano conectado] Elige otro modelo si lo deseas.', buttons=MODE_SELECTION_BUTTONS)
         if kwargs.get('forced_key') and kwargs.get('forced_type'):
             provider = kwargs['forced_type']
             if provider not in {'gemini', 'openai', 'azure'}:

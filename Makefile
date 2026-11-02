@@ -42,7 +42,7 @@ update: ## Actualiza el repositorio e instala nuevas dependencias
 	@echo "Actualización completada."
 
 test: ## Pruebas locales; Docker, Telegram y LLM simulados
-	$(PYTHON_CMD) -B -m unittest discover -s tests -v
+	$(PYTHON_CMD) -m pytest -q
 
 migrate: ## Migración offline con copia SQLite consistente; detener servicios primero
 	$(PYTHON_CMD) -m scripts.migrate_architecture

@@ -13,7 +13,6 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
-      - ./other:/app/other
     environment:
       TZ: America/Santiago
       DATA_DIR: /app/data

@@ -754,11 +754,13 @@ class Recovery:
                 err_str = str(err)
 
                 # Detección de bucle de recuperación
+                # Solo se considera bucle si ya se ejecutó un reintento (attempts >= 2),
+                # si existen antecedentes previos de recuperación (recovery_history) o si falló Hand repetidamente (>= 2).
+                # No se marca bucle en el primer fallo con caso recién abierto.
                 attempts = latest_failed.get('attempt_number', 1)
                 recovery_hist = latest_failed.get('recovery_history') or []
                 hand_fails = latest_failed.get('hand_failures', 0)
-                is_loop = (attempts >= 2 or len(recovery_hist) >= 1 or hand_fails >= 2 or
-                           bool(latest_failed.get('recovery_case_id')))
+                is_loop = (attempts >= 2 or len(recovery_hist) >= 1 or hand_fails >= 2)
 
                 is_coverage_or_capability = any(term in err_str.lower() for term in (
                     'cobertura', 'replantear capacidades', 'insuficiente', 'missing action'

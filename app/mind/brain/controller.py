@@ -249,9 +249,6 @@ class ModelController:
         except Exception as exc:
             logger.warning('No se pudo apagar Dolphin tras el fallback (%s)', type(exc).__name__)
 
-    def mark_fallback_to_low(self) -> None:
-        self.mark_fallback_to_nano()
-
     def consume_transition_banner(self, effective_mode: str) -> str:
         """Devuelve '[Modo X]\\n' solo cuando el modo efectivo cambió respecto al último notificado."""
         with connection(self.db_path) as conn:

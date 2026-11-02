@@ -574,25 +574,39 @@ class Coordinator:
                     logger.debug('Fallo en clasificación contextual LLM, usando evaluador semántico: %s', exc)
 
         # 4. Semantic contextual evaluator (fallback for offline mode or test mocks)
+        # 4a. Strong negative / rejection cues take absolute precedence over affirmative words
+        # Prevents 'claro que no', 'ok no lo hagas', 'bien, cancela', 'por favor no', 'bueno, olvídalo' from approving.
+        negative_keywords = {
+            'cancela', 'cancelar', 'abortar', 'olvídalo', 'olvidalo', 'no quiero',
+            'rechazo', 'rechazar', 'negativo', 'para nada', 'de ninguna manera',
+            'detén', 'detener', 'alto', 'nunca', 'jamás', 'jamas', 'no lo hagas',
+            'no procedas', 'claro que no', 'por favor no'
+        }
+        has_negative_keyword = any(k in norm for k in negative_keywords)
+        starts_with_negation = norm == 'no' or norm.startswith(('no ', 'no,', 'tampoco'))
+        has_negated_action = re.search(r'\bno\s+(?:lo\s+hagas|procedas|quiero|hacer|ejecutar|avances|toques)\b', norm) is not None
+
+        if has_negative_keyword or starts_with_negation or has_negated_action:
+            return {'intent': 'reject', 'confidence': 0.95}
+
+        # 4b. Refinement cues (modification requests during questions)
         refinement_cues = ('además', 'ademas', 'pero', 'también', 'tambien', 'ahora quiero', 'mejor', 'cambia', 'en vez de', 'agreg')
         has_refinement = any(c in norm for c in refinement_cues)
         if has_refinement and len(words) > 1:
             return {'intent': 'modify', 'confidence': 0.9}
 
+        # 4c. Explicit affirmative cues (strictly excluding ambiguous fillers like 'por favor', 'bien', 'bueno')
         affirmative_cues = {
-            'dale', 'claro', 'procede', 'adelante', 'ok', 'de acuerdo', 'confirmo',
-            'confirmar', 'afirmativo', 'acepto', 'aceptar', 'hazlo', 'por favor',
-            'perfecto', 'bueno', 'bien', 'me parece bien', 'me parece'
+            'dale', 'procede', 'adelante', 'de acuerdo', 'confirmo',
+            'confirmar', 'afirmativo', 'acepto', 'aceptar', 'hazlo',
+            'perfecto', 'me parece bien', 'me parece'
         }
-        if any(norm == cue or norm.startswith(cue + ' ') or first_w == cue for cue in affirmative_cues):
+        # 'ok' and 'claro' are only affirmative if not followed by rejection
+        if norm in {'ok', 'claro'} or norm.startswith(('ok ', 'claro ')):
             return {'intent': 'approve', 'confidence': 0.9}
 
-        negative_cues = {
-            'cancela', 'cancelar', 'abortar', 'olvídalo', 'olvidalo', 'no quiero',
-            'rechazo', 'rechazar', 'negativo', 'para nada', 'detén', 'detener', 'alto'
-        }
-        if any(norm == cue or norm.startswith(cue + ' ') or first_w == cue for cue in negative_cues):
-            return {'intent': 'reject', 'confidence': 0.9}
+        if any(norm == cue or norm.startswith(cue + ' ') or first_w == cue for cue in affirmative_cues):
+            return {'intent': 'approve', 'confidence': 0.9}
 
         if kind == 'scope' and len(words) <= 3 and not any(c in norm for c in ('?', 'hola', 'modo', 'recuerda')):
             return {'intent': 'answer', 'confidence': 0.6}

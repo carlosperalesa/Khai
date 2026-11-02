@@ -153,7 +153,7 @@ class ModelContractTests(unittest.TestCase):
         gateway.probe_nano = Mock(return_value=True)
         gateway.generate_content('hello')
         gateway._notify.assert_called_once_with(
-            '[Modo low falló] [Modo nano conectado] Elige otro modelo si lo deseas.',
+            '[Modo low falló por: tiempo de espera agotado] [Modo nano conectado] Elige otro modelo si lo deseas.',
             buttons=MODE_SELECTION_BUTTONS
         )
     def test_internal_identifiers_are_masked_in_user_facing_messages(self):

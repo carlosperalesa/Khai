@@ -1,5 +1,35 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Correcciones del Auditor, Alineación Constitucional y Fuente Única de Verdad (2 de noviembre de 2026) — trabajo autorizado
+
+- **Resolución de Aprobaciones Ambiguas en Coordinator (pp/mind/coordinator.py):**
+  1. *Priorización de Negaciones Compuestas:* En classify_reply_intent, las frases y locuciones de rechazo (cancela, bortar, olvídalo, 
+o quiero, 
+o lo hagas, claro que no, por favor no, para nada) se evalúan en primer lugar con confianza 0.95.
+  2. *Erradicación de Falsos Positivos por Muletillas:* Se eliminaron del conjunto afirmativo términos ambiguos o de cortesía ('por favor', 'bien', 'bueno'), clasificándolos como unrelated a menos que acompañen una afirmación explícita.
+  3. *Calificación Contextual de 'ok' y 'claro':* No otorgan aprobación si van seguidos inmediatamente por partículas de negación.
+
+- **Alineación de Modelos, Fallback a Nano y Erradicación de Cascada Residual:**
+  1. *Mensajería Constitucional Estricta:* llm_gateway.py extrae motivos limpios ('tiempo de espera agotado', 'spot no disponible') y emite exactamente [Modo {mode} falló por: {reason}] [Modo nano conectado] desplegando MODE_SELECTION_BUTTONS.
+  2. *Eliminación de Métodos Residuales Engañosos:* Se eliminó mark_fallback_to_low en pp/mind/brain/controller.py.
+  3. *Alineación Documental:* Erradicadas todas las menciones a cascadas automáticas en README.md, docs/ARCHITECTURE.md y rain/__init__.py.
+
+- **Refinamiento de Detección Anti-Bucle en Heart (pp/heart/recovery.py):**
+  1. *Corrección de Falsos Bucles en Intento 1:* Se eliminó ool(latest_failed.get('recovery_case_id')) de la condición is_loop. La detección de bucle exige estrictamente ttempts >= 2, antecedentes de recuperación (len(recovery_history) >= 1) o fallos repetidos de generación (hand_failures >= 2).
+
+- **Sanitización de Seguridad y Consolidación de Fuente Única de Verdad:**
+  1. *Exposición Perimetral Erradicada:* Eliminadas IPs públicas (20.237.211.250), usuarios SSH (carlos@) y hostnames internos en toda la documentación pública (docs/ARCHITECTURE.md, CHECKPOINT.md, etc.), reemplazados por marcadores neutros [AZURE_SERVER_IP], [AZURE_USER] y [AZURE_VM_NAME].
+  2. *Archivo de Auditoría Histórica:* Se archivó udit_report.md en docs/historical/audit_report_20261031.md censurando snippets de tokens.
+  3. *Plantilla Única de Secretos:* Consolidada una única fuente canónica en config/secrets.env.example, eliminando la copia duplicada en la raíz.
+  4. *Erradicación de Conteos Dispersos:* Los conteos fijos de pruebas fueron centralizados exclusivamente en CHECKPOINT.md; README.md y docs/ARCHITECTURE.md delegan en make test.
+  5. *Limpieza de Caracteres Corruptos:* Eliminados caracteres de control (, ) y tildes corruptas (?) en CHECKPOINT.md, docs/ARCHITECTURE.md y docs/VALIDATION.md.
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Se añadieron pruebas adversariales en 	ests/test_action_planner_evolution.py (rechazo de negaciones compuestas y fillers) y en 	ests/test_model_contract.py (formato constitucional del mensaje de fallo).
+  - Estado canónico certificado: **14 suites, 417 pruebas unitarias y 39 subpruebas pasando al 100% (0 errores, 0 fallos)** mediante make test (pytest -q).
+
+---
+
 ## Evolución Cognitiva de Skills, Erradicación de Bucles Ciegos y Diagnóstico Transparente — trabajo autorizado
 
 - **Evolución Dinámica de Skills ante Brechas de Cobertura (ActionPlanner en app/mind/action_planner.py):**
@@ -49,30 +79,30 @@
 
 - **Árbol Durable Conversación -> Solicitud -> Operación (ConversationStore / Coordinator):**
   1. *Identificadores Durables y Procedencia:* Toda solicitud conserva inequívocamente su conversation_id, mensaje iniciador y estado. Las solicitudes hijas y transiciones de modelo no pierden su origen conversacional.
-  2. *Protección contra Ambigüedades en Topics de Telegram:* Coordinator distingue la raíz de un supergrupo/tema de Telegram (	hread_id), impidiendo que el mensaje base del hilo sea tomado como respuesta afirmativa a decisiones pendientes ajenas.
+  2. *Protección contra Ambigüedades en Topics de Telegram:* Coordinator distingue la raíz de un supergrupo/tema de Telegram (thread_id), impidiendo que el mensaje base del hilo sea tomado como respuesta afirmativa a decisiones pendientes ajenas.
   3. *Botones Interactivos Inline en Decisiones:* Se inyectan botones interactivos (Sí / No vinculados al question_id) para aprobaciones (WAITING_CREATION_APPROVAL, WAITING_APPROVAL, WAITING_SERVICE_APPROVAL), eliminando ambigüedades en respuestas textuales breves.
   4. *Invalidación Transaccional de Preguntas Obsoletas:* Al cancelar, expirar o transicionar una tarea, sus preguntas abiertas asociadas en conversation_questions se marcan atómicamente como stale, evitando que respuestas tardías reactiven flujos extinguidos.
   5. *Aislamiento y Contexto Compartido:* La recuperación de contexto histórico entre conversaciones (shared_context) delimita claramente procedencia y se inyecta como referencia informativa, prohibiendo la propagación implícita de autorizaciones.
 
-- **Evaluación Autónoma de Cobertura de Metas (pp/mind/quality.py / _check_goal_result):**
-  1. *Superación de Verificación Puramente Operativa:* Terminar un proceso técnico no acredita el cumplimiento del objetivo. ssess_result evalúa determinista y semánticamente la evidencia entregada frente al objetivo completo (verificando fechas, unidades, error embebido, idioma y alcances solicitados).
+- **Evaluación Autónoma de Cobertura de Metas (app/mind/quality.py / _check_goal_result):**
+  1. *Superación de Verificación Puramente Operativa:* Terminar un proceso técnico no acredita el cumplimiento del objetivo. assess_result evalúa determinista y semánticamente la evidencia entregada frente al objetivo completo (verificando fechas, unidades, error embebido, idioma y alcances solicitados).
   2. *Detección de Discrepancias:* Condiciones climáticas actuales no acreditan un pronóstico futuro; temperatura no satisface una petición de viento; noticias sin fecha no acreditan actualidad.
   3. *Enrutamiento a Heart:* Ante una cobertura insuficiente, _check_goal_result detiene la entrega de éxito, abre automáticamente un incidente cognitivo en Heart (cognitive_fault / cognitive_discrepancy) y notifica al usuario explicando qué faltó antes de reintentar.
   4. *Erradicación de Coletillas Mecánicas:* Se elimina la pregunta estática ¿Es correcto el resultado completo? en present_recipe, permitiendo que la interacción sea completamente fluida y solo consulte al usuario de forma orgánica cuando sea estrictamente necesario.
 
 - **Transiciones Durables de Modo y Resiliencia (TransitionManager / VoiceMailbox):**
   1. *Desacoplamiento de Nano respecto a la Infraestructura:* La disponibilidad de Modo Nano se confirma y notifica de inmediato al usuario sin esperar la detención o limpieza asíncrona de VMs Spot en GCE.
-  2. *Notificaciones Persistentes:* Los avisos de cambio de modelo ([Modo nano conectado], etc.) se registran de forma transaccional y durable en oice_outbox asociados a la conversación de origen.
+  2. *Notificaciones Persistentes:* Los avisos de cambio de modelo ([Modo nano conectado], etc.) se registran de forma transaccional y durable en voice_outbox asociados a la conversación de origen.
   3. *Recuperación ante Reinicios y Demoras:* poll_notifications() detecta transiciones interrumpidas por reinicio o demoras anormales (>120 s), emitiendo avisos orientativos y permitiendo cancelación segura con /stop.
 
 - **Eliminación y Cancelación Segura de Conversaciones (/delete):**
   1. Al invocar /delete, se cancelan atómicamente las tareas y transiciones activas de la conversación, preservando los recibos de los efectos externos ya completados y suprimiendo entregas tardías hacia conversaciones eliminadas.
 
 - **Resolución de Desfase en Servidor de Producción (Azure):**
-  1. Se detectó y resolvió el desfase en memoria de pp/hand/hand.py y pp/mind/coordinator.py dentro del contenedor Docker khai_core en Azure (20.237.211.250). Al estar el código horneado en la imagen, se procedió a reconstruir el contenedor (docker compose up -d --build bot), verificando la coincidencia al 100% de los hashes SHA-256 con el repositorio Git.
+  1. Se detectó y resolvió el desfase en memoria de app/hand/hand.py y app/mind/coordinator.py dentro del contenedor Docker khai_core en Azure ([AZURE_SERVER_IP]). Al estar el código horneado en la imagen, se procedió a reconstruir el contenedor (docker compose up -d --build bot), verificando la coincidencia al 100% de los hashes SHA-256 con el repositorio Git.
 
 - **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
-  - Suite canónica completa: **402 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**, incorporando la nueva suite 	ests/test_flow_integrity.py (13 pruebas de integridad y regresión) y corrigiendo las aserciones de 	est_hand.py, 	est_voice.py y 	est_kernel.py.
+  - Suite canónica completa: **402 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**, incorporando la nueva suite tests/test_flow_integrity.py (13 pruebas de integridad y regresión) y corrigiendo las aserciones de 	est_hand.py, 	est_voice.py y 	est_kernel.py.
 
 ## Clasificación Dinámica de Respuestas por LLM, Versionado Canónico de Skills (.001) y Política de Fallback — trabajo autorizado
 
@@ -167,7 +197,7 @@
 
 ## Continuidad de modelos, contratos y validación de producción — trabajo autorizado
 
-- **Reanudación y despliegue autorizados por el propietario:** Se ejecutan las 5 acciones prioritarias acordadas: consolidar documentación, commit y push a `origin/main`, despliegue en Azure (`carlos@20.237.211.250`), repetición conversacional de `busca` con Brave en Telegram y verificación de hostkey SSH / telemetría GPU Spot.
+- **Reanudación y despliegue autorizados por el propietario:** Se ejecutan las 5 acciones prioritarias acordadas: consolidar documentación, commit y push a `origin/main`, despliegue en Azure (`[AZURE_USER]@[AZURE_SERVER_IP]`), repetición conversacional de `busca` con Brave en Telegram y verificación de hostkey SSH / telemetría GPU Spot.
 - **Optimización de carga y residencia en GPU para Modo High:** Se implementó la aceleración de I/O de disco (Opción 1) mediante `startup-script` en la metadata de la VM Spot en [controller.py](file:///d:/OneDrive/GitHub/dev/Khai/app/mind/brain/controller.py) y [gcloud-ollama.ps1](file:///d:/OneDrive/GitHub/dev/Khai/app/mind/brain/gcloud-ollama.ps1), configurando `blockdev --setra 8192` (8 MB de readahead) para saturar el bus del disco de 100 GB. Se implementó la residencia de modelo (Opción 3) mediante `keep_alive: 30m` en [llm_gateway.py](file:///d:/OneDrive/GitHub/dev/Khai/app/voice/gateway/llm_gateway.py) y `controller.py`, elevando el timeout de precarga a 180 s para absorber la lectura en frío de `qwen2.5-32b-abliterated` (19,85 GB) y asegurar 0 segundos de carga en turnos posteriores mientras la VM esté activa. Se conserva la variante *abliterated* para evitar filtros de censura en tareas técnicas y del sistema. La Opción 2 (ampliar disco) fue descartada para mantener costo extra en $0.
 - **Resolución de incidentes de producción (Tool-calling y Fallback reactivo):** Aprobado e implementado el plan de compatibilidad de herramientas y respuesta no bloqueante:
   1. *Fallback reactivo a Nano:* Ante caídas de conexión o fallos de modelos locales, la inferencia no bloquea al usuario esperando arrancar VMs Spot síncronas (35–120 s); responde inmediatamente mediante Nano, emite `[Error en modo <nombre>, pasando a Nano ¿deseas otro modo?]` y ofrece la botonera interactiva con los perfiles disponibles (`MODE_SELECTION_BUTTONS`).
