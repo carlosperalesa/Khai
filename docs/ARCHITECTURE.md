@@ -134,6 +134,19 @@ Mind opera como la capa cognitiva y el envoltorio humano (*Human Interface Wrapp
 3. **Directrices de Localización para Hand:**
    - La generación de código en `Hand.generate` instruye obligatoriamente a parametrizar servicios externos con localización métrica (`units='metric'` para °C y km/h) e idioma español (`lang='es'`), redactando resultados conversacionales completos y prohibiendo emojis o prefijos de depuración interna.
 
+4. **Herramienta `set_user_preference` y Sincronización Inline:**
+   - Permite registrar y recordar atributos del usuario (`sign`, `name`, `city`, `units`, `language`) de forma determinista y auditable.
+   - `Mind.process_message` extrae entidades declaradas en lenguaje natural (`yo soy cáncer, recuérdalo`) y las persiste de inmediato en `MemoryEngine.set_user_profile` y `MemoryEngine.set_preference`, previniendo la pérdida de datos de perfil en solicitudes compuestas.
+
+5. **Desburocratización y Omisión de Confirmación en Consultas de Lectura:**
+   - En el estado `READY`, las tareas cuyos servicios externos sean de solo lectura (`effect == 'read'`) y posean inputs explícitos sin valores sustitutos omiten la confirmación intermedia `WAITING_INPUT_CONFIRMATION` y avanzan a ejecución directa (`SUBMITTED`), eliminando la fricción de confirmación en búsquedas o consultas informativas. Las tareas con escrituras (`effect == 'write'`) conservan la confirmación obligatoria.
+
+### 1.2. Gobernanza Administrativa: Separación entre System, Root y Userland
+Khai distingue tres niveles jerárquicos de autoridad para preservar la seguridad constitucional:
+- **Nivel System (Inmutable en runtime):** Kernel del sistema operativo, daemon de Docker, red aislada, proxy de ejecución y librerías base del Core. No modificables desde el chat bajo ninguna circunstancia.
+- **Nivel Root (Gobernado por Pixy con aprobación humana explícita `y`/`n`):** Identidad y personalidad en `data/memory/agent.md`, directivas dinámicas de comportamiento en `dynamic_guidelines` y perfiles de usuario. Cualquier modificación requiere una propuesta formal de Pixy y confirmación binaria explícita del usuario (`y`/`n`).
+- **Nivel Userland (Skills en Sandbox):** Código de skills en `data/skills/`, generado por Hand, diagnosticado por Heart y ejecutado en contenedores efímeros sin red.
+
 ### Ciclo de Vida de una Solicitud:
 1. **Interpretación (Mind):** Convierte el mensaje en un `Intent` (objetivo, capacidad requerida y proveedor opcional).
 2. **Filtrado de Catálogo:** Busca skills activas que satisfagan la capacidad. Si no hay proveedor explícito, usa una preferencia aprobada persistente; si no existe, consulta al usuario.

@@ -1,5 +1,26 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Gobernanza Administrativa Root (Pixy), Memoria de Preferencias (Mind) y Desburocratización — trabajo autorizado
+
+- **Mind: Herramienta `set_user_preference` y Sincronización Inline de Preferencias:**
+  1. *Contrato Pydantic y Router:* Se añade `PreferenceArguments` y `SetPreferenceCall` al discriminador `ToolCall` en `app/mind/turn.py`. Mind instruye en su system prompt la emisión de `set_user_preference(key, value)` ante datos de perfil (`sign`, `name`, `city`, `units`, `language`) o peticiones explícitas de recordar.
+  2. *Sincronización Inline Determinista:* Se implementa `_sync_inline_preferences` en `app/mind/mind.py`. Detecta patrones de lenguaje natural (ej. "Yo soy cáncer, recuérdalo y dame mi horóscopo") y persiste de inmediato los atributos en `MemoryEngine.set_user_profile` y `MemoryEngine.set_preference('user_sign', ...)` antes del enrutamiento. Esto garantiza que comandos compuestos no sufran amnesia aunque el turno proceda directamente a planificar una tarea.
+  3. *Despachador en Coordinator:* `Coordinator.dispatch_tool` normaliza claves comunes y actualiza tanto el perfil estructurado como las preferencias individuales, respondiendo con confirmación natural al usuario.
+
+- **Desburocratización de Consultas de Solo Lectura:**
+  - En `app/mind/coordinator.py` (`state == 'READY'`): Si una tarea emplea exclusivamente servicios con efecto de lectura (`effect == 'read'`, como búsquedas web en Brave o clima) y cuenta con entradas explícitas sin valores sustitutos por defecto inyectados, omite el estado burocrático `WAITING_INPUT_CONFIRMATION` y pasa directamente a ejecución (`SUBMITTED`). Las tareas con efectos de escritura externa (`effect == 'write'`) mantienen la confirmación mandatoria del usuario.
+
+- **Autoridad Administrativa Nivel Root Custodiada por Pixy:**
+  - *Separación de Capas:* Distinción formal entre **System** (inmutable en runtime por seguridad: OS, Docker daemon, aislamiento de red, binarios del Core), **Root** (identidad, personalidad en `agent.md`, directivas en `dynamic_guidelines`, custodiadas por Pixy) y **Userland** (skills generadas en sandbox).
+  - *Gobernanza Conversacional:* Pixy procesa solicitudes directas (vía `/p` o chat) para cambiar la personalidad (`cambiar personalidad a: ...`) o registrar directivas de comportamiento (`regla de comportamiento: ...`).
+  - *Confirmación Binaria Obligatoria:* Toda modificación root queda en estado pendiente (`pixy_pending_root_proposal`) en SQLite y exige confirmación explícita (`y`/`n`). Al responder `y`, Pixy persiste la modificación en `agent.md` (con soporte para tags XML y markdown en `MemoryEngine.update_agent_md`) o en `dynamic_guidelines`, emitiendo confirmación auditable. Al responder `n`, la propuesta se cancela sin alterar el sistema.
+
+- **Corrección en Journal de Voice Mailbox:**
+  - En `app/voice/mailbox.py`: Se corrige la invocación `journal.start('delivery')` para que herede limpiamente el `trace_id` de una interacción padre existente (`trace_id=(None if parent else metadata.get('trace_id'))`), erradicando la colisión `ValueError: A child must keep its parent trace; link independent interactions instead`.
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Suite canónica completa: **378 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**, incluyendo 7 nuevas pruebas en `tests/test_human_interface.py` que validan sincronización de preferencias, omisión de confirmación en lecturas y ciclo completo de gobernanza root de Pixy.
+
 ## Humanización de la Interfaz, Mind como Wrapper y Localización Métrica — trabajo autorizado
 
 - **Mind como Wrapper Bidireccional y Base de Conocimiento del Usuario:**

@@ -48,6 +48,24 @@ class PixyMind:
                         phase='reviewed', data={'evidence_id': result['audit_id'], 'operation': kind}, conn=conn)
         return result
 
+    def get_pending_root_proposal(self):
+        mem = getattr(self.manager, 'memory', None)
+        if mem and hasattr(mem, 'get_preference'):
+            return mem.get_preference('pixy_pending_root_proposal')
+        return getattr(self, '_pending_root_proposal', None)
+
+    def set_pending_root_proposal(self, proposal):
+        self._pending_root_proposal = proposal
+        mem = getattr(self.manager, 'memory', None)
+        if mem and hasattr(mem, 'set_preference'):
+            mem.set_preference('pixy_pending_root_proposal', proposal)
+
+    def clear_pending_root_proposal(self):
+        self._pending_root_proposal = None
+        mem = getattr(self.manager, 'memory', None)
+        if mem and hasattr(mem, 'set_preference'):
+            mem.set_preference('pixy_pending_root_proposal', None)
+
     def preflight(self, manifest):
         valid = (isinstance(manifest,dict) and isinstance(manifest.get('purpose'),str)
                  and bool(manifest['purpose'].strip()) and isinstance(manifest.get('capabilities'),list))
@@ -208,6 +226,52 @@ class PixyMind:
     def _conversational_governance_impl(self, request, source):
         """Permite gestionar reglas y descriptores de servicio conversando con Pixy."""
         lower = request.lower().strip()
+
+        # Root Governance: Personalidad (agent.md) y Reglas Dinámicas
+        pers_patterns = [
+            r'^(?:cambia(?:r)?\s+(?:tu\s+)?personalidad(?:\s+a|\s+por)?\s*[:\-]?\s*)(.+)$',
+            r'^personalidad\s*[:\-]\s*(.+)$',
+            r'^(?:modifica(?:r)?\s+(?:tu\s+)?personalidad(?:\s+a|\s+por)?\s*[:\-]?\s*)(.+)$'
+        ]
+        for pat in pers_patterns:
+            m = re.search(pat, request, re.IGNORECASE | re.DOTALL)
+            if m:
+                new_content = m.group(1).strip()
+                proposal = {
+                    'proposal_id': 'root_' + uuid.uuid4().hex[:12],
+                    'type': 'personality',
+                    'section': 'PERSONALITY',
+                    'content': new_content,
+                    'created_at': time.time(),
+                    'requested_by': source
+                }
+                self.set_pending_root_proposal(proposal)
+                return (f"Propuesta administrativa (Nivel Root - Personalidad):\n"
+                        f"¿Deseas actualizar la sección 'PERSONALITY' de agent.md con:\n\n"
+                        f"«{new_content}»\n\n"
+                        f"Responde 'y' para aprobar o 'n' para cancelar.")
+
+        rule_patterns = [
+            r'^(?:agrega(?:r)?\s+(?:una\s+)?regla\s+(?:de\s+comportamiento)?(?:\s*[:\-])?\s*)(.+)$',
+            r'^(?:regla\s+de\s+comportamiento|nueva\s+directiva)\s*[:\-]\s*(.+)$'
+        ]
+        for pat in rule_patterns:
+            m = re.search(pat, request, re.IGNORECASE | re.DOTALL)
+            if m:
+                new_rule = m.group(1).strip()
+                proposal = {
+                    'proposal_id': 'root_' + uuid.uuid4().hex[:12],
+                    'type': 'guideline',
+                    'topic': 'behavior',
+                    'content': new_rule,
+                    'created_at': time.time(),
+                    'requested_by': source
+                }
+                self.set_pending_root_proposal(proposal)
+                return (f"Propuesta administrativa (Nivel Root - Directiva):\n"
+                        f"¿Deseas registrar la siguiente directiva de comportamiento en memoria persistente?\n\n"
+                        f"«{new_rule}»\n\n"
+                        f"Responde 'y' para aprobar o 'n' para cancelar.")
         service_command = request.split()
         if service_command and service_command[0].lower() == 'service':
             if len(service_command) == 3 and service_command[1].lower() in {'show', 'approve', 'deny'}:
@@ -398,8 +462,10 @@ class PixyMind:
             creation_pending = ([t for t in coordinator.store.all()
                                  if t.get('state') == 'WAITING_CREATION_APPROVAL']
                                 if coordinator else [])
+            root_pending = self.get_pending_root_proposal()
             candidates = ([('authorization', a['authorization_id'], a) for a in auth_pending]
-                          + [('creation', t['id'], t) for t in creation_pending])
+                          + [('creation', t['id'], t) for t in creation_pending]
+                          + ([('root_proposal', root_pending['proposal_id'], root_pending)] if root_pending else []))
             if selected_id:
                 wanted = selected_id.strip().lower()
                 exact = [item for item in candidates if item[1].lower() == wanted]
@@ -414,6 +480,24 @@ class PixyMind:
                 return rec.get('updated_at') or rec.get('created_at') or rec.get('issued_at') or 0
             kind, selected_id, pending_record = max(enumerate(candidates),
                                                     key=lambda pair: (_stamp(pair[1]), pair[0]))[1]
+            if kind == 'root_proposal':
+                self.clear_pending_root_proposal()
+                if not approve:
+                    return "Modificación Root cancelada por el usuario."
+                p_type = pending_record.get('type')
+                if p_type == 'personality':
+                    sec = pending_record.get('section', 'PERSONALITY')
+                    cnt = pending_record.get('content', '')
+                    if hasattr(self.manager, 'memory') and hasattr(self.manager.memory, 'update_agent_md'):
+                        self.manager.memory.update_agent_md(sec, cnt)
+                    return f"Modificación Root aprobada y guardada. La personalidad de Khai ({sec}) ha sido actualizada en agent.md."
+                elif p_type == 'guideline':
+                    cnt = pending_record.get('content', '')
+                    topic = pending_record.get('topic', 'behavior')
+                    if hasattr(self.manager, 'memory') and hasattr(self.manager.memory, 'add_guideline'):
+                        self.manager.memory.add_guideline(topic, 'global', cnt)
+                    return f"Directiva Root aprobada y registrada en dynamic_guidelines: «{cnt}»"
+
             if kind == 'authorization':
                 pending = pending_record
                 decided = self.authorizations.decide(selected_id, approve, decided_by=source)

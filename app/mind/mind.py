@@ -8,12 +8,47 @@ from app.pixy.control import BudgetExceeded
 logger = logging.getLogger("Mind")
 
 
+def _sync_inline_preferences(text: str, memory) -> None:
+    if not text or not memory:
+        return
+    import re
+    low = text.lower()
+    # Signo zodiacal
+    m_sign = re.search(r'\b(?:yo soy|mi signo es|soy de signo|signo)\s+(aries|tauro|g[eé]minis|geminis|c[aá]ncer|cancer|leo|virgo|libra|escorpio|sagitario|capricornio|acuario|piscis)\b', low)
+    if m_sign:
+        sign = m_sign.group(1).replace('cancer', 'cáncer').replace('geminis', 'géminis')
+        if hasattr(memory, 'set_user_profile'):
+            memory.set_user_profile(sign=sign)
+        if hasattr(memory, 'set_preference'):
+            memory.set_preference('user_sign', sign)
+
+    # Nombre
+    m_name = re.search(r'\b(?:me llamo|mi nombre es)\s+([A-Za-zÁÉÍÓÚáéíóúñÑ]+)\b', text, re.IGNORECASE)
+    if m_name:
+        name = m_name.group(1)
+        if hasattr(memory, 'set_user_profile'):
+            memory.set_user_profile(name=name)
+        if hasattr(memory, 'set_preference'):
+            memory.set_preference('user_name', name)
+
+    # Ciudad
+    m_city = re.search(r'\b(?:vivo en|mi ciudad es)\s+([A-Za-zÁÉÍÓÚáéíóúñÑ\s]+?)(?:[,\.\n]|$)', text, re.IGNORECASE)
+    if m_city:
+        city = m_city.group(1).strip()
+        if 2 < len(city) < 60:
+            if hasattr(memory, 'set_user_profile'):
+                memory.set_user_profile(city=city)
+            if hasattr(memory, 'set_preference'):
+                memory.set_preference('user_city', city)
+
+
 class Mind:
     def __init__(self, llm, memory):
         self.llm, self.memory = llm, memory
 
     def process_message(self, message, task_context=None, persist=True,
                         conversation_history=None, questions=None):
+        _sync_inline_preferences(message, self.memory)
         history = (conversation_history if conversation_history is not None
                    else self.memory.get_chat_history(limit=12))
         system = (
@@ -37,6 +72,9 @@ class Mind:
             "pida expresamente crear, construir o instalar una capacidad; esa orden ya autoriza "
             "la creacion, aunque no autoriza secretos, efectos externos ni preferencias. "
             "Si el usuario aprueba un proveedor predeterminado usa set_default_provider. "
+            "Si el usuario comparte un dato de perfil o preferencia persistente (ej. 'yo soy cáncer, recuérdalo', "
+            "'me llamo Juan', 'vivo en Valparaíso'), o te pide explícitamente recordar o registrar un dato, usa "
+            "set_user_preference(key, value) con tool_calls. Las claves comunes son 'sign', 'name', 'city', 'units', 'language'. "
             "los comandos privados de Voice, nunca por parametros de herramientas. "
             "El historial no acredita ejecucion; el estado y los recibos son la fuente de verdad. "
             "No uses emojis. Responde a saludos en una o dos oraciones."
@@ -52,7 +90,7 @@ class Mind:
               'Para conversar: {"reply":"respuesta","tool_calls":[]}. '
               'Las otras herramientas usan arguments: revise_task(task_id,goal_revision,change), '
               'get_task_status(task_id), cancel_task(task_id), answer_question(question_id,answer), '
-              'get_system_status(), set_default_provider(capability,provider). '
+              'get_system_status(), set_default_provider(capability,provider), set_user_preference(key,value). '
               'El esquema estructurado adjunto limita los campos y tipos.'
         )
         prompt = (

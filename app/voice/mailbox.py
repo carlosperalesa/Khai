@@ -52,7 +52,7 @@ class VoiceMailbox:
             parent = self.journal.start('interaction', source,
                 trace_id=metadata.get('trace_id'), source=source, conn=conn)
         return self.journal.start('delivery', delivery_id, parent_id=parent,
-            trace_id=metadata.get('trace_id'), source=source, refs=refs, conn=conn)
+            trace_id=(None if parent else metadata.get('trace_id')), source=source, refs=refs, conn=conn)
 
     def accept(self, source, trace_id, text, *, urgent=False):
         if not source or not trace_id or not text or len(text) > 32000:

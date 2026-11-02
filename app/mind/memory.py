@@ -220,23 +220,28 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
         new_lines = []
         in_section = False
         section_found = False
-        
+        sec_clean = section.strip()
+        tag_open = f"<{sec_clean.upper()}>"
+        tag_close = f"</{sec_clean.upper()}>"
+        sec_h1 = f"# {sec_clean}"
+        sec_h2 = f"## {sec_clean}"
+
         for line in lines:
-            if line.startswith(f"## {section}") or line.startswith(f"# {section}"):
+            line_str = line.strip()
+            if line_str.upper() == tag_open or line.startswith(sec_h2) or line.startswith(sec_h1):
                 in_section = True
                 section_found = True
                 new_lines.append(line)
                 new_lines.append(content)
-                new_lines.append("")
-            elif in_section and line.startswith("#"):
+            elif in_section and (line_str.upper() == tag_close or (line.startswith("#") and not line_str.startswith("<"))):
                 in_section = False
                 new_lines.append(line)
             elif not in_section:
                 new_lines.append(line)
-                
+
         if not section_found:
-            new_lines.append(f"\n## {section}\n{content}\n")
-            
+            new_lines.append(f"\n<{sec_clean.upper()}>\n{content}\n</{sec_clean.upper()}>\n")
+
         with open(self.agent_md_path, "w", encoding="utf-8") as f:
             f.write("\n".join(new_lines))
 
@@ -245,15 +250,21 @@ Aprende de preferencias explícitas, correcciones del usuario y resultados verif
         lines = full_text.splitlines()
         content = []
         in_section = False
-        
+        sec_clean = section.strip()
+        tag_open = f"<{sec_clean.upper()}>"
+        tag_close = f"</{sec_clean.upper()}>"
+        sec_h1 = f"# {sec_clean}"
+        sec_h2 = f"## {sec_clean}"
+
         for line in lines:
-            if line.startswith(f"## {section}") or line.startswith(f"# {section}"):
+            line_str = line.strip()
+            if line_str.upper() == tag_open or line.startswith(sec_h2) or line.startswith(sec_h1):
                 in_section = True
-            elif in_section and line.startswith("#"):
+            elif in_section and (line_str.upper() == tag_close or (line.startswith("#") and not line_str.startswith("<"))):
                 break
             elif in_section:
                 content.append(line)
-                
+
         return "\n".join(content).strip()
 
     def get_system_prompt(self) -> str:

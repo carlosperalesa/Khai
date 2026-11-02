@@ -68,8 +68,18 @@ class DefaultProviderCall(Arguments):
     arguments: DefaultProviderArguments
 
 
+class PreferenceArguments(Arguments):
+    key: str = Field(min_length=1, max_length=128)
+    value: str = Field(min_length=1, max_length=1000)
+
+
+class SetPreferenceCall(Arguments):
+    name: Literal['set_user_preference']
+    arguments: PreferenceArguments
+
+
 ToolCall = Annotated[Union[StartCall, ReviseCall, StatusCall, CancelCall, AnswerCall, HealthCall,
-                           DefaultProviderCall],
+                           DefaultProviderCall, SetPreferenceCall],
                      Field(discriminator='name')]
 
 

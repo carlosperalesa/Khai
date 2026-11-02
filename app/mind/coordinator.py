@@ -634,6 +634,24 @@ class Coordinator:
             self.manager.memory.set_preference('default_provider_' + capability, receipt)
             reply = (f'{provider} quedÃ³ como proveedor predeterminado para {capability}. '
                      'Esta preferencia es auditable y puede cambiarse.')
+        elif name == 'set_user_preference':
+            raw_key, raw_val = args['key'].strip().lower(), args['value'].strip()
+            norm_key = raw_key
+            if norm_key in ('signo', 'zodiac', 'zodiac_sign', 'horoscope_sign'):
+                norm_key = 'sign'
+            elif norm_key in ('nombre',):
+                norm_key = 'name'
+            elif norm_key in ('ciudad', 'ubicacion', 'location'):
+                norm_key = 'city'
+            elif norm_key in ('idioma', 'lenguaje', 'lang'):
+                norm_key = 'language'
+            elif norm_key in ('unidades', 'unidad'):
+                norm_key = 'units'
+            if hasattr(self.manager, 'memory'):
+                self.manager.memory.set_preference(f'user_{norm_key}', raw_val)
+                if hasattr(self.manager.memory, 'set_user_profile'):
+                    self.manager.memory.set_user_profile(**{norm_key: raw_val})
+            reply = f"Entendido, he recordado tu preferencia ({norm_key}: {raw_val})."
         elif name == 'get_system_status':
             reply = json.dumps(self.manager.heart.check_integrity(), ensure_ascii=False)
         else:
@@ -2380,7 +2398,31 @@ class Coordinator:
                 raise ValueError('El artefacto no coincide con la revisión/autorización')
             if not self._services_available(task.get('services', [])):
                 raise PermissionError('Una versión de servicio aprobada ya no está activa')
-            if (task.get('input_confirmation_required')
+            active_services = (self.manager.voice_services.active_services()
+                               if getattr(self.manager, 'voice_services', None) else {})
+            is_write_task = False
+            for ref in task.get('services', []):
+                svc = active_services.get(ref.get('service_id'), {})
+                op = svc.get('operations', {}).get(ref.get('operation'), {})
+                if op.get('effect') != 'read':
+                    is_write_task = True
+                    break
+
+            values = self._input_values(task)
+            preferences = getattr(self.manager, 'memory', None)
+            has_default_injected = False
+            if preferences and hasattr(preferences, 'get_preference'):
+                for key, value in values.items():
+                    default = preferences.get_preference('default_' + key)
+                    if default is not None and default == value:
+                        has_default_injected = True
+                        break
+
+            requires_confirmation = task.get('input_confirmation_required')
+            if requires_confirmation and task.get('services') and not is_write_task and not has_default_injected:
+                requires_confirmation = False
+
+            if (requires_confirmation
                     and task.get('confirmed_input_signature') != self._input_signature(task)):
                 values = self._input_values(task)
                 preferences = getattr(self.manager, 'memory', None)
