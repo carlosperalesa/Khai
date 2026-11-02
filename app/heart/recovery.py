@@ -425,12 +425,26 @@ class Recovery:
             evidence['conversation_context'] = conversation_context
             # Read the actual subjects, even when they fall outside the last ten tasks.
             subjects = {q['subject_id'] for q in conversation_context.get('questions', [])}
+            cid = conversation_context.get('conversation_id')
+            source = conversation_context.get('source')
             with connection(self.path) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='control_tasks'").fetchone():
                     for subject in subjects:
                         row = db.execute('SELECT document FROM control_tasks WHERE id=?', (subject,)).fetchone()
                         if row and subject not in {t['id'] for t in tasks}:
                             tasks.append(json.loads(row['document']))
+                    if cid:
+                        rows = db.execute("SELECT document FROM control_tasks WHERE json_extract(document, '$.conversation_id')=? ORDER BY rowid DESC LIMIT 10", (cid,)).fetchall()
+                        for r in rows:
+                            doc = json.loads(r['document'])
+                            if doc.get('id') not in {t['id'] for t in tasks}:
+                                tasks.insert(0, doc)
+                    elif source:
+                        rows = db.execute("SELECT document FROM control_tasks WHERE source=? ORDER BY rowid DESC LIMIT 10", (source,)).fetchall()
+                        for r in rows:
+                            doc = json.loads(r['document'])
+                            if doc.get('id') not in {t['id'] for t in tasks}:
+                                tasks.insert(0, doc)
         requested_ids = re.findall(r'\btask_[a-f0-9]{32}\b', str(question))
         requested_cases = re.findall(r'\bcase-[a-zA-Z0-9_-]+\b', str(question))
         requested_runs = re.findall(r'\brun_[a-f0-9]{32}\b', str(question))
@@ -464,10 +478,11 @@ class Recovery:
             evidence['incident_profile'] = match.group(1).lower() if match else None
         elif re.search(r'(?:[úu]ltim[oa].*(?:error|fallo|fallid)|(?:error|fallo|fallid).*[úu]ltim[oa])',
                        question, flags=re.IGNORECASE):
-            candidates = [task for task in tasks if task.get('state') in {'FAILED', 'EXHAUSTED'}]
+            candidates = [task for task in tasks if task.get('state') in {'FAILED', 'EXHAUSTED', 'DIAGNOSING'}]
         elif conversation_context:
-            sid = conversation_context['conversation_id']
-            candidates = [t for t in tasks if t.get('conversation_id') == sid and t.get('kind') != 'turn']
+            sid = conversation_context.get('conversation_id')
+            source = conversation_context.get('source')
+            candidates = [t for t in tasks if (t.get('conversation_id') == sid or (source and t.get('source') == source)) and t.get('kind') != 'turn']
             evidence['incident_scope'] = 'conversation'
         elif re.search(r'\btarea\b', question, re.IGNORECASE):
             candidates = tasks
@@ -727,19 +742,46 @@ class Recovery:
             tasks = ([focus_task] if 'focus_task' in evidence else
                      pixy_data.get('recent_tasks') or evidence.get('tasks') or [])
             tasks = [task for task in tasks if task is not None]
-            failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED'}]
+            failed_tasks = [t for t in tasks if t.get('state') in {'EXHAUSTED', 'FAILED', 'DIAGNOSING'}]
             if failed_tasks:
-                # Tomar la tarea fallida más reciente (A07: nunca tomar la más vieja)
+                # Tomar la tarea con problemas más reciente (A07: nunca tomar la más vieja)
                 latest_failed = sorted(
                     failed_tasks,
                     key=lambda t: (t.get('updated_at') or t.get('created_at') or 0),
                     reverse=True,
                 )[0]
                 err = latest_failed.get('error') or latest_failed.get('feedback') or 'Fallo no especificado'
-                add('task_failure', 'high',
-                    f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') terminó con estado {latest_failed['state']}: {str(err)[:300]}.",
-                    remedy=f"retry_task:{latest_failed['id']}",
-                    task_binding_info=task_binding(latest_failed))
+                err_str = str(err)
+
+                # Detección de bucle de recuperación
+                attempts = latest_failed.get('attempt_number', 1)
+                recovery_hist = latest_failed.get('recovery_history') or []
+                hand_fails = latest_failed.get('hand_failures', 0)
+                is_loop = (attempts >= 2 or len(recovery_hist) >= 1 or hand_fails >= 2 or
+                           bool(latest_failed.get('recovery_case_id')))
+
+                is_coverage_or_capability = any(term in err_str.lower() for term in (
+                    'cobertura', 'replantear capacidades', 'insuficiente', 'missing action'
+                ))
+
+                if is_loop:
+                    add('recovery_loop_detected', 'critical',
+                        f"Se detectó un bucle de recuperación en la tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}'): "
+                        f"reintentos sucesivos ({attempts}) o fallos repetidos sin evolución de capacidad. Deteniendo ciclo ciego.",
+                        remedy=None,
+                        task_binding_info=task_binding(latest_failed))
+                elif is_coverage_or_capability:
+                    skill_id = latest_failed.get('skill_name') or 'skill'
+                    add('cognitive_discrepancy', 'high',
+                        f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') requiere evolución de capacidad: {err_str[:300]}.",
+                        remedy=f"evolve_skill:{skill_id}",
+                        corrective_instruction=f"Evolucionar la capacidad para cubrir los requisitos faltantes: {err_str[:200]}",
+                        task_binding_info=task_binding(latest_failed))
+                else:
+                    add('task_failure', 'high',
+                        f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') presentó estado {latest_failed['state']}: {err_str[:300]}.",
+                        remedy=f"retry_task:{latest_failed['id']}",
+                        task_binding_info=task_binding(latest_failed))
 
         scoped_evidence = {**evidence, 'core_logs': {**(evidence.get('core_logs') or {}), 'text': text}}
         prepared_resume = any(str(f.get('remedy') or '').startswith('resume_prepared_task:') for f in findings)

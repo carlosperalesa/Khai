@@ -256,6 +256,7 @@ class Coordinator:
         cleaned = re.sub(r'\b(?:sr|order|run)_[a-f0-9]{16,32}\b', '', cleaned)
         cleaned = re.sub(r'\s*Solicitud\s*\.?\s*$', '', cleaned)
         cleaned = re.sub(r'\s*\((syntax_or_code|unknown_contract|uncertain_execution|model_unavailable|schema_violation|execution_uncertain)\)', '', cleaned)
+        cleaned = re.sub(r'\b[a-zA-Z0-9_-]+\.py\b', 'el módulo', cleaned)
         cleaned = cleaned.replace('plan médico de Heart', 'propuesta de recuperación')
         cleaned = re.sub(r'^(?:Paso\s+\d+:\s*)+', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'^(?:[a-zA-Z0-9_-]+\s+info:\s*)+', '', cleaned, flags=re.IGNORECASE)
@@ -2866,7 +2867,16 @@ class Coordinator:
                         self.store.update(tid, expected={'DIAGNOSING'},
                                           recovery_case_id=case['case_id'],
                                           recovery_authorization_id=auth['authorization_id'])
-                        self.notify(f"Propuesta de recuperación: {plan.get('summary', '')}. ¿Apruebas? Responde sí o no.")
+                        raw_summary = plan.get('summary', '')
+                        clean_summary = re.sub(r'^(?:Aplicar remediación técnica:\s*)+', '', raw_summary, flags=re.IGNORECASE).strip()
+                        clean_summary = re.sub(r'\b[a-zA-Z0-9_-]+\.py\b', 'el módulo técnico', clean_summary)
+                        if not clean_summary:
+                            clean_summary = "actualizar la capacidad requerida"
+                        buttons = [
+                            {"text": "Sí, proceder", "callback_data": f"/approve {auth['authorization_id']}"},
+                            {"text": "No, cancelar", "callback_data": f"/deny {auth['authorization_id']}"},
+                        ]
+                        self.notify(f"Detecté un requerimiento técnico para completar tu objetivo: {clean_summary}. ¿Deseas que proceda con esta actualización?", buttons=buttons)
                     elif case['state'] in {'DENIED', 'FAILED', 'UNKNOWN'}:
                         self.store.update(tid, expected={'DIAGNOSING'}, state='FAILED',
                                           error='La recuperación no fue autorizada o no pudo confirmarse')

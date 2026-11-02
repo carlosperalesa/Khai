@@ -1,5 +1,30 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Evolución Cognitiva de Skills, Erradicación de Bucles Ciegos y Diagnóstico Transparente — trabajo autorizado
+
+- **Evolución Dinámica de Skills ante Brechas de Cobertura (ActionPlanner en app/mind/action_planner.py):**
+  1. *Erradicación del ValueError no controlado:* Cuando la verificación de cobertura detecta que un objetivo requiere capacidades ampliadas (ej. "pronóstico futuro" frente a "clima actual"), se elimina el `raise ValueError(...)` que simulaba una falla de sintaxis y causaba caídas del turno en cascada.
+  2. *Protocolo Autónomo de Evolución (_evolve_step_for_coverage):* ActionPlanner transforma automáticamente el paso existente en una evolución candidata (`missing-<step_id>`, `is_evolution: True`, `previous_version_id: vid`), enriqueciendo la descripción, casos de uso y contratos con los requisitos no cubiertos (sin hardcoding de parámetros o nombres de ciudades).
+  3. *Reverificación Cognitiva y Fallback Limpio:* Se vuelve a verificar la cobertura del plan evolucionado con el LLM. Si cubre la meta, se devuelve el plan con evolución para que Hand genere la nueva versión superadora; si no puede evolucionar, recurre a `web-search` si está en el catálogo, o retorna `None` limpiamente sin lanzar excepciones no controladas ni interrumpir el flujo.
+
+- **Detección Anti-Bucle y Diagnóstico Activo en Heart (Recovery en app/heart/recovery.py):**
+  1. *Inclusión de Tareas en Diagnóstico:* `failed_tasks` en `Recovery.diagnose` ahora incluye tareas en estado `DIAGNOSING`, evitando que tareas detenidas por excepciones queden invisibles ante auditorías de Heart.
+  2. *Detección de Bucle de Recuperación (recovery_loop_detected):* Si una tarea presenta `attempt_number >= 2`, antecedentes de recuperación (`recovery_history`) o fallos repetidos, Heart emite un hallazgo crítico `recovery_loop_detected` con `remedy=None`. Al ser crítico sin remedio, `Recovery.design()` devuelve `None`, impidiendo que el sistema recete reintentos ciegos (`retry_task`) sobre el mismo código no funcional.
+  3. *Distinción de Discrepancias Cognitivas:* Errores vinculados a cobertura o capacidades faltantes prescriben evolución de la capacidad (`evolve_skill:<name>`) en vez de reintentos idénticos.
+
+- **Visibilidad Diagnóstica en Pixy y Contexto Conversacional (PixyMind / Recovery):**
+  1. *Carga Contextual Completa de Tareas:* `Recovery.open_case()` ahora recupera todas las tareas pertenecientes a la conversación activa desde `control_tasks` (`json_extract(document, '$.conversation_id') = ?` o `source = ?`), garantizando que consultas de supervisión (como `/p revisa el bucle de recuperación...`) encuentren de inmediato la tarea objeto de consulta.
+  2. *Erradicación de Falsos Negativos:* Al encontrar la tarea en `DIAGNOSING`, Pixy y Heart ya no emiten el falso negativo "La salud de infraestructura no verifica la denuncia conversacional; evidencia insuficiente", explicando con total transparencia el estado real de la tarea y el bucle detectado.
+
+- **Humanización y Erradicación de Fugas de Código en Coordinator (app/mind/coordinator.py):**
+  1. *Sanitización de Nombres de Archivos Internos:* Se eliminan referencias a archivos internos del sistema (`.py`) en las salidas hacia el usuario, reemplazándolos por descripciones técnicas comprensibles ("el módulo técnico").
+  2. *Erradicación de Coletillas Mecánicas:* Se sustituye la fórmula robótica `"Propuesta de recuperación: ... ¿Apruebas? Responde sí o no."` por un mensaje natural y empático: `"Detecté un requerimiento técnico para completar tu objetivo: {clean_summary}. ¿Deseas que proceda con esta actualización?"`.
+  3. *Botones Interactivos de Aprobación/Rechazo:* Se incorporan botones inline estructurados (`Sí, proceder` / `No, cancelar` con `callback_data` atómico a la autorización), soportando tanto selección táctil como respuestas conversacionales en lenguaje natural.
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Se añade la nueva suite `tests/test_action_planner_evolution.py` (7 pruebas de evolución dinámica de skills, anti-bucles de Heart, visibilidad de tareas en DIAGNOSING por Pixy y sanitización de mensajes).
+  - Suite canónica completa: **415 pruebas y 39 subpruebas aprobadas al 100% (0 errores, 0 fallos)** en 81.18s.
+
 ## Simplificación Cognitiva, Turnos Conversacionales Unificados y Aprendizaje Continuo (RL-like) — trabajo autorizado
 
 - **Turnos Conversacionales Unificados (AssistantTurn en app/mind/turn.py):**
