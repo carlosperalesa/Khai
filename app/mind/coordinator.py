@@ -513,7 +513,15 @@ class Coordinator:
     def handle_reply(self, source, text, conversation_id, reply_to=None):
         """Resolve one delivered question, never run successive reply handlers."""
         words = text.strip().split()
-        decision_words = {'y', 'yes', 'sí', 'si', 'n', 'no', 'confirmo', 'confirmar'}
+        affirmative_words = {
+            'y', 'yes', 'sí', 'si', 'acepto', 'aceptar', 'dale', 'claro', 'procede',
+            'adelante', 'ok', 'de acuerdo', 'confirmo', 'confirmar', 'afirmativo'
+        }
+        negative_words = {
+            'n', 'no', 'rechazo', 'rechazar', 'cancela', 'cancelar', 'abortar',
+            'olvídalo', 'olvidalo', 'no quiero', 'negativo'
+        }
+        decision_words = affirmative_words | negative_words
         pending = self.conversations.pending(conversation_id)
         explicit = next((q for q in pending if q['id'] in words or q['subject_id'] in words), None)
         if reply_to is not None:
@@ -533,12 +541,20 @@ class Coordinator:
             return ReplyResult(True, 'No encontré una pregunta enviada pendiente con esa referencia.')
         if bare and explicit is None and self.conversations.uncertain_question(conversation_id):
             return ReplyResult(True, 'Hay una pregunta cuya entrega no pude confirmar. Responde al mensaje concreto o consulta /p antes de aprobar.')
-        if not explicit and not bare:
-            return ReplyResult(False)
         if not pending:
-            return ReplyResult(True, 'No hay una pregunta enviada pendiente de respuesta.')
+            if decision:
+                return ReplyResult(True, 'No hay una pregunta enviada pendiente de respuesta.')
+            return ReplyResult(False)
         question = explicit or pending[0]
+        # Open-ended scope questions do not require a binary decision word
+        is_scope_answer = question['kind'] == 'scope' and not any(text.casefold().strip().startswith(p) for p in ('además ', 'ademas '))
+        is_decision = decision or bare or (words and words[0].casefold().strip('.!') in decision_words)
+        is_refinement = question['kind'] in {'creation', 'execution', 'service'} and len(words) > 0
+        if not explicit and not is_decision and not is_scope_answer and not is_refinement:
+            return ReplyResult(False)
         answer = ' '.join(word for word in words if word not in {question['id'], question['subject_id']})
+        if not answer:
+            answer = text.strip()
         return self.answer_question(source, question, answer, conversation_id)
 
     def answer_question(self, source, question, answer, conversation_id):
@@ -546,15 +562,27 @@ class Coordinator:
             return ReplyResult(True, 'La pregunta ya no está pendiente.')
         if self.store.has_command(source):
             return ReplyResult(True, 'La decisión ya quedó registrada.')
+        affirmative_words = {
+            'y', 'yes', 'sí', 'si', 'acepto', 'aceptar', 'dale', 'claro', 'procede',
+            'adelante', 'ok', 'de acuerdo', 'confirmo', 'confirmar', 'afirmativo'
+        }
+        negative_words = {
+            'n', 'no', 'rechazo', 'rechazar', 'cancela', 'cancelar', 'abortar',
+            'olvídalo', 'olvidalo', 'no quiero', 'negativo'
+        }
         kind, subject = question['kind'], question['subject_id']
         if kind == 'authorization':
             auth = self.manager.pixy.authorizations.get(subject)
             if not auth or auth['status'] != 'pending' or auth['plan_hash'] != question['revision']:
                 self.conversations.stale(question['id'])
                 return ReplyResult(True, 'La autorización cambió o venció; no apliqué la respuesta.')
-            if answer.casefold().strip(' .!') not in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
+            first_w = answer.casefold().strip(' .!').split()[0] if answer.split() else ''
+            if first_w in affirmative_words:
+                reply = self.manager.pixy.direct_response('y ' + subject, source=source)
+            elif first_w in negative_words:
+                reply = self.manager.pixy.direct_response('n ' + subject, source=source)
+            else:
                 return ReplyResult(True, 'Responde sí o no a la propuesta de Pixy.')
-            reply = self.manager.pixy.direct_response(answer.strip(' .!') + ' ' + subject, source=source)
             self.conversations.answered(question['id'], source)
             self.conversations.complete(source, {'question_id': question['id'], 'result': reply})
             return ReplyResult(True, reply)
@@ -571,21 +599,27 @@ class Coordinator:
         token = current_question_revision.set((subject, task['revision'], question['id']))
         try:
             if kind in {'creation', 'execution', 'service'}:
-                normalized = answer.casefold().strip(' .!')
-                if normalized not in {'y', 'yes', 'sí', 'si', 'n', 'no'}:
-                    return ReplyResult(True, 'Responde sí o no; para cambiar el objetivo describe el cambio.', subject)
-                approve = normalized in {'y', 'yes', 'sí', 'si'}
-                if kind == 'creation':
-                    reply = self.manager.pixy.direct_response(('y ' if approve else 'n ') + subject, source=source)
-                elif kind == 'execution':
-                    operation = (task.get('approval') or {}).get('operation')
-                    if operation and set(operation) != {'action', 'details'}:
-                        return ReplyResult(True, 'Esta operación necesita la orden de recuperación de Pixy; consulta /p.', subject)
-                    self.approval(subject, task['approval']['token'], approve, source)
-                    reply = 'Ejecución autorizada.' if approve else 'Ejecución cancelada.'
+                norm = answer.casefold().strip(' .!')
+                words_a = norm.split()
+                first_w = words_a[0] if words_a else ''
+                is_pure_affirmative = bool(words_a and len(words_a) <= 2 and first_w in affirmative_words)
+                is_pure_negative = bool(words_a and len(words_a) <= 2 and first_w in negative_words)
+                if is_pure_affirmative or is_pure_negative:
+                    approve = is_pure_affirmative
+                    if kind == 'creation':
+                        reply = self.manager.pixy.direct_response(('y ' if approve else 'n ') + subject, source=source)
+                    elif kind == 'execution':
+                        operation = (task.get('approval') or {}).get('operation')
+                        if operation and set(operation) != {'action', 'details'}:
+                            return ReplyResult(True, 'Esta operación necesita la orden de recuperación de Pixy; consulta /p.', subject)
+                        self.approval(subject, task['approval']['token'], approve, source)
+                        reply = 'Ejecución autorizada.' if approve else 'Ejecución cancelada.'
+                    else:
+                        self.manager.pixy_services.decide(task['service_proposal'], approve, decided_by=source)
+                        reply = 'Servicio autorizado.' if approve else 'Servicio rechazado.'
                 else:
-                    self.manager.pixy_services.decide(task['service_proposal'], approve, decided_by=source)
-                    reply = 'Servicio autorizado.' if approve else 'Servicio rechazado.'
+                    # Modification, refinement, or mixed reply (e.g. "sí, y además dame el viento", "sabes? ahora quiero el clima de Valparaíso")
+                    reply = self.revise_goal(task, {'goal_revision': task.get('goal_revision', 0), 'change': answer}, source)
             else:
                 handler = {'scope': self.accept_scope_reply, 'inputs': self.accept_input_confirmation,
                            'review': self.accept_review_reply, 'effect_detail': self.accept_effect_detail,
@@ -679,9 +713,54 @@ class Coordinator:
                 if args['change'].strip() != task['request'].strip():
                     return finish('Necesito el cambio literal que pediste; no añadí una modificación inferida.', 'rejected')
                 reply = self.revise_goal(target, args, source)
+            elif name == 'report_issue':
+                reply = self.report_cognitive_issue(source, args, task=task)
             else:
                 raise ValueError('Operación conversacional no disponible')
         return finish(reply)
+
+    def report_cognitive_issue(self, source, args, task=None):
+        issue = args.get('issue', '').strip()
+        task_id = args.get('task_id')
+        skill_name = args.get('skill_name')
+
+        target_task = self.store.get(task_id) if task_id else None
+        if not target_task:
+            sid = task.get('conversation_id') if task else None
+            recent = [t for t in self.store.all() if t.get('kind') != 'turn'
+                      and (not sid or t.get('conversation_id') == sid)]
+            if recent:
+                target_task = recent[-1]
+
+        if not skill_name and target_task:
+            skill_name = target_task.get('skill_name') or (target_task.get('recipe', {}) or {}).get('steps', [{}])[0].get('skill_id')
+
+        recovery = getattr(getattr(self.manager, 'heart', None), 'recovery', None)
+        case_id = None
+        if recovery:
+            failure_info = {
+                'cause_code': 'cognitive_discrepancy',
+                'error': issue,
+                'feedback': issue,
+                'skill_name': skill_name,
+                'kind': 'cognitive_discrepancy',
+                'status': 'cognitive_fault'
+            }
+            case = recovery.open_incident_case(target_task or task or {'id': 'task_cognitive', 'state': 'FAILED', 'request': issue},
+                                              failure_info, requested_by=source)
+            if isinstance(case, dict):
+                case_id = case.get('case_id')
+
+        learning = getattr(self, 'learning', None)
+        if callable(getattr(learning, 'record', None)) and target_task:
+            try:
+                learning.record(target_task, False, {'status': 'cognitive_fault', 'error': issue, 'feedback': issue})
+            except Exception:
+                pass
+
+        if skill_name:
+            return f"Corrección registrada para la habilidad '{skill_name}'. Diagnóstico e incidente cognitivo abierto en Heart ({case_id or 'activo'}). Se adaptará su comportamiento."
+        return f"Incidente cognitivo registrado en Heart ({case_id or 'activo'}). Tendré en cuenta tu corrección para futuras respuestas."
 
     def revise_goal(self, selected, args, source):
         if selected.get('goal_revision', 0) != args['goal_revision']:
@@ -2552,10 +2631,7 @@ class Coordinator:
                     self.store.update(tid, expected={'RUNNING'}, state='UNVERIFIED', result=result,
                                       machine_verification={'success': success, 'evidence': evidence})
                     stdout_text = humanize_worker_output(result.get('stdout', ''), request=task.get('original_request') or task.get('request'), llm=getattr(self.manager, 'llm', None))
-                    if stdout_text:
-                        msg = f"{stdout_text}\n\n¿Es este el resultado esperado? (y/n)"
-                    else:
-                        msg = "¿Es este el resultado esperado? (y/n)"
+                    msg = stdout_text or "Tarea completada con éxito."
                     self.notify(msg)
                 else:
                     self.store.update(tid, expected={'RUNNING'}, state='VERIFYING', result=result,

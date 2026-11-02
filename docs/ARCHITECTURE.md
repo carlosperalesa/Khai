@@ -147,6 +147,30 @@ Khai distingue tres niveles jerárquicos de autoridad para preservar la segurida
 - **Nivel Root (Gobernado por Pixy con aprobación humana explícita `y`/`n`):** Identidad y personalidad en `data/memory/agent.md`, directivas dinámicas de comportamiento en `dynamic_guidelines` y perfiles de usuario. Cualquier modificación requiere una propuesta formal de Pixy y confirmación binaria explícita del usuario (`y`/`n`).
 - **Nivel Userland (Skills en Sandbox):** Código de skills en `data/skills/`, generado por Hand, diagnosticado por Heart y ejecutado en contenedores efímeros sin red.
 
+### 1.3. Erradicación de Amnesia Conversacional y Manejo Flexible de Decisiones
+- **Continuidad del Hilo de Alcance (`WAITING_SCOPE`):**
+  - Cuando una tarea solicita parámetros adicionales (ej. ciudad, fechas o formato), la pregunta abierta queda registrada en `conversation_questions` (`kind='scope'`).
+  - `Coordinator.handle_reply` reconoce respuestas naturales no binarias (ej. "Santiago", "en Valparaíso", "celsius") y las enlaza de inmediato con la tarea pendiente mediante `accept_scope_reply`. La tarea avanza a `RESOLVING_SCOPE`, donde el LLM (`requirements.resolve`) integra los datos y reanuda la ejecución sin congelar el objetivo ni requerir que el usuario repita su pregunta inicial.
+- **Aprobaciones en Lenguaje Natural y Respuestas Mixtas:**
+  - Se flexibiliza el reconocimiento de intenciones de aprobación (`dale`, `ok`, `acepto`, `claro`, `procede`) y cancelación (`cancela`, `rechazo`, `abortar`, `olvídalo`).
+  - Ante respuestas mixtas o clarificaciones durante la aprobación (ej. "sí, y además dame el viento", "¿sabes? ahora prefiero el clima de Valparaíso"), `Coordinator.answer_question` no emite bloqueos mecánicos de "responde sí o no"; ejecuta `revise_goal` adaptando el alcance y actualizando los requerimientos en caliente.
+
+### 1.4. Protocolo de Evolución de Skills (Hand + ActionPlanner + Catalog)
+- **Habilidades Evolutivas vs. Código Congelado:**
+  - Las habilidades en Khai no son estáticas. Si un usuario formula un requerimiento adicional sobre un tema ya cubierto (ej. agregar viento o lluvia a una skill de temperatura existente), o si el usuario corrige una unidad métrica previa:
+  - `ActionPlanner` examina la especificación activa en el catálogo. Al detectar que la habilidad existente carece de las propiedades o datos solicitados, propone en `new_skill` la evolución de la habilidad (`is_evolution=True`, enlazada a `previous_version_id`).
+  - `Hand.create` detecta la versión previa activa y crea la versión siguiente (`v2`, `v3`) con tipo de operación `update`.
+  - La nueva versión se valida y prueba en contenedor Docker seguro sin red (`--network none`). Tras la verificación de Pixy, `SkillCatalog.promote` transiciona la versión anterior a `superseded` y promueve la nueva versión a `active`.
+
+### 1.5. Puente Mind -> Heart: Autopsias Cognitivas e Incidentes Semánticos
+- **Detección Determinista y Herramienta `report_issue`:**
+  - Cuando el usuario formula quejas o correcciones cualitativas sobre un resultado previo (ej. *"No me vuelvas a dar grados Kelvin"*, *"Te equivocaste con los datos"*), Mind ejecuta la herramienta `report_issue(issue, task_id, skill_name)` o activa el detector semántico determinista.
+  - `Coordinator.report_cognitive_issue` abre de inmediato un caso de incidente en Heart (`Recovery.open_incident_case`) bajo el código tipado `cognitive_discrepancy`.
+- **Diagnóstico y Remediación en Heart:**
+  - Heart no limita su diagnóstico a tracebacks o fallos de infraestructura (`returncode != 0`). Clasifica la discrepancia semántica y emite una orden de remediación (`evolve_skill:<skill_id>`) hacia Hand para re-forjar la capacidad con las directivas métricas y de formato corregidas.
+- **Persistencia en Dreams:**
+  - Cada incidente cognitivo genera un registro negativo en el almacén de episodios de `Dreams`, permitiendo que el sistema consolide reglas de aprendizaje y evite tropezar dos veces con el mismo patrón erróneo.
+
 ### Ciclo de Vida de una Solicitud:
 1. **Interpretación (Mind):** Convierte el mensaje en un `Intent` (objetivo, capacidad requerida y proveedor opcional).
 2. **Filtrado de Catálogo:** Busca skills activas que satisfagan la capacidad. Si no hay proveedor explícito, usa una preferencia aprobada persistente; si no existe, consulta al usuario.

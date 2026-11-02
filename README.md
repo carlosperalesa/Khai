@@ -32,16 +32,16 @@ La skill [`web-search`](./skills/web-search/SKILL.md) usa Brave Search API media
 
 El código `f4c845d`, desplegado el 31 de octubre, incluye mejoras de diagnóstico y verificación, herramientas básicas de Hand y Brave. La suite local pasó 273 pruebas y 22 subpruebas; la salud HTTPS, SQLite y ejecución real de búsqueda se verificaron en producción. Las evidencias están en `CHECKPOINT.md` y `docs/VALIDATION.md`; las transiciones cancelables entre modelos permanecen pendientes de implementación.
 
-La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (378 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
+La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (384 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
 
 ---
 
 ## Órganos del Sistema
 
-- **Mind / Brain:** Mind interpreta el lenguaje natural y actúa como el **wrapper humano bidireccional** del sistema: controla el perfil y la base de conocimiento del usuario (idioma, ciudad base, unidades métricas), deduce parámetros contextuales evitando preguntas redundantes, humaniza las consultas de alcance y traduce las salidas técnicas (desempaquetando JSONs y eliminando prefijos de pipeline) en respuestas naturales. Incorpora **Brain** (`app/mind/brain/`) para coordinar el razonamiento profundo, la selección de modelos, la cascada de inferencia y el ciclo de vida de nodos acelerados.
-- **Hand:** Ciclo activo de herramientas persistente; investiga, construye código, valida esquemas y repara skills.
+- **Mind / Brain:** Mind interpreta el lenguaje natural y actúa como el **wrapper humano bidireccional** del sistema: erradica la amnesia conversacional en preguntas de alcance (`scope`), controla el perfil y la base de conocimiento del usuario (idioma, ciudad base, unidades métricas), deduce parámetros contextuales evitando preguntas redundantes, humaniza las consultas de alcance y traduce las salidas técnicas (eliminando coletillas de auditoría como `(y/n)`) en respuestas fluidas. Además, conecta con Heart mediante la herramienta `report_issue` para registrar quejas y discrepancias semánticas como incidentes cognitivos. Incorpora **Brain** (`app/mind/brain/`) para coordinar el razonamiento profundo, la selección de modelos, la cascada de inferencia y el ciclo de vida de nodos acelerados.
+- **Hand:** Ciclo activo de herramientas persistente; investiga, construye código, valida esquemas, repara y evoluciona skills (creando versiones incrementales v2, v3 en sandbox sin red bajo el Protocolo de Evolución de Khai).
 - **Pixy:** Custodia de gobernanza, autoridad, secretos, contratos y administración de nivel Root (personalidad en `agent.md` y directivas en `dynamic_guidelines`); solicita confirmación binaria explícita (`y`/`n`) para cualquier modificación root, efecto externo o costo.
-- **Heart:** Diagnóstico profundo ante fallos reiterados o sistémicos utilizando evidencia real de telemetría y logs (`CoreEyes`).
+- **Heart:** Diagnóstico profundo ante fallos técnicos (`CoreEyes`) y autopsias cognitivas ante discrepancias semánticas (`cognitive_discrepancy`), emitiendo órdenes de evolución de habilidades (`evolve_skill`) hacia Hand.
 - **Voice:** Concentra el acceso a redes externas, gestión segura de secretos y puntos de enlace de mensajería (Telegram).
 - **Dreams:** Registra episodios de ejecución, extrae aprendizajes técnicos y propone mejoras al catálogo.
 

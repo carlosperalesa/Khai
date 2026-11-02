@@ -1,5 +1,35 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Erradicación de Amnesia, Protocolo de Evolución de Skills y Autopsias Cognitivas (Mind -> Heart) — trabajo autorizado
+
+- **Erradicación de Amnesia en el Hilo Conversacional (`handle_reply` / `Coordinator`):**
+  1. *Desbloqueo de Respuestas en Lenguaje Natural:* Se erradica la restricción que limitaba las respuestas a palabras binarias o UUIDs en `Coordinator.handle_reply`. Si existe una pregunta de alcance (`scope`) pendiente en la conversación, respuestas de texto libre (ej. "Santiago", "en Valparaíso", "celsius") son dirigidas directamente a `accept_scope_reply` sin interpretarse como turnos nuevos independientes ni congelar la tarea original en `WAITING_SCOPE`.
+  2. *Flexibilización de Aprobaciones:* Se expande el vocabulario de confirmación aceptando afirmaciones naturales (`dale`, `ok`, `acepto`, `claro`, `procede`, `adelante`, `afirmativo`) y negativas (`cancela`, `rechazo`, `abortar`, `olvídalo`).
+  3. *Revisión Dinámica ante Respuestas Mixtas o Clarificaciones:* Si el usuario responde a una propuesta de ejecución o creación con una clarificación, modificación o respuesta mixta (ej. "sí, y además dame el viento", "sabes? ahora quiero el clima de Valparaíso"), `Coordinator.answer_question` no rechaza mecánicamente con "responde sí o no", sino que invoca `revise_goal`, transicionando el objetivo a `RESOLVING_SCOPE` para que `requirements.resolve` re-planifique y actualice los requerimientos y parámetros en caliente sin romper el hilo conversacional.
+
+- **Protocolo de Evolución de Skills (`ActionPlanner` / `Hand` / `Catalog`):**
+  1. *Superación de Versiones Estáticas:* Las habilidades dejan de ser artefactos estáticos inmutables. Cuando una solicitud requiere datos adicionales que la versión actual de la habilidad no proporciona (ej. viento o pronóstico extendido en `clima-santiago-openweather`), o tras una corrección de usuario, `ActionPlanner` detecta la insuficiencia y declara la evolución en `new_skill` con el mismo `skill_id`.
+  2. *Soporte de Evolución en `_convert_template_steps`:* Se permite que un paso faltante coincida con un `skill_id` ya activo, marcándolo como `is_evolution = True` y registrando `previous_version_id`.
+  3. *Versionado Canónico:* `Hand.create` detecta la versión activa existente y genera automáticamente la versión siguiente (`v2`, `v3`) con tipo de operación `update`. Al validarse en contenedor Docker seguro y promoverse por Pixy, `SkillCatalog.promote` marca la versión anterior como `superseded` y activa la nueva versión.
+
+- **Puente Mind -> Heart (Autopsias Cognitivas y Discrepancias Semánticas):**
+  1. *Detección de Quejas y Correcciones del Propietario:* Se implementa la herramienta `report_issue(issue, task_id, skill_name)` en `turn.py` y `Coordinator.report_cognitive_issue`. Además, `Mind` detecta deterministamente patrones correctivos del usuario (ej. "No me vuelvas a dar grados Kelvin", "Te equivocaste", "El resultado está mal") para abrir de inmediato un caso de incidente cognitivo en Heart.
+  2. *Taxonomía de Causa en Heart (`classify_cause`):* Se introduce el código de causa `cognitive_discrepancy` en `app/heart/recovery.py`. Heart diagnostica la insatisfacción semántica y genera un plan de remediación técnica dirigido a evolucionar la habilidad (`evolve_skill:<skill_id>`).
+  3. *Aprendizaje en Dreams:* Toda corrección del usuario se registra como experiencia fallida en el historial episódico de `Dreams` para evitar la recurrencia de errores en turnos posteriores.
+
+- **Erradicación de Coletillas Robóticas:**
+  - Se eliminan de `Coordinator` los sufijos mecánicos de auditoría (`¿Es este el resultado esperado? (y/n)`). Khai entrega resultados limpios, fluidos y humanos directamente al usuario.
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Se añaden 6 nuevas pruebas en `tests/test_human_interface.py` que validan:
+    a) Respuesta natural a preguntas de scope sin amnesia.
+    b) Aprobación conversacional flexible.
+    c) Revisión y adaptación de objetivos ante respuestas mixtas.
+    d) Reporte de discrepancias cognitivas hacia Heart.
+    e) Evolución de skills activas en `ActionPlanner`.
+    f) Entrega de salidas limpias sin coletillas robóticas.
+  - Suite canónica completa: **384 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**.
+
 ## Gobernanza Administrativa Root (Pixy), Memoria de Preferencias (Mind) y Desburocratización — trabajo autorizado
 
 - **Mind: Herramienta `set_user_preference` y Sincronización Inline de Preferencias:**

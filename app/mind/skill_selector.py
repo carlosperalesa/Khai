@@ -103,7 +103,7 @@ class SkillSelector:
                     'use_cases': record['spec']['use_cases'],
                     'input_schema': record['spec']['input_schema']} for record in ranked[:20]]
         prompt = ('Selecciona una capacidad que resuelva la solicitud COMPLETA y extrae los parámetros presentes. '
-                  'Si solo cubre una parte de una solicitud con varias acciones, usa null; '
+                  'Si solo cubre una parte de una solicitud o carece de datos pedidos expresamente por el usuario (ej. viento o pronóstico si la habilidad solo da temperatura), usa null para permitir que Khai evolucione la capacidad; '
                   'Devuelve JSON {"skill_id": string|null, "params": object}. '
                   'Si faltan parámetros obligatorios, elige la capacidad y omite esos parámetros '
                   'para que Khai los pregunte; nunca inventes valores. Si ninguna sirve, usa null. '

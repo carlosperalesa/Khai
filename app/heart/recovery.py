@@ -244,6 +244,12 @@ class Recovery:
         if isinstance(failure_info, dict) and failure_info.get('verification', {}).get('success') is False:
             return 'invalid_result', err_str or 'El resultado de la tarea no satisfizo el verificador objetivo'
 
+        # 8b. Discrepancia cognitiva / corrección del usuario / insatisfacción semántica
+        if any(term in low for term in ('cognitive_discrepancy', 'semantic_fault', 'user_feedback_correction',
+                                        'discrepancia cognitiva', 'discrepancia semántica', 'corrección del usuario')) \
+                or (isinstance(failure_info, dict) and failure_info.get('kind') == 'cognitive_discrepancy'):
+            return 'cognitive_discrepancy', err_str or 'Discrepancia semántica o resultado insatisfactorio corregido por el usuario'
+
         return 'syntax_or_code', err_str or 'Fallo no especificado durante la ejecución'
 
     @staticmethod
@@ -643,8 +649,14 @@ class Recovery:
             cause_code = failure_override.get('cause_code', 'syntax_or_code')
             detail = failure_override.get('detail', '')
             tid = failure_override.get('task_id')
-            action = 'retry_task' if cause_code == 'budget_exhausted' else 'remediate_task'
-            remedy = f"{action}:{tid}" if tid else None
+            skill_name = failure_override.get('skill_name')
+            if cause_code == 'cognitive_discrepancy':
+                action = f'evolve_skill:{skill_name}' if skill_name else 'remediate_task'
+            elif cause_code == 'budget_exhausted':
+                action = 'retry_task'
+            else:
+                action = 'remediate_task'
+            remedy = f"{action}:{tid}" if (tid and not action.startswith('evolve_skill:')) else action
             override_task = failure_override.get('task') or (focus_task if focus_task and focus_task.get('id') == tid else None)
             failure = (override_task or {}).get('result') or {}
             if (cause_code == 'temporary_provider' and failure.get('stage') == 'dependency_preparation'
@@ -652,7 +664,8 @@ class Recovery:
                     and override_task.get('authorized_hash') == override_task['artifact_hash']):
                 remedy = f'resume_prepared_task:{tid}'
             binding = task_binding(override_task if isinstance(override_task, dict) else None)
-            add(cause_code, 'high', detail, remedy=remedy, task_binding_info=binding)
+            corr_instr = failure_override.get('corrective_instruction') or (f"Evolucionar la capacidad incorporando la corrección: {detail}" if cause_code == 'cognitive_discrepancy' else None)
+            add(cause_code, 'high', detail, remedy=remedy, task_binding_info=binding, corrective_instruction=corr_instr)
 
         storage = evidence.get('storage') or {}
         vitals, integrity = storage.get('vitals'), storage.get('integrity')
@@ -772,10 +785,10 @@ class Recovery:
             return None
 
         # Si el fallo corresponde a una tarea detenida/fallida o requiere crear skill reparadora
-        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:', 'create_skill:', 'resume_prepared_task:'))), None)
+        task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:', 'create_skill:', 'resume_prepared_task:', 'evolve_skill:'))), None)
         if task_remedy:
-            action, tid = task_remedy['remedy'].split(':', 1)
-            steps = [{'action': action, 'target': 'task'}]
+            action, tid = task_remedy['remedy'].split(':', 1) if ':' in task_remedy['remedy'] else (task_remedy['remedy'], 'none')
+            steps = [{'action': action, 'target': 'skill' if action.startswith('evolve_skill') else 'task'}]
             from app.heart.catalog import task_binding
             binding = task_remedy.get('task_binding') or diagnosis.get('task_binding')
             if not binding:

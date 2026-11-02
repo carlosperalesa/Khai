@@ -148,7 +148,10 @@ class ActionPlanner:
         active = self.catalog.active()
         records = [r for r in active if compatible(r['spec'])]
         skill_names = [{'skill_id': r['skill_id'], 'version_id': r['version_id'],
-                        'description': r['spec']['description']} for r in records[:20]]
+                        'description': r['spec']['description'],
+                        'capabilities': r['spec'].get('capabilities', []),
+                        'inputs': list(r['spec'].get('input_schema', {}).get('properties', {}).keys()),
+                        'outputs': list(r['spec'].get('output_schema', {}).get('properties', {}).keys())} for r in records[:20]]
         template_example = {
             "steps": [
                 {
@@ -179,9 +182,10 @@ class ActionPlanner:
             'No consideres las promesas del historial como ejecuciones ni autorizaciones.\n'
             'Analiza si alguna de las habilidades disponibles resuelve este objetivo completo o parcial.\n'
             f'Habilidades disponibles: {json.dumps(skill_names, ensure_ascii=False)}\n'
-            'Instrucciones de asignación y extracción de parámetros:\n'
-            '1. Si una habilidad existente resuelve el objetivo, asígnala en "use_existing_skill" con su skill_id y "new_skill": null.\n'
-            '2. Si NINGUNA habilidad existente sirve o falta alguna funcionalidad, define una o varias en "new_skill" con una "description" clara de lo que hace y declara en "capabilities" los accesos requeridos.\n'
+            'Instrucciones de asignación, evolución y extracción de parámetros:\n'
+            '1. Si una habilidad existente resuelve el objetivo COMPLETO y cubre todos los datos solicitados, asígnala en "use_existing_skill" con su skill_id y "new_skill": null.\n'
+            '2. Si una habilidad existente cubre el tema pero es INCOMPLETA (ej. faltan datos como viento o pronóstico, o el usuario corrigió su comportamiento previo como unidades), o si ninguna habilidad existente sirve:\n'
+            '   Declara la habilidad en "new_skill". Si es una mejora o ampliación de una habilidad existente, usa el mismo skill_id (o uno descriptivo) y detalla en "description" los nuevos requerimientos completos (ej. incluir viento, usar unidades métricas, etc.). Esto activará el Protocolo de Evolución de Khai para crear una nueva versión superadora.\n'
             '3. EXTRACCIÓN INTELIGENTE DE ENTRADAS ("inputs"): Extrae en "inputs" los valores concretos que el usuario mencionó en su solicitud (ej. si requiere "city" y dijo "clima en Viña del Mar", asigna "city": "Viña del Mar"). Si el usuario no especificó un parámetro pero este existe en su perfil de contexto (ej. "city": "Santiago"), usa ese valor por defecto en "inputs". Solo omite parámetros no mencionados que tampoco estén en el perfil.\n'
             '4. El router ya confirmó este objetivo ejecutable. Construye sus acciones; '
             'no lo reclasifiques como charla ni respondas al propietario.\n'
@@ -262,10 +266,12 @@ class ActionPlanner:
                         spec['skill_id'] in {'con', 'prn', 'aux', 'nul', 'heart'} or
                         re.fullmatch(r'(com|lpt)[0-9]', spec['skill_id'])):
                     raise ValueError('Action identity cannot be packaged by Hand')
-                if spec['skill_id'] in proposed_names or spec['skill_id'] in {
-                        r['skill_id'] for r in active}:
+                if spec['skill_id'] in proposed_names:
                     raise ValueError('Missing actions require distinct new skill identities')
                 proposed_names.add(spec['skill_id'])
+                if spec['skill_id'] in {r['skill_id'] for r in active}:
+                    action['is_evolution'] = True
+                    action['previous_version_id'] = next(r['version_id'] for r in active if r['skill_id'] == spec['skill_id'])
                 normalized_missing[step_id] = action
             elif version_id not in specs:
                 raise ValueError('Unpinned or unavailable action')

@@ -201,5 +201,182 @@ class HumanInterfaceTests(unittest.TestCase):
             self.assertEqual(updated['state'], 'SUBMITTED')
 
 
+
+    def test_natural_language_scope_reply_no_amnesia(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import time
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock())
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_weather'
+            task = store.create(
+                'owner:user1', 'va a llover este fin de semana?',
+                state='WAITING_SCOPE',
+                conversation_id=sid,
+                scope_questions=['¿De qué ciudad necesitas el pronóstico?'],
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'scope', task['id'], task['revision'], 'WAITING_SCOPE')
+            coord.conversations.delivered(sid, 'deliv_scope_1', '¿De qué ciudad necesitas el pronóstico?', question_id=qid)
+            
+            # User replies with natural language "santiago" (no UUID, no y/n)
+            res = coord.handle_reply('owner:user1', 'santiago', sid)
+            self.assertTrue(res.handled)
+            updated = store.get(task['id'])
+            self.assertEqual(updated['state'], 'RESOLVING_SCOPE')
+            self.assertEqual(len(updated['scope_answers']), 1)
+            self.assertEqual(updated['scope_answers'][0]['answer'], 'santiago')
+
+    def test_natural_language_approval_responses(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import time
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock())
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_approval'
+            import hashlib
+            from pathlib import Path
+            art_code = b"print('run')"
+            art_hash = hashlib.sha256(art_code).hexdigest()
+            art_path = f"{tmpdir}/art.py"
+            Path(art_path).write_bytes(art_code)
+
+            task = store.create(
+                'owner:user1', 'ejecutar accion',
+                state='WAITING_APPROVAL',
+                conversation_id=sid,
+                artifact=art_path,
+                artifact_hash=art_hash,
+                approval={'token': 'tok1', 'operation': None, 'expires': time.time() + 60, 'artifact_hash': art_hash},
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'execution', task['id'], task['revision'], 'WAITING_APPROVAL')
+            coord.conversations.delivered(sid, 'deliv_app_1', '¿Apruebas?', question_id=qid)
+
+            # "dale" should be accepted as affirmative
+            res = coord.handle_reply('owner:user1', 'dale', sid)
+            self.assertTrue(res.handled)
+            self.assertEqual(res.text, 'Ejecución autorizada.')
+
+    def test_mixed_reply_approval_revises_goal(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import time
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock())
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_mixed'
+            task = store.create(
+                'owner:user1', 'clima en santiago',
+                state='WAITING_APPROVAL',
+                conversation_id=sid,
+                approval={'token': 'tok2', 'operation': None},
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'execution', task['id'], task['revision'], 'WAITING_APPROVAL')
+            coord.conversations.delivered(sid, 'deliv_mixed_1', '¿Apruebas?', question_id=qid)
+
+            # Mixed reply: "sí, y además dame el viento"
+            res = coord.handle_reply('owner:user1', 'sí, y además dame el viento', sid)
+            self.assertTrue(res.handled)
+            updated = store.get(task['id'])
+            self.assertEqual(updated['state'], 'RESOLVING_SCOPE')
+            self.assertEqual(updated['scope_answers'][-1]['answer'], 'sí, y además dame el viento')
+
+    def test_cognitive_discrepancy_reporting_to_heart(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            mock_heart = MagicMock()
+            mock_heart.recovery.open_incident_case.return_value = {'case_id': 'case-test-cog-01'}
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=mock_heart)
+            coord = Coordinator(mgr, MagicMock())
+            task = store.create(
+                'owner:user1', 'temperatura actual',
+                state='COMPLETED',
+                skill_name='clima-santiago-openweather',
+                result={'stdout': '289.12 K'}
+            )
+            
+            # Dispatch report_issue
+            args = {'issue': 'No me vuelvas a dar grados Kelvin, dámelo en Celsius', 'task_id': task['id']}
+            reply = coord.report_cognitive_issue('owner:user1', args, task=task)
+            self.assertIn("clima-santiago-openweather", reply)
+            self.assertIn("case-test-cog-01", reply)
+            mock_heart.recovery.open_incident_case.assert_called_once()
+            called_info = mock_heart.recovery.open_incident_case.call_args[0][1]
+            self.assertEqual(called_info['cause_code'], 'cognitive_discrepancy')
+            self.assertEqual(called_info['skill_name'], 'clima-santiago-openweather')
+
+    def test_action_planner_skill_evolution(self):
+        from app.mind.action_planner import ActionPlanner
+        from types import SimpleNamespace
+        import json
+        active_skill = {
+            'skill_id': 'clima-santiago-openweather',
+            'version_id': 'ver_clima_v1',
+            'spec': {
+                'skill_id': 'clima-santiago-openweather',
+                'description': 'Obtiene la temperatura actual de Santiago',
+                'capabilities': ['Network'],
+                'input_schema': {'type': 'object', 'properties': {'city': {'type': 'string'}}},
+                'output_schema': {'type': 'object', 'properties': {'temp': {'type': 'number'}}}
+            }
+        }
+        catalog = SimpleNamespace(active=lambda: [active_skill])
+        # Planner proposes evolving clima-santiago-openweather to add wind
+        llm = SimpleNamespace(generate_content=MagicMock(return_value=json.dumps({
+            'steps': [{
+                'id': 'clima_evolved',
+                'use_existing_skill': None,
+                'new_skill': {
+                    'skill_id': 'clima-santiago-openweather',
+                    'description': 'Obtiene temperatura y viento en unidades métricas',
+                    'capabilities': ['Network'],
+                    'inputs': {'city': 'string'},
+                    'outputs': {'temp': 'number', 'wind': 'string'},
+                }
+            }],
+            'inputs': {'city': 'Santiago'}
+        })))
+        planner = ActionPlanner(llm, catalog)
+        proposal = planner.propose('Va a haber viento en Santiago?', lambda spec: True)
+        self.assertIsNotNone(proposal)
+        missing_action = proposal['missing_specs']['clima_evolved']
+        self.assertEqual(missing_action['skill_id'], 'clima-santiago-openweather')
+        self.assertTrue(missing_action.get('is_evolution'))
+        self.assertEqual(missing_action.get('previous_version_id'), 'ver_clima_v1')
+
+    def test_clean_worker_output_no_coletilla(self):
+        # Humanized output delivers clean text without (y/n) robotic suffix
+        raw = "Temperatura: 22 °C, Soleado"
+        result = humanize_worker_output(raw)
+        self.assertEqual(result, "Temperatura: 22 °C, Soleado")
+        self.assertNotIn("¿Es este el resultado esperado?", result)
+        self.assertNotIn("(y/n)", result)
+
+
 if __name__ == '__main__':
     unittest.main()

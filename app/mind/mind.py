@@ -42,6 +42,20 @@ def _sync_inline_preferences(text: str, memory) -> None:
                 memory.set_preference('user_city', city)
 
 
+def _is_cognitive_discrepancy(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    patterns = (
+        'no me vuelvas a dar', 'no me des', 'no vuelvas a', 'está mal', 'esta mal',
+        'te equivocaste', 'te has equivocado', 'temperatura incorrecta', 'no tiene sentido',
+        'resultado incorrecto', 'resultado erróneo', 'eso no es lo que pedí',
+        'no era lo que pedí', 'faltó el viento', 'falta el viento', 'dámelo en celsius',
+        'dámelo en grados celsius', 'en celsius por favor'
+    )
+    return any(p in low for p in patterns)
+
+
 class Mind:
     def __init__(self, llm, memory):
         self.llm, self.memory = llm, memory
@@ -72,6 +86,9 @@ class Mind:
             "pida expresamente crear, construir o instalar una capacidad; esa orden ya autoriza "
             "la creacion, aunque no autoriza secretos, efectos externos ni preferencias. "
             "Si el usuario aprueba un proveedor predeterminado usa set_default_provider. "
+            "Si el propietario expresa insatisfacción, queja o corrección sobre una respuesta o ejecución previa "
+            "(ej. 'eso está mal', 'no me vuelvas a dar Kelvin', 'te equivocaste', 'faltó el viento'), usa report_issue(issue, task_id, skill_name) "
+            "para registrar el incidente cognitivo en Heart. Copia literalmente la queja en issue. "
             "Si el usuario comparte un dato de perfil o preferencia persistente (ej. 'yo soy cáncer, recuérdalo', "
             "'me llamo Juan', 'vivo en Valparaíso'), o te pide explícitamente recordar o registrar un dato, usa "
             "set_user_preference(key, value) con tool_calls. Las claves comunes son 'sign', 'name', 'city', 'units', 'language'. "
@@ -108,6 +125,20 @@ class Mind:
                 temperature=0)
             turn = self._validate_response(raw)
             intent = turn.intent()
+            if intent.get('action') == 'GENERAL_CHAT' and _is_cognitive_discrepancy(message):
+                tid = task_context[-1]['id'] if task_context and task_context[-1].get('id') else None
+                intent = {
+                    'action': 'TOOL_CALL',
+                    'reply': '',
+                    'tool_call': {
+                        'name': 'report_issue',
+                        'arguments': {
+                            'issue': message.strip(),
+                            'task_id': tid,
+                            'skill_name': None
+                        }
+                    }
+                }
             if persist:
                 self.memory.append_long_term("user_chat", message)
                 if turn.reply:

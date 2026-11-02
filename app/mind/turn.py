@@ -78,8 +78,19 @@ class SetPreferenceCall(Arguments):
     arguments: PreferenceArguments
 
 
+class ReportIssueArguments(Arguments):
+    issue: str = Field(min_length=3, max_length=4000)
+    task_id: str | None = Field(default=None, pattern=r'^task_[a-f0-9]{32}$')
+    skill_name: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,63}$')
+
+
+class ReportIssueCall(Arguments):
+    name: Literal['report_issue']
+    arguments: ReportIssueArguments
+
+
 ToolCall = Annotated[Union[StartCall, ReviseCall, StatusCall, CancelCall, AnswerCall, HealthCall,
-                           DefaultProviderCall, SetPreferenceCall],
+                           DefaultProviderCall, SetPreferenceCall, ReportIssueCall],
                      Field(discriminator='name')]
 
 
