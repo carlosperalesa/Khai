@@ -161,7 +161,16 @@ class LLMManager:
                 if c['type'] == 'gemini' and now > status.get(c['id'], 0)]
         rejected = 0
         for credential in pool:
+            budget = current_budget.get()
+            if budget:
+                receipt = budget()
+                kwargs = {**kwargs, '_deadline': min(kwargs.get('_deadline', float('inf')), receipt['deadline'])}
             try:
+                if kwargs.get('_deadline'):
+                    remaining = kwargs['_deadline'] - time.time()
+                    if remaining <= 0:
+                        raise ModelUnavailable('Se agotó el plazo de inferencia; la solicitud conserva su estado.')
+                    kwargs = {**kwargs, '_timeout': min(60, remaining)}
                 if operation == 'generate':
                     return self._generate_gemini(value, credential['key'], kwargs)
                 result = self._complete_gemini(value, tools, credential['key'], kwargs)
@@ -174,17 +183,19 @@ class LLMManager:
                 code = getattr(getattr(exc, 'response', None), 'status_code', None)
                 self._mark_key_failed(credential['id'], 300 if code in {401, 403, 429} else 60)
         if pool and rejected == len(pool):
+            self._notify('La solicitud fue rechazada por el proveedor; no se ejecutó ninguna acción.')
             raise LLMContentRejected('Nano rechazo la solicitud; no se ejecuto ninguna accion.')
         raise ModelUnavailable('Nano no responde. Elige el modelo al que deseas cambiar con /mode low, /mode mid o /mode high.')
 
-    def probe_nano(self):
+    def probe_nano(self, deadline=None):
         from contextlib import nullcontext
         journal = getattr(self, 'journal', None)
         scope = journal.scope('model_probe', uuid.uuid4().hex,
             refs={'profile': 'nano', 'provider': 'gemini'}) if journal else nullcontext()
         with scope:
             result = self._nano_call('generate', 'Devuelve exactamente {"ready":true}.', None,
-                {'response_format': {'type': 'json_object'}, 'temperature': 0, '_timeout': 15})
+                  {'response_format': {'type': 'json_object'}, 'temperature': 0, '_timeout': 15,
+                   '_deadline': min(deadline or float('inf'), time.time() + 15)})
             if json.loads(result) != {'ready': True}:
                 raise ModelUnavailable('Nano no supero la comprobacion de disponibilidad.')
             return True
@@ -196,8 +207,8 @@ class LLMManager:
         snapshot = manager.snapshot()
         mode, generation = snapshot['effective_mode'], snapshot['generation']
         budget = current_budget.get()
-        timeout = max(1, min(60, budget()['deadline'] - time.time())) if budget else min(60, kwargs.get('_timeout', 60))
-        kwargs = {**kwargs, '_timeout': timeout}
+        timeout = min(60, kwargs.get('_timeout', 60))
+        kwargs = {**kwargs, '_timeout': timeout, '_deadline': time.time() + timeout}
         journal = getattr(self, 'journal', None)
 
         def invoke(profile, call):
@@ -207,8 +218,15 @@ class LLMManager:
                 return call()
 
         if mode in {'low', 'mid', 'high'}:
+            if budget:
+                receipt = budget()
+                timeout = min(timeout, receipt['deadline'] - time.time())
+                if timeout <= 0:
+                    raise ModelUnavailable('Se agotó el plazo de inferencia.')
+                kwargs = {**kwargs, '_deadline': time.time() + timeout}
             try:
-                local_kwargs = {**kwargs, '_local_model': self.dolphin.get_model_for_mode(mode)}
+                local_kwargs = {**kwargs, '_timeout': max(1, timeout - min(15, timeout / 3)),
+                                '_local_model': self.dolphin.get_model_for_mode(mode)}
                 if operation == 'generate':
                     return invoke(mode, lambda: self._call_dolphin(value, self._dolphin_endpoint(), local_kwargs))
                 return invoke(mode, lambda: self._complete_dolphin(value, tools, self._dolphin_endpoint(), local_kwargs))
@@ -216,176 +234,44 @@ class LLMManager:
                 raise
             except Exception as exc:
                 logger.warning('Modelo efectivo %s no responde (%s); comprobando Nano', mode, type(exc).__name__)
+                self.probe_nano(deadline=kwargs['_deadline'])
+                if manager.publish_nano_fallback(mode, generation):
+                    from app.voice.help import MODE_SELECTION_BUTTONS
+                    self._notify(f'[Modo {mode} falló] [Modo nano conectado] Elige otro modelo si lo deseas.', buttons=MODE_SELECTION_BUTTONS)
         result = invoke('nano', lambda: self._nano_call(operation, value, tools, kwargs))
-        if mode != 'nano' and manager.publish_nano_fallback(mode, generation):
-            from app.voice.help import MODE_SELECTION_BUTTONS
-            self._notify(f'[Error en modo {mode}, pasando a Nano ¿deseas otro modo?]', buttons=MODE_SELECTION_BUTTONS)
         return result
 
+    def _legacy_inference(self, operation, value, tools, kwargs):
+        """Compatibility callers use the selected service, never provision another VM."""
+        controller = getattr(self, 'dolphin', None)
+        mode = controller.get_active_mode() if controller is not None else 'nano'
+        if mode in {'high', 'mid', 'low'} and self._dolphin_endpoint():
+            try:
+                if operation == 'generate':
+                    return self._call_dolphin(value, self._dolphin_endpoint(), kwargs)
+                return self._complete_dolphin(value, tools, self._dolphin_endpoint(), kwargs)
+            except LLMContentRejected:
+                raise
+            except Exception:
+                self.probe_nano()
+                if controller is not None:
+                    controller.mark_fallback_to_nano()
+                from app.voice.help import MODE_SELECTION_BUTTONS
+                self._notify('[Modo nano conectado] Elige otro modelo si lo deseas.', buttons=MODE_SELECTION_BUTTONS)
+        if kwargs.get('forced_key') and kwargs.get('forced_type'):
+            provider = kwargs['forced_type']
+            if provider not in {'gemini', 'openai', 'azure'}:
+                raise ValueError('Proveedor explícito inválido')
+            method = getattr(self, ('_generate_' if operation == 'generate' else '_complete_') + provider)
+            return method(value, kwargs['forced_key'], kwargs) if operation == 'generate' else method(value, tools, kwargs['forced_key'], kwargs)
+        return self._nano_call(operation, value, tools, kwargs)
+
     def generate_content(self, prompt: str, **kwargs) -> str:
-        """Genera contenido en cascada según el modo activo (mid/high -> Dolphin -> Cloud; low -> Cloud -> Dolphin)."""
         if hasattr(self, '_response_meta'):
             self._response_meta.set({})
         if getattr(self, 'transitions', None) is not None:
             return self._managed_inference('generate', prompt, None, kwargs)
-        rf = kwargs.get('response_format')
-        is_json = isinstance(rf, dict) and rf.get('type') == 'json_object'
-        dolphin_ctrl = getattr(self, 'dolphin', None)
-        active_mode = (dolphin_ctrl.get_active_mode()
-                       if dolphin_ctrl is not None
-                       else os.getenv('KHAI_DOLPHIN_MODE', 'nano').strip().lower())
-        endpoint = self._dolphin_endpoint()
-        conv_banner = ''
-        tried_dolphin = False
-
-        if endpoint and active_mode in {'low', 'mid', 'high'}:
-            tried_dolphin = True
-            ladder = ['high', 'mid', 'low'] if active_mode == 'high' else (['mid', 'low'] if active_mode == 'mid' else ['low'])
-            answer = None
-            successful_profile = None
-
-            # Intentar directamente si el nodo ya está activo y respondiendo
-            try:
-                answer = self._call_dolphin(prompt, endpoint, kwargs)
-                successful_profile = active_mode
-            except Exception as exc_call:
-                logger.info('Dolphin %s no respondió directamente (%s), intentando arranque/cascada',
-                            active_mode, type(exc_call).__name__)
-                for profile in ladder:
-                    if dolphin_ctrl is not None:
-                        try:
-                            self._notify(f"[Conectando con Modo {profile}]")
-                            dolphin_ctrl.start(profile)
-                            answer = self._call_dolphin(prompt, endpoint, kwargs)
-                            successful_profile = profile
-                            self._notify(f"[Modo {profile} conectado]")
-                            break
-                        except Exception as exc:
-                            from app.mind.brain.controller import _format_error_reason
-                            reason = _format_error_reason(exc)
-                            logger.warning('Dolphin %s falló (%s): %s', profile, type(exc).__name__, exc)
-                            self._notify(f"[Modo {profile} falló por: {reason}]")
-                    else:
-                        try:
-                            answer = self._call_dolphin(prompt, endpoint, kwargs)
-                            successful_profile = profile
-                            break
-                        except Exception as exc:
-                            logger.warning('Llamada Dolphin falló (%s)', type(exc).__name__)
-
-            if answer is not None and successful_profile is not None:
-                if dolphin_ctrl is not None and not is_json:
-                    conv_banner = dolphin_ctrl.consume_transition_banner(successful_profile)
-                return (conv_banner + answer) if conv_banner and not is_json else answer
-
-            if dolphin_ctrl is not None:
-                dolphin_ctrl.mark_fallback_to_nano()
-            self._notify("[Modo nano conectado]")
-            if not is_json and dolphin_ctrl is not None:
-                conv_banner = dolphin_ctrl.consume_transition_banner('nano')
-        elif dolphin_ctrl is not None and not is_json:
-            conv_banner = dolphin_ctrl.consume_transition_banner('nano')
-
-        status = self._load_status()
-        now = time.time()
-        
-        forced_key = kwargs.get("forced_key")
-        forced_type = kwargs.get("forced_type")
-        
-        if forced_key and forced_type:
-            pool = [{"type": forced_type, "key": forced_key, "id": "FORCED_KEY"}]
-        else:
-            ready = [c for c in self.api_keys_pool if now > status.get(c['id'], 0)]
-            cooling = sorted(
-                [c for c in self.api_keys_pool if now <= status.get(c['id'], 0)],
-                key=lambda c: status.get(c['id'], 0),
-            )
-            # Retrying cooling keys on every turn defeated admission control and
-            # amplified quota/provider failures.
-            pool = ready
-
-        content_rejections = 0
-
-        for idx, current_cred in enumerate(pool):
-            budget = current_budget.get()
-            if budget is not None:
-                task = budget()
-                kwargs['_timeout'] = max(1, min(60, task['deadline'] - time.time()))
-            else:
-                kwargs['_timeout'] = min(60, kwargs.get('_timeout', 60))
-            try:
-                generate = getattr(self, '_generate_' + current_cred['type'])
-                result = generate(prompt, current_cred['key'], kwargs)
-                return (conv_banner + result) if conv_banner and not is_json else result
-            except Exception as exc:
-                # Never print credentials, URLs with keys, or full SDK exception payloads.
-                logger.warning('Proveedor %s falló (%s)', current_cred['id'], type(exc).__name__)
-                if isinstance(exc, LLMContentRejected):
-                    content_rejections += 1
-                    continue
-                msg = str(exc)
-                if isinstance(exc, ValueError) and ('Gemini no devolvió candidatos' in msg or 'Gemini devolvió candidato vacío' in msg):
-                    continue
-                http_code = getattr(getattr(exc, 'response', None), 'status_code', None)
-                cooldown = 300 if http_code in {401, 403, 429} else getattr(self, 'cooldown_seconds', 60)
-                self._mark_key_failed(current_cred['id'], cooldown=cooldown)
-                if idx < len(pool) - 1:
-                    next_cred = pool[idx + 1]
-                    if 'FALLBACK' in next_cred['id']:
-                        self._notify("Gemini no responde, pasando a Gemini Fallback")
-                    else:
-                        self._notify(f"{current_cred['id']} no responde, pasando a {next_cred['id']}")
-                else:
-                    if len(pool) > 1:
-                        self._notify("Gemini Fallback no responde, pasando a Dolphin Medium")
-                    else:
-                        self._notify("Gemini no responde, pasando a Dolphin Medium")
-
-        if pool and content_rejections == len(pool):
-            message = 'La solicitud fue rechazada por los proveedores configurados; no se ejecutó ninguna acción.'
-            self._notify(message)
-            raise LLMContentRejected(message)
-
-        if endpoint and not tried_dolphin and not (forced_key and forced_type):
-            self._notify("Conectando con Dolphin Medium")
-            mid_ok = False
-            if dolphin_ctrl is not None:
-                try:
-                    dolphin_ctrl.start('mid')
-                    mid_ok = True
-                except Exception as exc:
-                    logger.warning('Auto-arranque Dolphin mid falló (%s)', type(exc).__name__)
-
-            if mid_ok or dolphin_ctrl is None:
-                try:
-                    answer = self._call_dolphin(prompt, endpoint, kwargs)
-                    if dolphin_ctrl is not None and not is_json:
-                        conv_banner = dolphin_ctrl.consume_transition_banner('mid')
-                    return (conv_banner + answer) if conv_banner and not is_json else answer
-                except Exception as exc:
-                    logger.warning('Inferencia Dolphin mid falló (%s)', type(exc).__name__)
-
-            self._notify("Dolphin Medium no responde, pasando a Dolphin High")
-            self._notify("Conectando con Dolphin High")
-            high_ok = False
-            if dolphin_ctrl is not None:
-                try:
-                    dolphin_ctrl.start('high')
-                    high_ok = True
-                except Exception as exc:
-                    logger.warning('Auto-arranque Dolphin high falló (%s)', type(exc).__name__)
-
-            if high_ok or dolphin_ctrl is None:
-                try:
-                    answer = self._call_dolphin(prompt, endpoint, kwargs)
-                    if dolphin_ctrl is not None and not is_json:
-                        conv_banner = dolphin_ctrl.consume_transition_banner('high')
-                    return (conv_banner + answer) if conv_banner and not is_json else answer
-                except Exception as exc:
-                    logger.warning('Inferencia Dolphin high falló (%s)', type(exc).__name__)
-
-        self._notify("Todos los LLM están ocupados, por favor espere.")
-        raise ValueError("Todos los LLM están ocupados, por favor espere.")
+        return self._legacy_inference('generate', prompt, None, kwargs)
 
     @staticmethod
     def _tool_schema(tools):
@@ -398,70 +284,10 @@ class LLMManager:
         return normalized
 
     def complete(self, messages, tools=None, **kwargs):
-        """Execute one logical native function-calling turn with failover."""
-        if not isinstance(messages, list) or not messages:
-            raise ValueError('Agent messages are required')
-        if getattr(self, 'transitions', None) is not None:
-            return self._managed_inference('complete', messages, self._tool_schema(tools), kwargs)
-        budget = current_budget.get()
-        if budget is not None:
-            task = budget()
-            kwargs['_timeout'] = max(1, min(60, task['deadline'] - time.time()))
-        else:
-            kwargs['_timeout'] = min(60, kwargs.get('_timeout', 60))
         tools = self._tool_schema(tools)
-        status, now = self._load_status(), time.time()
-        pool = [item for item in self.api_keys_pool if now > status.get(item['id'], 0)]
-        last_error = None
-
-        dolphin_ctrl = getattr(self, 'dolphin', None)
-        active_mode = (dolphin_ctrl.get_active_mode()
-                       if dolphin_ctrl is not None
-                       else os.getenv('KHAI_DOLPHIN_MODE', 'nano').strip().lower())
-        endpoint = self._dolphin_endpoint()
-
-        # Si el modo activo es high, mid o low, priorizar el nodo acelerado en cascada estricta (high > mid > low)
-        if endpoint and active_mode in {'high', 'mid', 'low'}:
-            ladder = ['high', 'mid', 'low'] if active_mode == 'high' else (['mid', 'low'] if active_mode == 'mid' else ['low'])
-            for profile in ladder:
-                if dolphin_ctrl is not None:
-                    try:
-                        self._notify(f"[Conectando con Modo {profile}]")
-                        dolphin_ctrl.start(profile)
-                        res = self._complete_dolphin(messages, tools, endpoint, kwargs)
-                        self._notify(f"[Modo {profile} conectado]")
-                        return res
-                    except Exception as exc:
-                        last_error = exc
-                        from app.mind.brain.controller import _format_error_reason
-                        reason = _format_error_reason(exc)
-                        logger.warning('Brain tool-calling %s falló (%s): %s', profile, type(exc).__name__, exc)
-                        self._notify(f"[Modo {profile} falló por: {reason}]")
-                else:
-                    try:
-                        return self._complete_dolphin(messages, tools, endpoint, kwargs)
-                    except Exception as exc:
-                        last_error = exc
-                        logger.warning('Brain tool-calling falló (%s)', type(exc).__name__)
-            # Si se agotó la cascada acelerada, degradar a nano
-            if dolphin_ctrl is not None:
-                dolphin_ctrl.mark_fallback_to_nano()
-            self._notify("[Modo nano conectado]")
-
-        # Fallback a pool de Cloud API (Gemini / modo nano)
-        for current in pool:
-            try:
-                turn = getattr(self, '_complete_' + current['type'])(
-                    messages, tools, current['key'], kwargs)
-                turn.setdefault('provider', current['type'])
-                return turn
-            except Exception as exc:
-                last_error = exc
-                logger.warning('Tool-calling provider %s failed (%s)', current['id'], type(exc).__name__)
-                code = getattr(getattr(exc, 'response', None), 'status_code', None)
-                self._mark_key_failed(current['id'], cooldown=300 if code in {401, 403, 429} else None)
-
-        raise ValueError('Ningún LLM disponible soportó el turno con herramientas') from last_error
+        if getattr(self, 'transitions', None) is not None:
+            return self._managed_inference('complete', messages, tools, kwargs)
+        return self._legacy_inference('complete', messages, tools, kwargs)
 
     @staticmethod
     def _openai_messages(messages):

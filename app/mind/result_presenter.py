@@ -53,5 +53,4 @@ def present_recipe(task):
                 lines.append(f'El proveedor confirmó el envío a {recipient}.')
             else:
                 lines.append(f'El proveedor confirmó la operación: {name}.')
-    lines.append('¿Es correcto el resultado completo? Responde y, n o explica qué debo corregir.')
     return '\n'.join(lines)[:8000]

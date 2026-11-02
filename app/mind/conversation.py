@@ -61,7 +61,60 @@ class ConversationStore:
                 '''CREATE INDEX IF NOT EXISTS idx_conversations_thread
                    ON conversations(owner_id, chat_id, thread_id)''',
             ]
-        ], component='conversations')
+        , [
+            '''CREATE TABLE IF NOT EXISTS conversation_requests(
+               id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+               source TEXT NOT NULL, parent_id TEXT, kind TEXT NOT NULL,
+               object_id TEXT NOT NULL, created_at REAL NOT NULL,
+               UNIQUE(kind,object_id))''',
+            'CREATE INDEX IF NOT EXISTS requests_conversation ON conversation_requests(conversation_id,created_at)',
+            '''CREATE TABLE IF NOT EXISTS conversation_diagnostics(
+               conversation_id TEXT PRIMARY KEY, case_id TEXT NOT NULL, updated_at REAL NOT NULL)''',
+        ]], component='conversations')
+
+    def register_request(self, sid, source, kind, object_id, parent_id=None, conn=None):
+        """Stable provenance; operational status stays in the owning domain table."""
+        identifier = 'request_' + hashlib.sha256(f'{kind}:{object_id}'.encode()).hexdigest()[:32]
+        def save(db):
+            db.execute('INSERT OR IGNORE INTO conversation_requests VALUES (?,?,?,?,?,?,?)',
+                       (identifier, sid, source, parent_id, kind, object_id, time.time()))
+        if conn is not None:
+            save(conn)
+        else:
+            with connection(self.path) as db:
+                save(db)
+        return identifier
+
+    def shared_context(self, sid, query, limit=6):
+        """Bounded retrieval across the same owner's non-deleted conversations."""
+        words = set(re.findall(r'\w{4,}', query.casefold()))
+        with connection(self.path) as db:
+            rows = db.execute('''SELECT m.conversation_id,c.title,m.role,m.content,m.created_at
+                FROM conversation_messages m JOIN conversations c ON c.id=m.conversation_id
+                WHERE c.owner_id=(SELECT owner_id FROM conversations WHERE id=?)
+                AND c.id!=? AND c.status!='deleted' ORDER BY m.id DESC LIMIT 600''', (sid, sid)).fetchall()
+        ranked = []
+        for row in rows:
+            score = len(words & set(re.findall(r'\w{4,}', row['content'].casefold())))
+            if score:
+                ranked.append((score, row['created_at'], dict(row)))
+        return [dict(item, content=item['content'][:1600])
+                for _, _, item in sorted(ranked, key=lambda r: (r[0], r[1]), reverse=True)[:limit]]
+
+    def diagnostic_context(self, sid):
+        with connection(self.path) as db:
+            questions = [dict(r) for r in db.execute(
+                'SELECT * FROM conversation_questions WHERE conversation_id=? ORDER BY created_at DESC LIMIT 12', (sid,))]
+            previous = db.execute('SELECT case_id FROM conversation_diagnostics WHERE conversation_id=?', (sid,)).fetchone()
+            turns = [dict(r) for r in db.execute(
+                'SELECT source,message_id,reply_to,task_id,status,receipt FROM conversation_turns '
+                'WHERE conversation_id=? ORDER BY rowid DESC LIMIT 12', (sid,))]
+        return {'conversation_id': sid, 'messages': self.history(sid, limit=12),
+                'questions': questions, 'turns': turns, 'previous_case_id': previous[0] if previous else None}
+
+    def remember_diagnostic(self, sid, case_id):
+        with connection(self.path) as db:
+            db.execute('INSERT OR REPLACE INTO conversation_diagnostics VALUES (?,?,?)', (sid, case_id, time.time()))
 
     def get_conversation(self, sid):
         with connection(self.path) as conn:
@@ -231,7 +284,7 @@ class ConversationStore:
             conn.execute("DELETE FROM conversation_questions WHERE conversation_id=?", (target_conv['id'],))
             conn.execute("DELETE FROM conversation_messages WHERE conversation_id=?", (target_conv['id'],))
             conn.execute("DELETE FROM conversation_turns WHERE conversation_id=?", (target_conv['id'],))
-            conn.execute("DELETE FROM conversations WHERE id=? AND owner_id=? AND chat_id=?",
+            conn.execute("UPDATE conversations SET status='deleted',title='Conversación eliminada',is_current=0 WHERE id=? AND owner_id=? AND chat_id=?",
                          (target_conv['id'], owner_id, chat_id))
 
             if thread_id is not None:
@@ -361,6 +414,9 @@ class ConversationStore:
 
     def bind(self, source, task_id):
         with connection(self.path) as conn:
+            origin = conn.execute('SELECT conversation_id FROM conversation_turns WHERE source=?', (source,)).fetchone()
+            if origin:
+                self.register_request(origin['conversation_id'], source, 'task', task_id, conn=conn)
             conn.execute('UPDATE conversation_turns SET task_id=?,status=? WHERE source=?',
                          (task_id, 'routed', source))
             conn.execute('UPDATE conversation_messages SET task_id=? WHERE source=?', (task_id, source))
@@ -439,20 +495,39 @@ class ConversationStore:
 
     def delivered(self, sid, delivery_id, text, task_id=None, question_id=None, message_ids=()):
         with connection(self.path) as conn:
+            if not conn.execute("SELECT 1 FROM conversations WHERE id=? AND status!='deleted'", (sid,)).fetchone():
+                return
             conn.execute('INSERT OR IGNORE INTO conversation_messages '
                          '(conversation_id,source,role,content,task_id,created_at) VALUES (?,?,?,?,?,?)',
                          (sid, delivery_id, 'assistant', text, task_id, time.time()))
             if question_id:
-                conn.execute("UPDATE conversation_questions SET status='open',sent_at=?,message_ids=? "
+                conn.execute("UPDATE conversation_questions SET status='open',sent_at=?,message_ids=?,delivery_id=? "
                              "WHERE id=? AND status='queued'",
-                             (time.time(), json.dumps(list(message_ids)), question_id))
+                             (time.time(), json.dumps(list(message_ids)), delivery_id, question_id))
 
     def pending(self, sid):
         self.reconcile()
         with connection(self.path) as conn:
-            return [dict(row) for row in conn.execute(
+            rows = [dict(row) for row in conn.execute(
                 "SELECT * FROM conversation_questions WHERE conversation_id=? AND status='open' "
                 'ORDER BY sent_at DESC,created_at DESC', (sid,))]
+            has_tasks = conn.execute("SELECT 1 FROM sqlite_master WHERE name='control_tasks'").fetchone()
+            result = []
+            for row in rows:
+                if has_tasks and row['kind'] != 'authorization':
+                    stored = conn.execute('SELECT document FROM control_tasks WHERE id=?', (row['subject_id'],)).fetchone()
+                    task = json.loads(stored[0]) if stored else None
+                    if not task or task['state'] != row['state'] or str(task['revision']) != row['revision'] or time.time() >= task['deadline']:
+                        conn.execute("UPDATE conversation_questions SET status='stale' WHERE id=?", (row['id'],))
+                        cycle = self.journal.cycle_id('question', row['id'])
+                        recorded = self.journal.get(cycle, conn=conn)
+                        if recorded and recorded['status'] in {'waiting', 'active', 'unknown'}:
+                            self.journal.finish(cycle, 'cancelled', phase='superseded', conn=conn)
+                        continue
+                delivered = conn.execute('SELECT content FROM conversation_messages WHERE source=?', (row['delivery_id'],)).fetchone()
+                row['text'] = delivered[0] if delivered else ''
+                result.append(row)
+            return result
 
     def uncertain_question(self, sid):
         with connection(self.path) as conn:

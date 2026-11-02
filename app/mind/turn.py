@@ -94,9 +94,16 @@ ToolCall = Annotated[Union[StartCall, ReviseCall, StatusCall, CancelCall, Answer
                      Field(discriminator='name')]
 
 
+class PreferenceUpdate(Arguments):
+    key: Literal['name', 'city', 'country', 'units', 'language', 'sign', 'timezone']
+    value: str = Field(min_length=1, max_length=200)
+    source_text: str = Field(min_length=3, max_length=1000)
+
+
 class AssistantTurn(Arguments):
     reply: str = Field(default='', max_length=16000)
     tool_calls: list[ToolCall] = Field(default_factory=list, max_length=1)
+    preference_updates: list[PreferenceUpdate] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode='after')
     def one_outcome(self):

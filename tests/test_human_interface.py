@@ -214,7 +214,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock())
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_weather'
+            sid = coord.conversations.session('owner', 'conv_weather')
             task = store.create(
                 'owner:user1', 'va a llover este fin de semana?',
                 state='WAITING_SCOPE',
@@ -245,7 +245,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock())
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_approval'
+            sid = coord.conversations.session('owner', 'conv_approval')
             import hashlib
             from pathlib import Path
             art_code = b"print('run')"
@@ -283,7 +283,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock())
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_mixed'
+            sid = coord.conversations.session('owner', 'conv_mixed')
             task = store.create(
                 'owner:user1', 'clima en santiago',
                 state='WAITING_APPROVAL',
@@ -362,6 +362,8 @@ class HumanInterfaceTests(unittest.TestCase):
             }],
             'inputs': {'city': 'Santiago'}
         })))
+        proposal_json = llm.generate_content.return_value
+        llm.generate_content.side_effect = [proposal_json, json.dumps({"sufficient": True, "missing": []})]
         planner = ActionPlanner(llm, catalog)
         proposal = planner.propose('Va a haber viento en Santiago?', lambda spec: True)
         self.assertIsNotNone(proposal)
@@ -404,7 +406,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock(), llm=llm_inst)
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_dyn_app'
+            sid = coord.conversations.session('owner', 'conv_dyn_app')
             art_code = b"print('ok')"
             art_hash = hashlib.sha256(art_code).hexdigest()
             art_path = f"{tmpdir}/art.py"
@@ -452,7 +454,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock(), llm=llm_inst)
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_dyn_rej'
+            sid = coord.conversations.session('owner', 'conv_dyn_rej')
             art_code = b"print('ok')"
             art_hash = hashlib.sha256(art_code).hexdigest()
             art_path = f"{tmpdir}/art.py"
@@ -500,7 +502,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock(), llm=llm_inst)
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_dyn_unrelated'
+            sid = coord.conversations.session('owner', 'conv_dyn_unrelated')
             art_code = b"print('ok')"
             art_hash = hashlib.sha256(art_code).hexdigest()
             art_path = f"{tmpdir}/art.py"
@@ -545,7 +547,7 @@ class HumanInterfaceTests(unittest.TestCase):
             mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
                                   voice_services=None, heart=MagicMock(), llm=llm_inst)
             coord = Coordinator(mgr, MagicMock())
-            sid = 'conv_fast_path'
+            sid = coord.conversations.session('owner', 'conv_fast_path')
             art_code = b"print('ok')"
             art_hash = hashlib.sha256(art_code).hexdigest()
             art_path = f"{tmpdir}/art.py"

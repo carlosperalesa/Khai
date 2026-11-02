@@ -66,6 +66,7 @@ class ModuleManager:
         provider.journal = self.journal
         from app.mind.brain.transitions import TransitionManager
         self.model_transitions = TransitionManager(self.model_controller, provider.probe_nano, self.journal)
+        self.model_transitions.mailbox = self.voice_mailbox
         provider.transitions = self.model_transitions
         self.brain = Brain(provider, controller=self.model_controller)
         self.llm = self.brain

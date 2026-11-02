@@ -568,7 +568,8 @@ class PixyMind:
         lowered = request.lower().strip()
         if any(term in lowered for term in (
                 'diagn', 'estado', 'error', 'log', 'salud', 'health', 'status',
-                'informe', 'report', 'recuper', 'fallo', 'falló', 'tarea', 'task', 'repar', 'solucion', 'arregl', 'heart')):
+                'informe', 'report', 'recuper', 'fallo', 'falló', 'tarea', 'task', 'repar', 'solucion', 'arregl', 'heart',
+                'revisa', 'corrig', 'amplía', 'amplia', 'búsqueda más amplia')):
             return self.diagnose(request, source=source)
 
         tasks_summary, cases_summary, rules_summary, services_summary = self._recent_context_summary()
@@ -588,9 +589,7 @@ class PixyMind:
                 '- "target_id": ID (o prefijo) de la regla o servicio al que se refiere según la lista de abajo; '
                 'usa null si se refiere al más reciente o no lo especifica. El propietario nunca debe copiar IDs.\n'
                 '- "reply": tu respuesta concisa y directa al propietario (obligatoria si action es "REPLY").\n'
-                'Cuando el propietario deba ingresar credenciales de acceso, pídeselo con una frase como: '
-                '"por favor ingresa tu usuario con /us y tu contraseña con /pas" (o /api para llaves API), '
-                'indicando que puede enviar ambos datos en el mismo mensaje o en mensajes separados. '
+                'Nunca solicites credenciales en REPLY. Voice gestiona las solicitudes formales de secretos. '
                 'Nunca pidas confirmaciones como "apruebas: y/n" en "reply" a menos que Heart haya emitido una propuesta activa.\n\n'
                 f'Estado de tareas recientes:\n{tasks_summary}\n\n'
                 f'Casos recientes de Heart:\n{cases_summary}\n\n'
@@ -621,8 +620,10 @@ class PixyMind:
                         return f'No pude aplicar la decisión: {exc}'
                 reply = str(parsed.get('reply') or parsed.get('response') or '').strip()
                 if reply:
+                    if re.search(r'/us\b|/pas\b|/api\b|contrase[ñn]a|credenciales', reply, re.I):
+                        return 'La revisión interna no requiere tus credenciales. Indica qué interacción quieres revisar.'
                     return reply
-            return cleaned
+            return 'No pude interpretar la respuesta de supervisión. No solicité credenciales ni ejecuté cambios.'
         except Exception as exc:
             logger.warning('Fallo LLM en PixyMind.direct_response (%s); entregando resumen determinista', type(exc).__name__)
             return f"Pixy (modo contingencia sin LLM):\nTareas recientes:\n{tasks_summary}\n\nCasos de Heart:\n{cases_summary}"
@@ -636,7 +637,7 @@ class PixyMind:
         else:
             detail = ("No fue posible completar la evaluación: " + str(case.get('error') or case['state'])
                       if case.get('state') in {'FAILED', 'UNKNOWN'} else
-                      "No se detectaron anomalías activas en la evidencia disponible.")
+                      "Las comprobaciones disponibles no acreditan que la interacción denunciada funcione correctamente; falta evidencia específica.")
         lines = [detail]
         task = (case.get('diagnosis') or {}).get('task')
         if task:
@@ -662,15 +663,23 @@ class PixyMind:
     def diagnose(self, request, source='telegram'):
         # Reports may inspect incidents; only an explicit repair instruction
         # can create a plan and ask Pixy for authority.
-        repair = bool(re.search(r'\b(?:repara\w*|arregl\w*|soluciona\w*|remedia\w*|repair|fix)\b',
+        repair = bool(re.search(r'\b(?:repara\w*|arregl\w*|soluciona\w*|remedia\w*|corrig\w*|repair|fix)\b',
                                 request, re.IGNORECASE))
         reference = re.search(r'\b(?:cycle_|task_|run_|auth_|order_|req_|req-|trace-|tr-|case-)[a-zA-Z0-9_-]+\b'
                               r'|\btelegram:[0-9]+\b', request)
         if reference and not repair and self.journal:
             return self._journal_report(reference.group(0), source)
         if hasattr(self.manager, 'heart') and hasattr(self.manager.heart, 'recovery') and self.manager.heart.recovery:
+            from app.mind.conversation import current_turn
+            context = current_turn.get() or {}
+            conversations = getattr(getattr(self.manager, 'coordinator', None), 'conversations', None)
+            incident = (conversations.diagnostic_context(context['conversation_id'])
+                        if conversations and context.get('conversation_id') else None)
             case = self.manager.heart.recovery.open_case(request, requested_by=source,
-                        propose=repair, kind='repair' if repair else 'pixy_report')
+                        propose=repair, kind='repair' if repair else 'pixy_report',
+                        conversation_context=incident)
+            if incident and case.get('case_id'):
+                conversations.remember_diagnostic(context['conversation_id'], case['case_id'])
             plan = case.get('plan')
             if case.get('state') in {'FAILED', 'UNKNOWN'}:
                 return self._fallback_diagnosis_text(case, None, None)

@@ -214,12 +214,12 @@ class ConversationFlowTests(Fixture):
         self.receive('owner:yes', 'sí')
         self.assertEqual(len(self.store.all()), 1)
 
-    def test_last_delivered_question_wins_across_question_kinds(self):
+    def test_multiple_question_kinds_require_disambiguation(self):
         inputs = self.goal(); self.ask(inputs)
         creation = self.goal('WAITING_CREATION_APPROVAL'); self.ask(creation, '¿Creo la capacidad?')
         self.receive('owner:create', 'y')
         self.assertEqual(self.store.get(inputs['id'])['state'], 'WAITING_INPUT_CONFIRMATION')
-        self.assertEqual(self.store.get(creation['id'])['state'], 'SCOPE_PLANNING')
+        self.assertEqual(self.store.get(creation['id'])['state'], 'WAITING_CREATION_APPROVAL')
 
     def test_latest_pixy_authorization_does_not_confirm_older_inputs(self):
         task = self.goal(); self.ask(task)
@@ -236,7 +236,7 @@ class ConversationFlowTests(Fixture):
         self.c._mailbox_job.result(timeout=5)
         self.receive('owner:recovery', 'y')
         self.assertEqual(self.store.get(task['id'])['state'], 'WAITING_INPUT_CONFIRMATION')
-        self.assertEqual(self.manager.pixy.authorizations.get(auth['authorization_id'])['status'], 'approved')
+        self.assertEqual(self.manager.pixy.authorizations.get(auth['authorization_id'])['status'], 'pending')
 
     def test_queued_question_cannot_authorize_execution(self):
         task = self.goal()

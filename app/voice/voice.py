@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app):
+    if hasattr(app.state, 'manager') and app.state.manager is not None:
+        yield
+        return
     if len(os.getenv('TELEGRAM_WEBHOOK_SECRET', '')) < 32:
         raise RuntimeError('Configura TELEGRAM_WEBHOOK_SECRET (mínimo 32 caracteres)')
     if os.getenv('KHAI_RUNTIME', 'docker') == 'docker' and len(os.getenv('PROXY_TOKEN', '')) < 32:
@@ -362,11 +365,13 @@ def _command(manager, source, text):
             owner_id, chat_id, target=target, thread_id=thread_id)
         if not candidate:
             return "No se encontró el chat indicado."
-        blocking = next((task for task in c.store.all()
-                         if task.get('conversation_id') == candidate['id']
-                         and (task.get('state') not in TERMINAL or c._agent_active(task))), None)
-        if blocking:
-            return "No puedo eliminar ese chat mientras tenga una tarea activa. Usa /cancel primero."
+        for task in c.store.all():
+            if (task.get('conversation_id') == candidate['id'] and
+                    (task.get('state') not in {'COMPLETED', 'FAILED', 'CANCELLED', 'EXHAUSTED', 'UNFULFILLABLE'} or c._agent_active(task))):
+                c.cancel(task['id'], source + ':delete:' + task['id'])
+        transitions = getattr(manager, 'model_transitions', None)
+        if transitions is not None:
+            transitions.cancel_conversation(candidate['id'])
         deleted = c.conversations.delete_conversation(
             owner_id, chat_id, target=target, thread_id=thread_id)
         active = deleted['active']
@@ -374,7 +379,7 @@ def _command(manager, source, text):
         next_turn.update({'conversation_id': active['id'], 'chat_id': active['chat_id'],
                           'thread_id': active.get('thread_id'), 'title': active['title'],
                           'source': None, 'task_id': None})
-        return {'text': f"Chat eliminado: {deleted['deleted']['title']}", '_turn': next_turn}
+        return {'text': f"Chat eliminado: {deleted['deleted']['title']}. Cancelación solicitada para sus trabajos pendientes; los efectos ya realizados conservan sus recibos.", '_turn': next_turn}
     if name == '/health':
         return _format_health(manager)
     if name in {'/cancel', '/stop'}:

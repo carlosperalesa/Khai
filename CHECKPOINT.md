@@ -1,5 +1,34 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Consolidación de Integridad de Flujos, Evaluación de Cobertura de Metas y Sincronización en Producción — trabajo autorizado
+
+- **Árbol Durable Conversación -> Solicitud -> Operación (ConversationStore / Coordinator):**
+  1. *Identificadores Durables y Procedencia:* Toda solicitud conserva inequívocamente su conversation_id, mensaje iniciador y estado. Las solicitudes hijas y transiciones de modelo no pierden su origen conversacional.
+  2. *Protección contra Ambigüedades en Topics de Telegram:* Coordinator distingue la raíz de un supergrupo/tema de Telegram (	hread_id), impidiendo que el mensaje base del hilo sea tomado como respuesta afirmativa a decisiones pendientes ajenas.
+  3. *Botones Interactivos Inline en Decisiones:* Se inyectan botones interactivos (Sí / No vinculados al question_id) para aprobaciones (WAITING_CREATION_APPROVAL, WAITING_APPROVAL, WAITING_SERVICE_APPROVAL), eliminando ambigüedades en respuestas textuales breves.
+  4. *Invalidación Transaccional de Preguntas Obsoletas:* Al cancelar, expirar o transicionar una tarea, sus preguntas abiertas asociadas en conversation_questions se marcan atómicamente como stale, evitando que respuestas tardías reactiven flujos extinguidos.
+  5. *Aislamiento y Contexto Compartido:* La recuperación de contexto histórico entre conversaciones (shared_context) delimita claramente procedencia y se inyecta como referencia informativa, prohibiendo la propagación implícita de autorizaciones.
+
+- **Evaluación Autónoma de Cobertura de Metas (pp/mind/quality.py / _check_goal_result):**
+  1. *Superación de Verificación Puramente Operativa:* Terminar un proceso técnico no acredita el cumplimiento del objetivo. ssess_result evalúa determinista y semánticamente la evidencia entregada frente al objetivo completo (verificando fechas, unidades, error embebido, idioma y alcances solicitados).
+  2. *Detección de Discrepancias:* Condiciones climáticas actuales no acreditan un pronóstico futuro; temperatura no satisface una petición de viento; noticias sin fecha no acreditan actualidad.
+  3. *Enrutamiento a Heart:* Ante una cobertura insuficiente, _check_goal_result detiene la entrega de éxito, abre automáticamente un incidente cognitivo en Heart (cognitive_fault / cognitive_discrepancy) y notifica al usuario explicando qué faltó antes de reintentar.
+  4. *Erradicación de Coletillas Mecánicas:* Se elimina la pregunta estática ¿Es correcto el resultado completo? en present_recipe, permitiendo que la interacción sea completamente fluida y solo consulte al usuario de forma orgánica cuando sea estrictamente necesario.
+
+- **Transiciones Durables de Modo y Resiliencia (TransitionManager / VoiceMailbox):**
+  1. *Desacoplamiento de Nano respecto a la Infraestructura:* La disponibilidad de Modo Nano se confirma y notifica de inmediato al usuario sin esperar la detención o limpieza asíncrona de VMs Spot en GCE.
+  2. *Notificaciones Persistentes:* Los avisos de cambio de modelo ([Modo nano conectado], etc.) se registran de forma transaccional y durable en oice_outbox asociados a la conversación de origen.
+  3. *Recuperación ante Reinicios y Demoras:* poll_notifications() detecta transiciones interrumpidas por reinicio o demoras anormales (>120 s), emitiendo avisos orientativos y permitiendo cancelación segura con /stop.
+
+- **Eliminación y Cancelación Segura de Conversaciones (/delete):**
+  1. Al invocar /delete, se cancelan atómicamente las tareas y transiciones activas de la conversación, preservando los recibos de los efectos externos ya completados y suprimiendo entregas tardías hacia conversaciones eliminadas.
+
+- **Resolución de Desfase en Servidor de Producción (Azure):**
+  1. Se detectó y resolvió el desfase en memoria de pp/hand/hand.py y pp/mind/coordinator.py dentro del contenedor Docker khai_core en Azure (20.237.211.250). Al estar el código horneado en la imagen, se procedió a reconstruir el contenedor (docker compose up -d --build bot), verificando la coincidencia al 100% de los hashes SHA-256 con el repositorio Git.
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Suite canónica completa: **402 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**, incorporando la nueva suite 	ests/test_flow_integrity.py (13 pruebas de integridad y regresión) y corrigiendo las aserciones de 	est_hand.py, 	est_voice.py y 	est_kernel.py.
+
 ## Clasificación Dinámica de Respuestas por LLM, Versionado Canónico de Skills (.001) y Política de Fallback — trabajo autorizado
 
 - **Clasificación Dinámica de Respuestas Contextual (`classify_reply_intent` / `Coordinator`):**

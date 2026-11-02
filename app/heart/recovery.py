@@ -402,7 +402,7 @@ class Recovery:
         return self._move(case_id, 'SOLUTION_PROPOSED', expected={'DIAGNOSED'}, plan=plan,
                           plan_hash=plan_hash(case_id, plan))
 
-    def open_case(self, question, requested_by, *, propose=True, kind='repair'):
+    def open_case(self, question, requested_by, *, propose=True, kind='repair', conversation_context=None):
         if kind not in {'repair', 'pixy_report'}:
             raise ValueError('Tipo de caso inválido')
         case_id = 'case-' + time.strftime('%Y%m%d') + uuid.uuid4().hex[:8]
@@ -421,6 +421,16 @@ class Recovery:
             return self._move(case_id, 'FAILED', error='Senses no entregó evidencia: ' + type(exc).__name__,
                               detail={'error_type': type(exc).__name__})
         tasks = (evidence.get('pixy') or {}).get('recent_tasks') or evidence.get('tasks') or []
+        if conversation_context:
+            evidence['conversation_context'] = conversation_context
+            # Read the actual subjects, even when they fall outside the last ten tasks.
+            subjects = {q['subject_id'] for q in conversation_context.get('questions', [])}
+            with connection(self.path) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='control_tasks'").fetchone():
+                    for subject in subjects:
+                        row = db.execute('SELECT document FROM control_tasks WHERE id=?', (subject,)).fetchone()
+                        if row and subject not in {t['id'] for t in tasks}:
+                            tasks.append(json.loads(row['document']))
         requested_ids = re.findall(r'\btask_[a-f0-9]{32}\b', str(question))
         requested_cases = re.findall(r'\bcase-[a-zA-Z0-9_-]+\b', str(question))
         requested_runs = re.findall(r'\brun_[a-f0-9]{32}\b', str(question))
@@ -455,6 +465,10 @@ class Recovery:
         elif re.search(r'(?:[úu]ltim[oa].*(?:error|fallo|fallid)|(?:error|fallo|fallid).*[úu]ltim[oa])',
                        question, flags=re.IGNORECASE):
             candidates = [task for task in tasks if task.get('state') in {'FAILED', 'EXHAUSTED'}]
+        elif conversation_context:
+            sid = conversation_context['conversation_id']
+            candidates = [t for t in tasks if t.get('conversation_id') == sid and t.get('kind') != 'turn']
+            evidence['incident_scope'] = 'conversation'
         elif re.search(r'\btarea\b', question, re.IGNORECASE):
             candidates = tasks
         else:
@@ -756,6 +770,22 @@ class Recovery:
 
         status = 'critical' if any(f['severity'] == 'critical' for f in findings) else \
                  'degraded' if findings else 'ok'
+        context = evidence.get('conversation_context')
+        if context:
+            questions = context.get('questions', [])
+            rejected = [m for m in context.get('messages', []) if m.get('role') == 'assistant'
+                        and 'no tiene una decisión pendiente' in m.get('content', '')]
+            if rejected and any(q['status'] == 'open' for q in questions):
+                add('conversation_decision_mismatch', 'high',
+                    'Se rechazó una respuesta pese a existir una pregunta abierta en esta conversación. '
+                    'Revisar la referencia de Telegram, la revisión y la entrega antes de repetir la operación.')
+            if not findings:
+                status = 'unknown'
+                add('conversation_evidence_insufficient', 'warning',
+                    'La salud de infraestructura no verifica la denuncia conversacional; evidencia insuficiente. '
+                    'Se conservaron mensajes, preguntas y referencias para continuar la investigación.')
+            else:
+                status = 'degraded'
         diagnosis = {'status': status, 'findings': findings}
         if focus_task is not None:
             diagnosis['task'] = {key: focus_task.get(key) for key in (

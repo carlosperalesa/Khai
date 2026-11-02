@@ -62,7 +62,6 @@ class Mind:
 
     def process_message(self, message, task_context=None, persist=True,
                         conversation_history=None, questions=None):
-        _sync_inline_preferences(message, self.memory)
         history = (conversation_history if conversation_history is not None
                    else self.memory.get_chat_history(limit=12))
         system = (
@@ -70,7 +69,9 @@ class Mind:
             + "\nEres Mind, el unico router conversacional de Khai. "
             "Devuelve un AssistantTurn JSON: reply para conversar o UNA tool_call para actuar. "
             "No publiques promesas de acciones en reply. Una consulta de datos externos actuales "
-            "requiere start_task, aunque este formulada como pregunta. Recupera el objetivo "
+            "requiere start_task, aunque este formulada como pregunta. "
+            "La conversación, redacción, explicaciones y escritura creativa que puedes resolver con texto "
+            "usan reply, sin crear skills ni servicios de generación de texto. Recupera el objetivo "
             "completo del contexto ante instrucciones como 'Hazlo'. "
             "Un saludo conserva los trabajos existentes y no los reanuda ni declara su exito. "
             "Una peticion independiente usa start_task. Un cambio al trabajo actual usa "
@@ -92,6 +93,10 @@ class Mind:
             "Si el usuario comparte un dato de perfil o preferencia persistente (ej. 'yo soy cáncer, recuérdalo', "
             "'me llamo Juan', 'vivo en Valparaíso'), o te pide explícitamente recordar o registrar un dato, usa "
             "set_user_preference(key, value) con tool_calls. Las claves comunes son 'sign', 'name', 'city', 'units', 'language'. "
+            "Para mensajes compuestos usa preference_updates con key, value y source_text literal: "
+            "solo datos explícitos del propietario, nunca citas de terceros, negaciones ni inferencias. "
+            "Conserva la petición principal en reply o tool_calls. Si aporta el dato que faltaba, "
+            "reanuda la pregunta pendiente mediante answer_question; guardar una preferencia no completa el objetivo. "
             "los comandos privados de Voice, nunca por parametros de herramientas. "
             "El historial no acredita ejecucion; el estado y los recibos son la fuente de verdad. "
             "No uses emojis. Responde a saludos en una o dos oraciones."
@@ -124,9 +129,15 @@ class Mind:
                 response_schema=AssistantTurn.model_json_schema(), system_instruction=system,
                 temperature=0)
             turn = self._validate_response(raw)
+            for update in turn.preference_updates:
+                if update.source_text not in message:
+                    raise ValueError('La preferencia carece de evidencia literal del propietario')
+            for update in turn.preference_updates:
+                self.memory.set_user_profile(**{update.key: update.value})
+                self.memory.set_preference('user_' + update.key, update.value)
             intent = turn.intent()
             if intent.get('action') == 'GENERAL_CHAT' and _is_cognitive_discrepancy(message):
-                tid = task_context[-1]['id'] if task_context and task_context[-1].get('id') else None
+                tid = None
                 intent = {
                     'action': 'TOOL_CALL',
                     'reply': '',

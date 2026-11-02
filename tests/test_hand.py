@@ -782,7 +782,6 @@ class RecipeExecutionTests(unittest.TestCase):
         self.assertIn('Rate: 2', delivered)
         self.assertIn('Apply:', delivered)
         self.assertIn('Total: 200', delivered)
-        self.assertIn('¿Es correcto el resultado completo?', delivered)
         self.coordinator.verify(task['id'], second['execution_id'], True, 'owner:2')
         self.coordinator.advance(self.coordinator.store.get(task['id']))
         self.assertEqual(self.coordinator.store.get(task['id'])['state'], 'COMPLETED')
@@ -1356,6 +1355,7 @@ class RecipeExecutionTests(unittest.TestCase):
                 'capabilities': ['Network'], 'inputs': {'city': 'string'},
                 'outputs': {'forecast': 'string'}}}],
             'inputs': {'city': 'Santiago de Chile'}})
+        self.manager.llm.generate_content.side_effect = [self.manager.llm.generate_content.return_value, json.dumps({'sufficient': True, 'missing': []})]
         self.coordinator._setup_service = Mock(return_value={
             'step_id': 'weather', 'hash': 'd' * 64, 'effect': 'read',
             'host': 'openweathermap.org', 'name': 'Consulta meteorológica',
@@ -1470,7 +1470,9 @@ class RecipeExecutionTests(unittest.TestCase):
         catalog.active.return_value = [
             {'version_id': 'rate-v1', 'skill_id': 'rate', 'spec': self.specs['rate-v1']}]
         planner = ActionPlanner(llm, catalog)
-        self.assertEqual(planner.propose('Convert 100 CLP', lambda _: True), proposal)
+        llm.generate_content.side_effect = [json.dumps(proposal), json.dumps({'sufficient': True, 'missing': []})]
+        self.assertEqual(planner.propose('Convert 100 CLP', lambda _: True), {**proposal, 'coverage': {'sufficient': True, 'missing': []}})
+        llm.generate_content.side_effect = None
         proposal['recipe']['steps'][1]['bindings']['rate'] = 'input.base'
         llm.generate_content.return_value = json.dumps(proposal)
         with self.assertRaises(ValueError):
@@ -1499,6 +1501,7 @@ class RecipeExecutionTests(unittest.TestCase):
         correction = {'service_id': 'records', 'operation': 'update',
                       'version': 'v1', 'identity_parameter': 'id',
                       'resource_id': 'record-1'}
+        llm.generate_content.side_effect = [llm.generate_content.return_value, json.dumps({'sufficient': True, 'missing': []})]
         proposed = ActionPlanner(llm, catalog).propose(
             'Correct the same resource', lambda _: True, [correction])
         self.assertEqual(proposed['inputs'], {'id': 'record-1', 'body': 'corrected'})
@@ -1630,7 +1633,6 @@ class ResultPresenterTests(unittest.TestCase):
         self.assertIn('Titular verificado', text)
         self.assertIn('Resumen devuelto', text)
         self.assertIn('carlos@ejemplo.com', text)
-        self.assertIn('¿Es correcto el resultado completo?', text)
 
     def test_failed_mail_receipt_cannot_be_presented_as_confirmed(self):
         text = present_recipe({'recipe_input': {'email': 'carlos@ejemplo.com'},

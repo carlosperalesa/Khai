@@ -3,6 +3,7 @@ import time
 import uuid
 import json
 import inspect
+from contextlib import nullcontext
 
 from app.kernel.database import connection, migrate
 from app.kernel.journal import Journal
@@ -101,11 +102,13 @@ class VoiceMailbox:
             self.journal.finish(cycle, conn=conn)
         return True
 
-    def enqueue(self, text, metadata=None):
+    def enqueue(self, text, metadata=None, *, delivery_id=None, conn=None):
         if not isinstance(text, str) or not text or len(text) > 64000:
             raise ValueError('Invalid notification')
-        delivery_id = 'delivery-' + uuid.uuid4().hex
-        with connection(self.db_path) as conn:
+        delivery_id = delivery_id or 'delivery-' + uuid.uuid4().hex
+        with (nullcontext(conn) if conn is not None else connection(self.db_path)) as conn:
+            if conn.execute('SELECT 1 FROM voice_outbox WHERE delivery_id=?', (delivery_id,)).fetchone():
+                return delivery_id
             self._delivery_cycle(delivery_id, metadata or {}, conn=conn)
             conn.execute('INSERT INTO voice_outbox(delivery_id,text,status,created_at,metadata) '
                          'VALUES (?, ?, "pending", ?, ?)',
@@ -121,6 +124,14 @@ class VoiceMailbox:
                 return False
             meta = json.loads(row['metadata']) if row['metadata'] else {}
             cycle = self._delivery_cycle(row['delivery_id'], meta, conn=conn)
+            if meta.get('conversation_id') and conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='conversations'").fetchone():
+                conversation = conn.execute('SELECT status FROM conversations WHERE id=?',
+                                            (meta['conversation_id'],)).fetchone()
+                if conversation and conversation['status'] == 'deleted':
+                    conn.execute("UPDATE voice_outbox SET status='cancelled' WHERE delivery_id=?", (row['delivery_id'],))
+                    self.journal.finish(cycle, 'cancelled', data={'reason': 'conversation_deleted'}, conn=conn)
+                    return True
             conn.execute("UPDATE voice_outbox SET status='sending' WHERE delivery_id=?", (row['delivery_id'],))
             self.journal.event(cycle, 'sending', conn=conn)
         try:

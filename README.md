@@ -4,7 +4,7 @@ Continuidad ya comprobada en el servidor: Nano respondió durante la carga de lo
 
 Continuidad de modelos implementada y en validación: `/mode <perfil>` devuelve un ID y prepara el cambio en segundo plano; `/mode cancel` o `/stop` lo cancelan. Brain conserva el servicio actual o confirma Nano antes de reemplazar la VM compartida. Si Nano falla, solicita elegir un perfil; no arranca otros automáticamente. El contrato de Mind usa el esquema nativo de Ollama y separa la orden actual del historial. Estado real de despliegue y pruebas en [CHECKPOINT](./CHECKPOINT.md).
 
-Validación local consolidada: 389 pruebas y 39 subpruebas aprobadas. Todas aprobadas; incluye el enmascaramiento de mensajes internos, precisión diagnóstica y normalización canónica en descriptores de servicios, serialización universal de firmas de herramientas y fallback reactivo. Los fixtures de modelos no sustituyen la aceptación real.
+Validación local consolidada: 402 pruebas y 39 subpruebas aprobadas. Todas aprobadas; incluye el enmascaramiento de mensajes internos, precisión diagnóstica y normalización canónica en descriptores de servicios, serialización universal de firmas de herramientas y fallback reactivo. Los fixtures de modelos no sustituyen la aceptación real.
 
 El propietario aprobó el [diario común de interacciones](./docs/COMMON_JOURNAL.md). La implementación enlaza modelos, chat, Hand, Pixy, Heart, informes y uso de skills mediante ciclos y eventos persistentes; `/p informe <ID>` consulta una rama sin iniciar reparación. Validación y despliegue de esta continuación se registran en CHECKPOINT.
 
@@ -32,7 +32,7 @@ La skill [`web-search`](./skills/web-search/SKILL.md) usa Brave Search API media
 
 El código `f4c845d`, desplegado el 31 de octubre, incluye mejoras de diagnóstico y verificación, herramientas básicas de Hand y Brave. La suite local pasó 273 pruebas y 22 subpruebas; la salud HTTPS, SQLite y ejecución real de búsqueda se verificaron en producción. Las evidencias están en `CHECKPOINT.md` y `docs/VALIDATION.md`; las transiciones cancelables entre modelos permanecen pendientes de implementación.
 
-La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (389 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
+La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (402 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
 
 ---
 

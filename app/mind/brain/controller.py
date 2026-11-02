@@ -440,10 +440,16 @@ class ModelController:
             f'{self.endpoint}/api/generate',
             json={
                 'model': model,
-                'prompt': 'Responde solamente OK.',
+                'prompt': 'Devuelve exactamente {"reply":"","tool_calls":[{"name":"get_system_status","arguments":{}}]}. No ejecutes nada.',
+                'format': {'type': 'object', 'properties': {
+                    'reply': {'type': 'string'}, 'tool_calls': {'type': 'array', 'items': {
+                        'type': 'object', 'properties': {'name': {'type': 'string', 'enum': ['get_system_status']},
+                        'arguments': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+                        'required': ['name', 'arguments'], 'additionalProperties': False}}},
+                    'required': ['reply', 'tool_calls'], 'additionalProperties': False},
                 'stream': False,
                 'keep_alive': '30m',
-                'options': {'num_predict': 1, 'temperature': 0},
+                'options': {'num_predict': 128, 'temperature': 0},
             },
             timeout=timeout,
             allow_redirects=False,
@@ -453,6 +459,13 @@ class ModelController:
         answer = data.get('response')
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError('Ollama no devolvió respuesta durante la precarga')
+        from app.mind.turn import AssistantTurn
+        turn = AssistantTurn.model_validate_json(answer)
+        if len(turn.tool_calls) != 1 or turn.tool_calls[0].name != 'get_system_status':
+            raise RuntimeError('El modelo no supera el contrato funcional de herramientas')
+        reported = data.get('model')
+        if reported is not None and reported != model and reported.removesuffix(':latest') != model.removesuffix(':latest'):
+            raise RuntimeError('Ollama respondió con un modelo distinto del solicitado')
         return {key: data[key] for key in ('total_duration', 'load_duration', 'prompt_eval_duration',
                                          'eval_duration', 'prompt_eval_count', 'eval_count')
                 if isinstance(data.get(key), (int, float)) and not isinstance(data.get(key), bool)}
@@ -528,7 +541,7 @@ class ModelController:
             return self.stop()
         if mode not in PROFILES:
             raise ValueError("Modo inválido. Usa '/m nano' (Gemini), '/m low' (Dolphin CPU), '/m mid' (Dolphin GPU 8B), '/m high' (GPU L4 32B) o '/m ?'.")
-        ladder = ['high', 'mid', 'low'] if mode == 'high' else (['mid', 'low'] if mode == 'mid' else ['low'])
+        ladder = [mode]
         last_exc = None
         for idx, profile in enumerate(ladder):
             if idx > 0 and notifier is not None:

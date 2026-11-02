@@ -117,6 +117,16 @@ class ControlStore:
         conn.execute('INSERT INTO event_outbox VALUES (?,?)',(event['event_id'],json.dumps(event)))
 
     def _audit_task(self, conn, task, phase):
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_questions'").fetchone():
+            obsolete = conn.execute("SELECT id FROM conversation_questions WHERE subject_id=? "
+                "AND status IN ('open','queued') AND (state!=? OR revision!=? OR ?<=?)",
+                (task['id'], task['state'], str(task['revision']), task['deadline'], time.time())).fetchall()
+            for question in obsolete:
+                conn.execute("UPDATE conversation_questions SET status='stale' WHERE id=?", (question['id'],))
+                qcycle = self.journal.cycle_id('question', question['id'])
+                recorded = self.journal.get(qcycle, conn=conn)
+                if recorded and recorded['status'] not in TERMINAL_JOURNAL:
+                    self.journal.finish(qcycle, 'cancelled', phase='superseded', conn=conn)
         refs = {k: task[k] for k in ('execution_id', 'goal_revision', 'attempt_number',
                                      'skill_name', 'version_id') if task.get(k) is not None}
         refs['task_id'] = task['id']
@@ -178,9 +188,9 @@ class ControlStore:
             task.update(changes)
         return self.mutate(task_id, apply)
 
-    def consume(self, task_id, counter):
+    def consume(self, task_id, counter, allow_review=False):
         def apply(task):
-            if task["state"] in TERMINAL or time.time() >= task["deadline"]:
+            if (task["state"] in TERMINAL and not (allow_review and task['state'] == 'UNVERIFIED')) or time.time() >= task["deadline"]:
                 raise BudgetExceeded("Objetivo detenido o plazo agotado")
             if task[counter] >= task["max_" + counter]:
                 raise BudgetExceeded("Presupuesto agotado: " + counter)

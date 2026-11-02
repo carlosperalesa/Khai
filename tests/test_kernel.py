@@ -621,7 +621,7 @@ class CoordinatorTests(Fixture):
         self.assertFalse(current['owner_reviews'][0]['satisfied'])
         self.assertIn('corrige la fuente', current['owner_reviews'][0]['feedback'])
 
-    def test_multiple_pending_questions_default_to_most_recent_without_id(self):
+    def test_multiple_pending_questions_require_an_explicit_reference(self):
         scope = self.store.create('telegram:scope', 'consulta', state='WAITING_SCOPE')
         review = self.store.create('telegram:review', 'resultado', state='UNVERIFIED',
                                    execution_id='run_' + 'e' * 32)
@@ -630,7 +630,7 @@ class CoordinatorTests(Fixture):
         with patch.object(self.c, 'notify'):
             process_ordinary(self.manager, 'telegram:natural', 'trace-natural',
                              'n')
-        self.assertEqual(self.store.get(review['id'])['state'], 'WAITING_FEEDBACK')
+        self.assertEqual(self.store.get(review['id'])['state'], 'UNVERIFIED')
         self.assertEqual(self.store.get(scope['id'])['state'], 'WAITING_SCOPE')
         with patch.object(self.c, 'notify'):
             process_ordinary(self.manager, 'telegram:scope-specific', 'trace-specific',
@@ -856,10 +856,10 @@ class ContractTests(Fixture):
         with patch('app.pixy.pixy.Path.read_text', side_effect=FileNotFoundError()):
             self.assertFalse(self.manager.pixy._analyze_code_ast('print(1)', {'purpose':'x'})['safe'])
 
-    def test_provider_fallback_charges_same_budget(self):
+    def test_nano_credentials_charge_same_budget(self):
         llm = LLMManager('config', str(self.root/'llm'), self.memory)
-        llm.api_keys_pool = [{'type':'gemini','key':'dummy','id':'one'}, {'type':'openai','key':'dummy','id':'two'}]
-        llm._generate_gemini = Mock(side_effect=RuntimeError('down'))
+        llm.api_keys_pool = [{'type':'gemini','key':'dummy','id':'one'}, {'type':'gemini','key':'dummy2','id':'two'}]
+        llm._generate_gemini = Mock(side_effect=[RuntimeError('down'), 'ok'])
         llm._generate_openai = Mock(return_value='ok')
         task = self.task()
         token = current_budget.set(lambda:self.store.consume(task['id'], 'llm_calls'))
@@ -888,6 +888,8 @@ class ContractTests(Fixture):
         app.state.manager = self.manager
         self.manager.telegram.user_id = 'owner'
         self.manager.voice_mailbox = VoiceMailbox(self.state.db_path)
+        self.manager.brain = None
+        self.manager.model_transitions = None
         self.manager.dolphin = Mock()
         self.manager.dolphin.set_mode.return_value = '[Mode = mid]'
         self.c.notify = Mock()
@@ -1057,7 +1059,7 @@ class PixyReportAuditTests(Fixture):
             outbox = conn.execute('SELECT * FROM voice_outbox').fetchone()
         self.assertEqual(outbox['status'], 'unknown')
         self.assertEqual(outbox['error_type'], 'TimeoutError')
-        self.assertIn('No se detectaron', outbox['text'])
+        self.assertIn('evidencia', outbox['text'])
         self.assertEqual([row['case_id'] for row in self.recovery.recent()], [case['case_id']])
         self.senses.evidence.assert_called_once()
 

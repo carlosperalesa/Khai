@@ -87,6 +87,7 @@ class ModelContractTests(unittest.TestCase):
         gateway = self.gateway()
         gateway._call_dolphin = Mock(side_effect=requests.ReadTimeout())
         gateway._generate_gemini = Mock(return_value='nano answer')
+        gateway.probe_nano = Mock(return_value=True)
         self.assertEqual(gateway.generate_content('hello'), 'nano answer')
         gateway._call_dolphin.assert_called_once()
         gateway._generate_gemini.assert_called_once()
@@ -149,9 +150,10 @@ class ModelContractTests(unittest.TestCase):
         from app.voice.help import MODE_SELECTION_BUTTONS
         gateway._call_dolphin = Mock(side_effect=requests.ReadTimeout())
         gateway._generate_gemini = Mock(return_value='nano answer')
+        gateway.probe_nano = Mock(return_value=True)
         gateway.generate_content('hello')
         gateway._notify.assert_called_once_with(
-            '[Error en modo low, pasando a Nano ¿deseas otro modo?]',
+            '[Modo low falló] [Modo nano conectado] Elige otro modelo si lo deseas.',
             buttons=MODE_SELECTION_BUTTONS
         )
     def test_internal_identifiers_are_masked_in_user_facing_messages(self):

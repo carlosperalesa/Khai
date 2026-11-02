@@ -864,8 +864,8 @@ class MultiConversationVoiceTests(Fixture):
 
         deleted_id = active[0]['id']
         res = command(self.manager, 'telegram:msg6', '/delete')
-        self.assertEqual(res['text'], 'Chat eliminado: Nuevo chat')
-        self.assertIsNone(self.c.conversations.get_conversation(deleted_id))
+        self.assertTrue(res['text'].startswith('Chat eliminado: Nuevo chat'))
+        self.assertEqual(self.c.conversations.get_conversation(deleted_id)['status'], 'deleted')
         active = self.c.conversations.list_conversations(self.owner, self.chat)
         self.assertEqual(len(active), 1)
         self.assertEqual(active[0]['title'], 'Chat Principal')
@@ -875,17 +875,18 @@ class MultiConversationVoiceTests(Fixture):
         active = self.c.conversations.list_conversations(self.owner, self.chat)
         target = active[1]
         res = command(self.manager, 'telegram:delete-number', '/delete 2')
-        self.assertEqual(res['text'], f"Chat eliminado: {target['title']}")
-        self.assertIsNone(self.c.conversations.get_conversation(target['id']))
+        self.assertTrue(res['text'].startswith(f"Chat eliminado: {target['title']}"))
+        self.assertEqual(self.c.conversations.get_conversation(target['id'])['status'], 'deleted')
         self.assertEqual(command(self.manager, 'telegram:delete-name', '/delete Proyecto largo'),
                          'Uso: /delete [número]')
 
-    def test_delete_rejects_conversation_with_active_task(self):
+    def test_delete_cancels_conversation_active_task(self):
         current = self.c.conversations.list_conversations(self.owner, self.chat)[0]
         self.store.create('telegram:active-delete', 'trabajo',
                           conversation_id=current['id'], state='RUNNING')
         result = command(self.manager, 'telegram:delete-active', '/delete')
-        self.assertIn('tarea activa', result)
+        self.assertIn('cancel', result['text'].lower())
+        self.assertEqual(next(t for t in self.store.all() if t['source'] == 'telegram:active-delete')['state'], 'CANCELLED')
         self.assertIsNotNone(self.c.conversations.get_conversation(current['id']))
 
     def test_delete_response_uses_replacement_conversation(self):
@@ -902,9 +903,9 @@ class MultiConversationVoiceTests(Fixture):
             process_ordinary(self.manager, source, 'trace-delete', '/delete')
 
         active = self.c.conversations.list_conversations(self.owner, self.chat)[0]
-        self.assertIsNone(self.c.conversations.get_conversation(doomed['id']))
+        self.assertEqual(self.c.conversations.get_conversation(doomed['id'])['status'], 'deleted')
         self.assertIsNone(self.c.conversations.turn(source))
-        self.assertEqual(captured['text'], 'Chat eliminado: Temporal')
+        self.assertTrue(captured['text'].startswith('Chat eliminado: Temporal'))
         self.assertEqual(captured['turn']['conversation_id'], active['id'])
         self.assertEqual(captured['turn']['title'], active['title'])
 

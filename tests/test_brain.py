@@ -35,55 +35,27 @@ class _Memory:
 
 
 class BrainTests(unittest.TestCase):
-    def test_common_model_tree_contains_cascade_stop_and_cleanup_failure(self):
-        from app.kernel.journal import Journal
+    def test_common_model_tree_records_failure_without_trying_other_profiles(self):
         with tempfile.TemporaryDirectory() as directory:
             controller = ModelController(directory, {})
-            root = controller.journal.start('interaction', 'telegram:model-audit')
-            with controller.journal.activate(root):
-                with patch.object(controller, '_start', side_effect=[TimeoutError('cold'), 'connected']):
-                    self.assertEqual(controller.set_mode('high'), 'connected')
-                with patch.object(controller, 'get_instance', return_value=None):
-                    controller.set_mode('nano')
-                with patch.object(controller, 'get_instance', side_effect=TimeoutError('provider body')):
-                    controller._rollback_activation()
-            tree = Journal(controller.journal.path).tree(root)
-            changes = [c for c in tree['cycles'] if c['kind'] == 'model_change']
-            self.assertEqual(len(changes), 2)
-            attempts = [c for c in tree['cycles'] if c['kind'] == 'model_attempt']
-            self.assertEqual([c['status'] for c in attempts], ['failed', 'completed'])
-            self.assertEqual({c['parent_id'] for c in attempts}, {changes[0]['cycle_id']})
-            self.assertEqual([c['status'] for c in tree['cycles'] if c['kind'] == 'model_stop'], ['completed'])
-            self.assertEqual([c['status'] for c in tree['cycles'] if c['kind'] == 'model_vm_delete'], ['failed'])
-            self.assertTrue(all(c['ended_at'] is not None for c in tree['cycles'] if c['cycle_id'] != root))
-            self.assertNotIn('provider body', json.dumps(tree))
+            with patch.object(controller, '_start', side_effect=TimeoutError('cold')) as start, patch.object(controller, '_rollback_activation'):
+                with self.assertRaises(ValueError):
+                    controller.set_mode('high')
+            start.assert_called_once_with('high')
+            events = controller.transition_snapshot()['recent_transitions']
+            self.assertEqual({e['profile'] for e in events}, {'high'})
 
-    def test_mode_command_cascade_retains_attempts_after_controller_restart(self):
-        """One request can fail a candidate and connect another without losing either receipt."""
+    def test_failed_selected_mode_retains_evidence_after_restart(self):
         from app.kernel.tracing import trace_scope
-
         with tempfile.TemporaryDirectory() as directory:
             controller = ModelController(directory, {})
-            manager = SimpleNamespace(coordinator=MagicMock(), dolphin=controller)
-            with patch.object(controller, '_start', side_effect=[
-                    TimeoutError('fixture cold start'), '[Modo mid conectado]']), \
-                 trace_scope('req_model-cascade'):
-                result = _command(manager, 'telegram:model-cascade', '/mode high')
-
-            self.assertEqual(result, '[Modo mid conectado]')
-            restarted = ModelController(directory, {})
-            events = list(reversed(restarted.transition_snapshot()['recent_transitions']))
-            self.assertEqual([(event['profile'], event['phase']) for event in events], [
-                ('high', 'activation_started'), ('high', 'activation_failed'),
-                ('mid', 'activation_started'), ('mid', 'activation_completed'),
-            ])
-            self.assertEqual({event['trace_id'] for event in events}, {'req_model-cascade'})
+            with patch.object(controller, '_start', side_effect=TimeoutError('cold')), patch.object(controller, '_rollback_activation'), trace_scope('req_selected'):
+                with self.assertRaises(ValueError):
+                    controller.set_mode('high')
+            events = list(reversed(ModelController(directory, {}).transition_snapshot()['recent_transitions']))
+            self.assertEqual([(e['profile'], e['phase']) for e in events], [('high', 'activation_started'), ('high', 'activation_failed')])
+            self.assertEqual({e['trace_id'] for e in events}, {'req_selected'})
             self.assertEqual(events[0]['attempt_id'], events[1]['attempt_id'])
-            self.assertEqual(events[2]['attempt_id'], events[3]['attempt_id'])
-            self.assertNotEqual(events[0]['attempt_id'], events[2]['attempt_id'])
-            self.assertEqual(events[1]['error_type'], 'TimeoutError')
-            self.assertGreaterEqual(events[1]['elapsed_seconds'], 0)
-            self.assertGreaterEqual(events[3]['elapsed_seconds'], 0)
 
     def test_parallel_activation_journals_do_not_mix_request_contexts(self):
         """Telemetry from overlapping requests retains its own trace and activation ID."""
@@ -281,12 +253,13 @@ class BrainTests(unittest.TestCase):
             gateway._load_status = MagicMock(return_value={})
             gateway._generate_dolphin = MagicMock(side_effect=__import__('requests').ConnectionError('VM apagada'))
             gateway._generate_gemini = MagicMock(return_value='Respuesta desde Gemini.')
+            gateway.probe_nano = MagicMock(return_value=True)
 
             with patch.dict('os.environ', {'KHAI_DOLPHIN_URL': 'http://10.200.0.2:11434'}):
                 first_reply = gateway.generate_content('Hola')
                 self.assertEqual(
                     first_reply,
-                    '[Modo nano conectado]\nRespuesta desde Gemini.',
+                    'Respuesta desde Gemini.',
                 )
                 self.assertEqual(ctrl.get_active_mode(), 'nano')
                 ctrl._delete_instance.assert_called_once_with(wait=False)
@@ -357,7 +330,7 @@ class BrainTests(unittest.TestCase):
                 ctrl.set_mode('mid', notifier=notify)
             sent = [call.args[0] for call in notify.call_args_list]
             self.assertEqual(sum('Modo mid falló' in s for s in sent), 1)
-            self.assertEqual(sum('Modo low falló' in s for s in sent), 1)
+            self.assertEqual(sum('Modo low falló' in s for s in sent), 0)
             self.assertFalse(any('Modo nano conectado' in s for s in sent))
             self.assertEqual(str(raised.exception), '[Modo nano conectado]')
 
@@ -368,7 +341,7 @@ class BrainTests(unittest.TestCase):
                 'KHAI_DOLPHIN_MODEL': 'dolphin3:8b',
             })
             response = MagicMock()
-            response.json.return_value = {'response': 'OK', 'load_duration': 123,
+            response.json.return_value = {'response': json.dumps({'reply':'','tool_calls':[{'name':'get_system_status','arguments':{}}]}), 'load_duration': 123,
                                           'eval_count': 1, 'total_duration': True,
                                           'prompt_eval_duration': 'not a metric'}
             with patch('app.mind.brain.controller.requests.post', return_value=response) as post:
@@ -376,7 +349,7 @@ class BrainTests(unittest.TestCase):
             self.assertEqual(metrics, {'load_duration': 123, 'eval_count': 1})
             payload = post.call_args.kwargs['json']
             self.assertEqual(payload['model'], 'dolphin3:8b')
-            self.assertEqual(payload['options']['num_predict'], 1)
+            self.assertEqual(payload['options']['num_predict'], 128)
             self.assertEqual(post.call_args.kwargs['timeout'], 120)
             self.assertFalse(post.call_args.kwargs['allow_redirects'])
 
@@ -386,7 +359,7 @@ class BrainTests(unittest.TestCase):
             recent=lambda limit=3: [{'case_id': 'case-1', 'state': 'DIAGNOSED', 'request': 'clima',
                                 'diagnosis': {'findings': [{'kind': 'task_failure', 'detail': 'Missing action'}]},
                                 'plan': {'action': 'retry_task', 'target': 'task', 'summary': 'Reintentar', 'requires_approval': False}}],
-            open_case=lambda req, requested_by='telegram', propose=False, kind='pixy_report': {
+            open_case=lambda req, requested_by='telegram', propose=False, kind='pixy_report', conversation_context=None: {
                 'case_id': 'case-2',
                 'diagnosis': {'findings': [{'kind': 'task_failure', 'detail': 'Missing action'}]},
                 'plan': {'action': 'retry_task', 'target': 'task', 'summary': 'Reintentar', 'requires_approval': False},
@@ -442,6 +415,7 @@ class BrainTests(unittest.TestCase):
             }],
             'inputs': {'ciudad': 'Santiago'},
         })))
+        llm_one.generate_content.side_effect = [llm_one.generate_content.return_value, json.dumps({'sufficient': True, 'missing': []})]
         plan_one = ActionPlanner(llm_one, catalog).propose('Va a llover?', lambda _: True)
         self.assertIsNotNone(plan_one)
         self.assertEqual(len(plan_one['recipe']['steps']), 1)
@@ -579,28 +553,18 @@ class BrainTests(unittest.TestCase):
         ctrl.set_mode.assert_called_once_with('mid', notifier=coord.notify)
         self.assertEqual(res, '[Modo mid conectado]')
 
-    def test_transparent_llm_cascade_and_busy_notification(self):
-        notified = []
+    def test_unavailable_nano_never_provisions_alternative(self):
+        from app.voice.gateway.llm_gateway import ModelUnavailable
         gateway = LLMManager.__new__(LLMManager)
-        gateway.dolphin = None
-        gateway.secrets = {}
-        gateway.notifier = lambda msg: notified.append(msg)
-        gateway.api_keys_pool = [
-            {'type': 'gemini', 'key': 'k1', 'id': 'GEMINI_API_KEY'},
-            {'type': 'gemini', 'key': 'k2', 'id': 'GEMINI_API_KEY_FALLBACK_2'},
-        ]
+        gateway.dolphin = MagicMock()
+        gateway.dolphin.get_active_mode.return_value = 'nano'
+        gateway.api_keys_pool = [{'type':'gemini','key':'fake','id':'key'}]
         gateway._load_status = MagicMock(return_value={})
         gateway._mark_key_failed = MagicMock()
-        gateway._generate_gemini = MagicMock(side_effect=Exception('429 Quota Exceeded'))
-        gateway._dolphin_endpoint = MagicMock(return_value='')
-
-        with self.assertRaises(ValueError) as ctx:
+        gateway._generate_gemini = MagicMock(side_effect=TimeoutError())
+        with self.assertRaises(ModelUnavailable):
             gateway.generate_content('hola')
-
-        self.assertIn('Todos los LLM están ocupados', str(ctx.exception))
-        self.assertIn('Gemini no responde, pasando a Gemini Fallback', notified)
-        self.assertIn('Gemini Fallback no responde, pasando a Dolphin Medium', notified)
-        self.assertIn('Todos los LLM están ocupados, por favor espere.', notified)
+        gateway.dolphin.start.assert_not_called()
 
     def test_terminal_content_rejection_does_not_start_dolphin(self):
         from app.voice.gateway.llm_gateway import LLMContentRejected
@@ -637,7 +601,8 @@ class BrainTests(unittest.TestCase):
         gateway._generate_gemini = MagicMock()
         gateway._dolphin_endpoint = MagicMock(return_value='')
 
-        with self.assertRaisesRegex(ValueError, 'Todos los LLM están ocupados'):
+        from app.voice.gateway.llm_gateway import ModelUnavailable
+        with self.assertRaisesRegex(ModelUnavailable, 'Nano no responde'):
             gateway.generate_content('hola')
 
         gateway._generate_gemini.assert_not_called()
@@ -785,7 +750,7 @@ class CancelableTransitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             controller = ModelController(directory, {})
             controller._set_mode_state('low')
-            probe = MagicMock(side_effect=AssertionError('Nano must not be needed'))
+            probe = MagicMock(return_value=True)
             manager = TransitionManager(controller, probe)
             try:
                 with patch.object(controller, 'get_instance', return_value={'status': 'RUNNING', 'machineType': 'e2-standard-8'}), \
@@ -796,7 +761,7 @@ class CancelableTransitionTests(unittest.TestCase):
                     self.wait_until(lambda: not manager.is_active())
                     self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'completed')
                     self.assertEqual(controller.get_active_mode(), 'low')
-                    probe.assert_not_called()
+                    probe.assert_called_once()
                     post.assert_not_called()
                     warmups = [e for e in controller.transition_snapshot()['recent_transitions'] if e['phase'] == 'warmup_completed']
                     self.assertEqual(warmups[0]['load_duration'], 100)
@@ -808,7 +773,7 @@ class CancelableTransitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             controller = ModelController(directory, {})
             controller._set_mode_state('low')
-            probe = MagicMock()
+            probe = MagicMock(return_value=True)
             manager = TransitionManager(controller, probe)
             try:
                 with patch.object(controller, 'get_instance', return_value={'status': 'RUNNING', 'machineType': 'e2-standard-8'}), \
@@ -819,8 +784,8 @@ class CancelableTransitionTests(unittest.TestCase):
                     manager.request('low')
                     self.wait_until(lambda: not manager.is_active())
                     self.assertEqual(manager.snapshot()['transitions'][0]['status'], 'failed')
-                    self.assertEqual(controller.get_active_mode(), 'low')
-                    probe.assert_not_called()
+                    self.assertEqual(controller.get_active_mode(), 'nano')
+                    probe.assert_called_once()
                     delete.assert_not_called()
                     post.assert_not_called()
             finally:
@@ -948,7 +913,7 @@ class CancelableTransitionTests(unittest.TestCase):
             manager.shutdown(wait=True)
             with connection(manager.path) as db:
                 identifier, now = 'transition-interrupted', time.time()
-                db.execute('INSERT INTO model_transitions VALUES (?,?,?,?,?,?,?,?,NULL)',
+                db.execute('INSERT INTO model_transitions(id,generation,requested_mode,previous_mode,status,phase,created_at,updated_at,error_type) VALUES (?,?,?,?,?,?,?,?,NULL)',
                            (identifier, 1, 'high', 'nano', 'active', 'preparing_target', now, now))
                 manager.journal.start('model_transition', identifier, conn=db)
             controller2 = ModelController(directory, {})

@@ -4,6 +4,7 @@ from contextvars import copy_context
 import threading
 import time
 import uuid
+import json
 from urllib.parse import quote
 
 import requests
@@ -79,11 +80,13 @@ class TransitionManager:
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='model-transition')
         self._closed = False
+        self.mailbox = None
         initial = controller.get_active_mode()
         migrate(self.path, [[
             'CREATE TABLE IF NOT EXISTS model_transition_control(id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL, effective_mode TEXT NOT NULL)',
             'CREATE TABLE IF NOT EXISTS model_transitions(id TEXT PRIMARY KEY, generation INTEGER NOT NULL UNIQUE, requested_mode TEXT NOT NULL, previous_mode TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL, error_type TEXT)',
             'CREATE TABLE IF NOT EXISTS model_remote_operations(id TEXT PRIMARY KEY, transition_id TEXT NOT NULL REFERENCES model_transitions(id), operation_name TEXT, status TEXT NOT NULL, method TEXT NOT NULL, created_at REAL NOT NULL)',
+        ], ["ALTER TABLE model_transitions ADD COLUMN context TEXT NOT NULL DEFAULT '{}'"
         ]], component='cancelable-model-transitions')
         with connection(self.path) as db:
             db.execute('INSERT OR IGNORE INTO model_transition_control VALUES (1,0,?)', (initial,))
@@ -99,6 +102,24 @@ class TransitionManager:
     def _cycle(self, identifier):
         return self.journal.cycle_id('model_transition', identifier)
 
+    def poll_notifications(self, now=None):
+        """Recover restart notices and report one abnormal delay per transition."""
+        if self.mailbox is None:
+            return
+        now = time.time() if now is None else now
+        with self._lock, connection(self.path) as db:
+            rows = db.execute("SELECT * FROM model_transitions WHERE status='active' OR phase='process_interrupted'").fetchall()
+            for row in rows:
+                token = _Token(self, row['id'], row['generation'])
+                if row['phase'] == 'process_interrupted':
+                    self._queue_notice(db, token, 'interrupted',
+                        'El cambio de modelo se interrumpió al reiniciar. Su resultado no está confirmado; '
+                        'consulta /mode ? antes de solicitar otro cambio.')
+                elif now - row['created_at'] >= 120:
+                    self._queue_notice(db, token, 'delayed',
+                        f"El modo {row['requested_mode']} sigue preparando su conexión. "
+                        f"Modo efectivo: {self.effective_mode()}. Te avisaré del resultado; /stop permite cancelar.")
+
     def effective_mode(self):
         with connection(self.path) as db:
             return db.execute('SELECT effective_mode FROM model_transition_control WHERE id=1').fetchone()[0]
@@ -113,12 +134,12 @@ class TransitionManager:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT generation,effective_mode FROM model_transition_control WHERE id=1').fetchone()
             if (self._closed or row['effective_mode'] != expected_mode
-                    or expected_generation is not None and row['generation'] != expected_generation
-                    or db.execute("SELECT 1 FROM model_transitions WHERE status='active'").fetchone()):
+                    or expected_generation is not None and row['generation'] != expected_generation):
                 return False
             cycle = self.journal.start('model_fallback', uuid.uuid4().hex,
                                        refs={'effective_mode': expected_mode}, conn=db)
-            db.execute("UPDATE model_transition_control SET effective_mode='nano',generation=generation+1 WHERE id=1")
+            active = db.execute("SELECT 1 FROM model_transitions WHERE status='active'").fetchone()
+            db.execute("UPDATE model_transition_control SET effective_mode='nano',generation=generation+? WHERE id=1", (0 if active else 1,))
             self.journal.finish(cycle, data={'effective_mode': 'nano', 'reason_code': 'nano_inference_verified'}, conn=db)
         self.controller._mirror_mode_state('nano', mark_notified=False)
         return True
@@ -154,9 +175,16 @@ class TransitionManager:
                 self._cancel_rows(db, 'superseded')
                 row = db.execute('SELECT generation,effective_mode FROM model_transition_control WHERE id=1').fetchone()
                 generation, previous = row[0] + 1, row[1]
+                from app.mind.conversation import current_turn
+                origin = current_turn.get() or {}
+                context = {key: origin.get(key) for key in ('conversation_id', 'source', 'chat_id', 'thread_id', 'trace_id')}
                 db.execute('UPDATE model_transition_control SET generation=? WHERE id=1', (generation,))
-                db.execute('INSERT INTO model_transitions VALUES (?,?,?,?,?,?,?,?,NULL)',
-                           (identifier, generation, mode, previous, 'active', 'requested', now, now))
+                db.execute('INSERT INTO model_transitions VALUES (?,?,?,?,?,?,?,?,NULL,?)',
+                           (identifier, generation, mode, previous, 'active', 'requested', now, now, json.dumps(context)))
+                if context.get('conversation_id') and db.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_requests'").fetchone():
+                    db.execute('INSERT INTO conversation_requests VALUES (?,?,?,?,?,?,?)',
+                               ('request_' + uuid.uuid4().hex, context['conversation_id'], context.get('source') or identifier,
+                                None, 'model_transition', identifier, now))
                 self.journal.start('model_transition', identifier, refs={'profile': mode, 'effective_mode': previous}, conn=db)
             token = _Token(self, identifier, generation)
             context = copy_context()
@@ -174,6 +202,23 @@ class TransitionManager:
             notifier(f'[Cambio cancelado; modo {effective} conservado]')
         return {'status': 'cancelled' if identifiers else 'idle', 'ids': identifiers, 'effective_mode': effective}
 
+    def cancel_conversation(self, conversation_id):
+        with self._lock:
+            with connection(self.path) as db:
+                rows = db.execute("SELECT context FROM model_transitions WHERE status='active'").fetchall()
+                matches = any(json.loads(r['context']).get('conversation_id') == conversation_id for r in rows)
+            return self.cancel() if matches else {'status': 'idle', 'ids': []}
+
+    def _queue_notice(self, db, token, phase, message, buttons=None):
+        row = db.execute('SELECT context FROM model_transitions WHERE id=?', (token.id,)).fetchone()
+        context = json.loads(row['context']) if row else {}
+        if self.mailbox is None or not context.get('conversation_id'):
+            return False
+        metadata = {**context, 'message_thread_id': context.get('thread_id'),
+                    'cycle_id': self._cycle(token.id), 'buttons': buttons}
+        self.mailbox.enqueue(message, metadata, conn=db, delivery_id=token.id + ':' + phase)
+        return True
+
     def _phase(self, token, phase):
         with self._lock:
             self._check(token)
@@ -190,11 +235,14 @@ class TransitionManager:
                 if not changed:
                     raise TransitionCancelled()
                 self.journal.event(self._cycle(token.id), 'effective_mode_published', data={'effective_mode': mode}, conn=db)
+                self._queue_notice(db, token, 'ready-' + mode, f'[Modo {mode} conectado]')
 
     def _notify(self, token, notifier, message):
         with self._lock:
             self._check(token)
-            if notifier:
+            with connection(self.path) as db:
+                queued = self._queue_notice(db, token, 'starting', message)
+            if notifier and not queued:
                 notifier(message)
 
     def _reconcile(self, token):
@@ -230,32 +278,31 @@ class TransitionManager:
                     token.check()
                     same_live_profile = bool(instance and instance.get('status') == 'RUNNING'
                                              and instance.get('machineType', '').rsplit('/', 1)[-1] == PROFILES[mode]['machine_type'])
-                if not same_live_profile:
-                    self._phase(token, 'probing_nano')
-                    nano_ready = False
+                self._phase(token, 'probing_nano')
+                nano_ready = False
+                try:
+                    if self.probe_nano() is not True:
+                        raise NanoUnavailable()
+                    nano_ready = True
+                except Exception as exc:
+                    # An explicit local selection may start when there is no
+                    # running service to destroy. This is not provider failover.
                     try:
-                        if self.probe_nano() is not True:
-                            raise NanoUnavailable()
-                        nano_ready = True
-                    except Exception as exc:
-                        # An explicit local selection may start when there is no
-                        # running service to destroy. This is not provider failover.
-                        try:
-                            if mode != 'nano' and not instance_observed:
-                                instance = self.controller.get_instance()
-                                instance_observed = True
-                        except Exception:
-                            instance_observed = False
-                        no_service_to_destroy = (instance_observed and
-                                                 (instance is None or instance.get('status') == 'TERMINATED'))
-                        if mode == 'nano' or not no_service_to_destroy:
-                            raise NanoUnavailable() from exc
-                        self._phase(token, 'nano_unavailable_owner_selected_profile')
-                    token.check()
-                    if nano_ready:
-                        self._publish(token, 'nano')
-                        self.controller._mirror_mode_state('nano', mark_notified=True)
-                        self._phase(token, 'nano_bridge_ready')
+                        if mode != 'nano' and not instance_observed:
+                            instance = self.controller.get_instance()
+                            instance_observed = True
+                    except Exception:
+                        instance_observed = False
+                    no_service_to_destroy = (instance_observed and
+                                             (instance is None or instance.get('status') == 'TERMINATED'))
+                    if mode == 'nano' or not no_service_to_destroy:
+                        raise NanoUnavailable() from exc
+                    self._phase(token, 'nano_unavailable_owner_selected_profile')
+                token.check()
+                if nano_ready:
+                    self._publish(token, 'nano')
+                    self.controller._mirror_mode_state('nano', mark_notified=True)
+                    self._phase(token, 'nano_bridge_ready')
                 self._phase(token, 'preparing_target')
                 if mode == 'nano':
                     self.controller.stop()
@@ -266,11 +313,15 @@ class TransitionManager:
                     raise RuntimeError('Target was not published after readiness')
                 with self._lock:
                     self._check(token)
-                    if notifier:
-                        notifier(f'[Modo {mode} conectado]')
                     with connection(self.path) as db:
+                        queued = self._queue_notice(db, token, 'ready-' + mode, f'[Modo {mode} conectado]')
                         db.execute("UPDATE model_transitions SET status='completed',phase='connected',updated_at=? WHERE id=?", (time.time(), token.id))
                         self.journal.finish(self._cycle(token.id), data={'effective_mode': mode}, conn=db)
+                    if notifier and not queued:
+                        try:
+                            notifier(f'[Modo {mode} conectado]')
+                        except Exception:
+                            pass  # Delivery failure cannot turn a ready model into a failed activation.
         except TransitionCancelled:
             pass  # request/cancel already closed this branch; late evidence stays attached.
         except Exception as exc:
@@ -284,9 +335,14 @@ class TransitionManager:
                     db.execute('UPDATE model_transitions SET status=?,phase=?,error_type=?,updated_at=? WHERE id=?',
                                (state, 'needs_decision', type(exc).__name__, time.time(), token.id))
                     self.journal.finish(self._cycle(token.id), state, data={'error_type': type(exc).__name__, 'effective_mode': self.effective_mode()}, conn=db)
-                if notifier:
-                    reason = 'Nano no responde' if isinstance(exc, NanoUnavailable) else type(exc).__name__
-                    notifier(f'[Modo {mode} fallo: {reason}; modo {self.effective_mode()} conservado. Elige el modo al que deseas cambiar. ID: {token.id}]')
+                from app.mind.brain.controller import _format_error_reason
+                from app.voice.help import MODE_SELECTION_BUTTONS
+                reason = 'Nano no responde' if isinstance(exc, NanoUnavailable) else _format_error_reason(exc)
+                message = f'[Modo {mode} falló por: {reason}] Modo efectivo: {self.effective_mode()}. Elige otro modelo.'
+                with connection(self.path) as db:
+                    queued = self._queue_notice(db, token, 'failed', message, MODE_SELECTION_BUTTONS)
+                if notifier and not queued:
+                    notifier(message)
         finally:
             transition_token.reset(context_token)
 
