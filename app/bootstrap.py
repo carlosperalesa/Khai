@@ -105,6 +105,7 @@ class ModuleManager:
         self.hand.capabilities = self.runtime.capabilities
         self.assets = AssetGateway(self.data_dir.parent/'other',self.data_dir/'voice'/'voice.sqlite3',self.pixy,self.events,self.hand)
         self.dreams = Dreams(self.control_db, self.rules, self.events, memory=self.memory)
+        self.mind.dreams = self.dreams
         self.heart = Beat(self.data_dir,self.events)
         adapters = {name:lambda name=name:self._domain_snapshot(name) for name in OBSERVERS}
         adapters['model_rejection'] = self.brain.contract_rejection

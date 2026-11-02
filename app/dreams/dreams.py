@@ -328,3 +328,33 @@ class Dreams:
                     except OSError as exc:
                         logger.debug("Dreams housekeeping error en %s: %s", draft_dir, exc)
         return cleaned
+
+    def get_active_learnings(self, context_limit: int = 5) -> list[str]:
+        """Recupera directrices activas y notas de refuerzo/autopsias cognitivas para inyectar en el contexto."""
+        learnings = []
+        try:
+            with connection(self.path) as conn:
+                try:
+                    rows = conn.execute(
+                        "SELECT rule_text FROM dynamic_guidelines WHERE status = 'active' ORDER BY confidence DESC LIMIT ?",
+                        (context_limit,)
+                    ).fetchall()
+                    for r in rows:
+                        txt = r[0] if isinstance(r, (tuple, list, sqlite3.Row)) else r['rule_text']
+                        if txt and txt not in learnings:
+                            learnings.append(txt)
+                except sqlite3.OperationalError:
+                    pass
+        except Exception as exc:
+            logger.debug("Error leyendo directrices activas de Dreams: %s", exc)
+
+        if self.memory and hasattr(self.memory, 'get_dynamic_guidelines'):
+            try:
+                for rule in self.memory.get_dynamic_guidelines():
+                    if rule and rule not in learnings and len(learnings) < context_limit:
+                        learnings.append(rule)
+            except Exception as exc:
+                logger.debug("Error leyendo dynamic_guidelines de memory: %s", exc)
+
+        return learnings
+

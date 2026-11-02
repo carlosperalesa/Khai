@@ -106,9 +106,9 @@ class AssistantTurn(Arguments):
     preference_updates: list[PreferenceUpdate] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode='after')
-    def one_outcome(self):
-        if bool(self.reply.strip()) == bool(self.tool_calls):
-            raise ValueError('El turno debe contener una respuesta o una operación concreta')
+    def validate_outcome(self):
+        if not self.reply.strip() and not self.tool_calls and not self.preference_updates:
+            raise ValueError('El turno debe contener una respuesta, una operación concreta o una preferencia')
         return self
 
     def intent(self):
@@ -117,8 +117,8 @@ class AssistantTurn(Arguments):
         call = self.tool_calls[0]
         args = call.arguments.model_dump()
         if call.name == 'start_task':
-            return {'action': 'ACTION_REQUIRED', 'extracted_goal': args['goal'], 'reply': '',
+            return {'action': 'ACTION_REQUIRED', 'extracted_goal': args['goal'], 'reply': self.reply,
                     'capability': args.get('capability'), 'provider': args.get('provider'),
                     'creation_requested': args.get('creation_requested', False),
                     'tool_call': call.model_dump()}
-        return {'action': 'TOOL_CALL', 'reply': '', 'tool_call': call.model_dump()}
+        return {'action': 'TOOL_CALL', 'reply': self.reply, 'tool_call': call.model_dump()}

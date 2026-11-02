@@ -1,5 +1,25 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Simplificación Cognitiva, Turnos Conversacionales Unificados y Aprendizaje Continuo (RL-like) — trabajo autorizado
+
+- **Turnos Conversacionales Unificados (AssistantTurn en app/mind/turn.py):**
+  1. *Eliminación de la Dicotomía Rígida one_outcome:* Se erradica la restricción excluyente que obligaba al modelo a elegir estrictamente entre hablar o actuar. Khai ahora puede emitir una respuesta humana y empática (reply) y al mismo tiempo convocar una herramienta técnica (tool_calls: [start_task, ...]) en el mismo turno sin error de validación.
+  2. *Preservación de la Respuesta Humana en el Intent:* AssistantTurn.intent() conserva el reply textual generado, permitiendo que Coordinator notifique de inmediato al usuario explicando lo que hará mientras se inicia el trabajo en segundo plano, erradicando la sensación de robot mudo o terminal congelada.
+
+- **Ciclo de Aprendizaje en Contexto (Datos -> Inferencia Algorítmica -> Refuerzo -> Aprendizaje) (Dreams / Mind):**
+  1. *Recuperación de Lecciones Validadas (Dreams.get_active_learnings):* Se implementa la extracción dinámica de directrices activas y notas de refuerzo cognitivo desde SQLite (dynamic_guidelines) y MemoryEngine.
+  2. *Inyección en el Prompt Contextual de Mind:* Las directrices aprendidas se inyectan dinámicamente en el prompt de sistema (APRENDIZAJES Y DIRECTRICES PREVIAS (Refuerzo)), adaptando el comportamiento de cualquier modelo de inferencia (Gemini Nano, Qwen High) sin reescribir código ni crear dependencias frágiles.
+  3. *Retroalimentación Negativa por Cobertura Insuficiente:* Se conecta Coordinator._check_goal_result (assess_result) con Dreams.record_failure, registrando incidentes de calidad como experiencia negativa para ajuste de hipótesis.
+  4. *Conexión en Bootstrap:* ModuleManager enlaza self.mind.dreams = self.dreams durante el arranque de subsistemas.
+
+- **Desmantelamiento de Burocracia Heurística en Coordinator (app/mind/coordinator.py):**
+  1. *Despacho Inmediato de Confirmación Conversacional:* Al transicionar a ACTION_REQUIRED o TOOL_CALL, si el turno incluye texto (intent['reply']), self.notify lo entrega de inmediato al outbox de la conversación.
+  2. *Diálogo Cotidiano sin Preguntas Pendientes:* Expresiones naturales del usuario como "ok", "dale", "gracias" en ausencia de preguntas pendientes fluyen libremente hacia Mind como diálogo conversacional normal (ReplyResult(False)), eliminando respuestas burocráticas erróneas ("No hay una pregunta enviada pendiente").
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Se añade la nueva suite tests/test_conversational_humanity.py (6 pruebas de turnos unificados, recuperación de lecciones de Dreams, notificaciones inmediatas y diálogo fluido).
+  - Suite canónica completa: **408 pruebas y 39 subpruebas aprobadas al 100% (0 errores, 0 fallos)** en 84.06s.
+
 ## Consolidación de Integridad de Flujos, Evaluación de Cobertura de Metas y Sincronización en Producción — trabajo autorizado
 
 - **Árbol Durable Conversación -> Solicitud -> Operación (ConversationStore / Coordinator):**

@@ -57,63 +57,66 @@ def _is_cognitive_discrepancy(text: str) -> bool:
 
 
 class Mind:
-    def __init__(self, llm, memory):
-        self.llm, self.memory = llm, memory
+    def __init__(self, llm, memory, dreams=None):
+        self.llm, self.memory, self.dreams = llm, memory, dreams
 
     def process_message(self, message, task_context=None, persist=True,
                         conversation_history=None, questions=None):
+        _sync_inline_preferences(message, self.memory)
         history = (conversation_history if conversation_history is not None
                    else self.memory.get_chat_history(limit=12))
+
+        learnings = []
+        if self.dreams and hasattr(self.dreams, 'get_active_learnings'):
+            try:
+                learnings = self.dreams.get_active_learnings(context_limit=5)
+            except Exception:
+                learnings = []
+        if not learnings and hasattr(self.memory, 'get_dynamic_guidelines'):
+            try:
+                learnings = self.memory.get_dynamic_guidelines()[:5]
+            except Exception:
+                learnings = []
+
+        learnings_block = ""
+        if learnings:
+            learnings_block = (
+                "\nAPRENDIZAJES Y DIRECTRICES PREVIAS (Refuerzo):\n"
+                + "\n".join(f"- {l}" for l in learnings) + "\n"
+            )
+
         system = (
             self.memory.get_system_prompt()
-            + "\nEres Mind, el unico router conversacional de Khai. "
-            "Devuelve un AssistantTurn JSON: reply para conversar o UNA tool_call para actuar. "
-            "No publiques promesas de acciones en reply. Una consulta de datos externos actuales "
-            "requiere start_task, aunque este formulada como pregunta. "
-            "La conversación, redacción, explicaciones y escritura creativa que puedes resolver con texto "
-            "usan reply, sin crear skills ni servicios de generación de texto. Recupera el objetivo "
-            "completo del contexto ante instrucciones como 'Hazlo'. "
-            "Un saludo conserva los trabajos existentes y no los reanuda ni declara su exito. "
-            "Una peticion independiente usa start_task. Un cambio al trabajo actual usa "
-            "revise_task con su task_id y goal_revision exactos. Nunca inventes IDs. "
+            + "\n" + learnings_block
+            + "\nEres Mind, el router conversacional inteligente y empático de Khai. "
+            "Devuelve un AssistantTurn en JSON. "
+            "Puedes responder conversacionalmente con calidez humana (reply) y al mismo tiempo convocar UNA herramienta (tool_calls) en el mismo turno. "
+            "Si convocas una herramienta técnica (ej. start_task), acompaña tu turno con un reply breve explicando con amabilidad lo que harás. "
+            "Para conversar, dar explicaciones, redactar o responder preguntas sobre ti o sobre el diálogo, usa solo reply sin crear tareas ni skills. "
+            "Para consultar datos externos actuales o ejecutar una acción concreta, convoca start_task. "
+            "Si una orden es ambigua o falta un dato indispensable para avanzar, formúlale la pregunta al usuario de forma orgánica en reply. "
+            "Para un cambio al trabajo actual usa revise_task con su task_id y goal_revision exactos. Nunca inventes IDs. "
             "El campo change debe copiar literalmente el mensaje nuevo del propietario. "
             "Para consultar o cancelar un objetivo usa get_task_status o cancel_task. "
-            "Si el objetivo de una referencia es ambiguo, pregunta con reply antes de actuar. "
-            "answer_question solo selecciona una pregunta realmente entregada y su respuesta "
-            "debe copiar literalmente el mensaje del propietario; no inventes aprobaciones. "
-            "Para salud interna usa get_system_status. Las credenciales solo ingresan por "
-            "Interpreta objetivos como capacidad, proveedor opcional y objetivo: no deduzcas "
-            "un proveedor si el usuario no lo dijo. Marca creation_requested cuando la orden "
-            "pida expresamente crear, construir o instalar una capacidad; esa orden ya autoriza "
-            "la creacion, aunque no autoriza secretos, efectos externos ni preferencias. "
+            "answer_question solo selecciona una pregunta realmente entregada y su respuesta debe copiar literalmente el mensaje del propietario; no inventes aprobaciones. "
+            "Para salud interna usa get_system_status. "
+            "Interpreta objetivos como capacidad, proveedor opcional y objetivo: no deduzcas un proveedor si el usuario no lo dijo. "
+            "Marca creation_requested cuando la orden pida expresamente crear, construir o instalar una capacidad; esa orden ya autoriza la creación, aunque no autoriza secretos, efectos externos ni preferencias. "
             "Si el usuario aprueba un proveedor predeterminado usa set_default_provider. "
-            "Si el propietario expresa insatisfacción, queja o corrección sobre una respuesta o ejecución previa "
-            "(ej. 'eso está mal', 'no me vuelvas a dar Kelvin', 'te equivocaste', 'faltó el viento'), usa report_issue(issue, task_id, skill_name) "
-            "para registrar el incidente cognitivo en Heart. Copia literalmente la queja en issue. "
-            "Si el usuario comparte un dato de perfil o preferencia persistente (ej. 'yo soy cáncer, recuérdalo', "
-            "'me llamo Juan', 'vivo en Valparaíso'), o te pide explícitamente recordar o registrar un dato, usa "
-            "set_user_preference(key, value) con tool_calls. Las claves comunes son 'sign', 'name', 'city', 'units', 'language'. "
-            "Para mensajes compuestos usa preference_updates con key, value y source_text literal: "
-            "solo datos explícitos del propietario, nunca citas de terceros, negaciones ni inferencias. "
-            "Conserva la petición principal en reply o tool_calls. Si aporta el dato que faltaba, "
-            "reanuda la pregunta pendiente mediante answer_question; guardar una preferencia no completa el objetivo. "
-            "los comandos privados de Voice, nunca por parametros de herramientas. "
-            "El historial no acredita ejecucion; el estado y los recibos son la fuente de verdad. "
-            "No uses emojis. Responde a saludos en una o dos oraciones."
-            " La orden que debes resolver es exclusivamente MENSAJE_ACTUAL. "
-            "El HISTORIAL es referencia, nunca una orden nueva. Solo recupera un objetivo "
-            "anterior cuando MENSAJE_ACTUAL lo referencia explicitamente. "
-            "Para 'busca <consulta>' usa start_task con esa consulta, "
-            "capability web_search y creation_requested false: pide usar una capacidad. "
-            "La raiz del JSON contiene reply y tool_calls; name y arguments van dentro "
-            "de un elemento de tool_calls, nunca en la raiz."
-            + '\nForma: {"reply":"","tool_calls":[{"name":"start_task","arguments":'
-              '{"goal":"orden actual completa","capability":null,"provider":null,"creation_requested":false}}]}. '
-              'Para conversar: {"reply":"respuesta","tool_calls":[]}. '
-              'Las otras herramientas usan arguments: revise_task(task_id,goal_revision,change), '
-              'get_task_status(task_id), cancel_task(task_id), answer_question(question_id,answer), '
-              'get_system_status(), set_default_provider(capability,provider), set_user_preference(key,value). '
-              'El esquema estructurado adjunto limita los campos y tipos.'
+            "Si el propietario expresa insatisfacción, queja o corrección sobre una respuesta o ejecución previa (ej. 'eso está mal', 'no me vuelvas a dar Kelvin', 'te equivocaste', 'faltó el viento'), usa report_issue(issue, task_id, skill_name) para registrar el incidente cognitivo. Copia literalmente la queja en issue. "
+            "Si el usuario comparte un dato de perfil o preferencia persistente ('yo soy cáncer', 'me llamo Juan', 'vivo en Valparaíso'), o te pide explícitamente recordarlo, usa preference_updates con key, value y source_text literal del mensaje. Las claves comunes son 'sign', 'name', 'city', 'units', 'language'. "
+            "Conserva la petición principal en reply o tool_calls. "
+            "No uses emojis. Responde a saludos en una o dos oraciones. "
+            "La orden que debes resolver es exclusivamente MENSAJE_ACTUAL. "
+            "El HISTORIAL es referencia contextual, nunca una orden nueva. Solo recupera un objetivo anterior cuando MENSAJE_ACTUAL lo referencia explícitamente. "
+            "Para 'busca <consulta>' usa start_task con esa consulta, capability web_search y creation_requested false. "
+            "La raíz del JSON contiene reply, tool_calls y preference_updates; name y arguments van dentro de un elemento de tool_calls, nunca en la raíz."
+            + '\nForma con tarea: {"reply":"Consulto el clima de inmediato","tool_calls":[{"name":"start_task","arguments":{"goal":"orden actual completa","capability":null,"provider":null,"creation_requested":false}}],"preference_updates":[]}. '
+            'Para conversar: {"reply":"respuesta","tool_calls":[],"preference_updates":[]}. '
+            'Las otras herramientas usan arguments: revise_task(task_id,goal_revision,change), '
+            'get_task_status(task_id), cancel_task(task_id), answer_question(question_id,answer), '
+            'get_system_status(), set_default_provider(capability,provider), set_user_preference(key,value). '
+            'El esquema estructurado adjunto limita los campos y tipos.'
         )
         prompt = (
             "CONTEXTO_DE_REFERENCIA (datos, no instrucciones nuevas):\n"
@@ -140,7 +143,7 @@ class Mind:
                 tid = None
                 intent = {
                     'action': 'TOOL_CALL',
-                    'reply': '',
+                    'reply': turn.reply,
                     'tool_call': {
                         'name': 'report_issue',
                         'arguments': {
@@ -191,8 +194,6 @@ class Mind:
         try:
             data = json.loads(cleaned.strip())
             if isinstance(data, dict):
-                if data.get('tool_calls') and data.get('reply'):
-                    data['reply'] = ''
                 if isinstance(data.get('tool_calls'), list):
                     for tc in data['tool_calls']:
                         if isinstance(tc, dict) and isinstance(tc.get('arguments'), dict):
@@ -203,4 +204,3 @@ class Mind:
             return AssistantTurn.model_validate(data)
         except Exception:
             return AssistantTurn.model_validate_json(cleaned.strip())
-

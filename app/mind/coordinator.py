@@ -631,7 +631,7 @@ class Coordinator:
         if bare and explicit is None and self.conversations.uncertain_question(conversation_id):
             return ReplyResult(True, 'Hay una pregunta cuya entrega no pude confirmar. Responde al mensaje concreto o consulta /p antes de aprobar.')
         if not pending:
-            if is_decision:
+            if words and len(words) == 1 and first_w in {'y', 'n'}:
                 return ReplyResult(True, 'No hay una pregunta enviada pendiente de respuesta.')
             return ReplyResult(False)
 
@@ -1082,6 +1082,11 @@ class Coordinator:
                 case = recovery.open_incident_case(task, {'status': 'cognitive_fault',
                     'cause_code': 'cognitive_discrepancy', 'error': evidence['reason'], 'feedback': evidence})
                 case_id = case.get('case_id')
+            if hasattr(self.manager, 'dreams') and self.manager.dreams:
+                try:
+                    self.manager.dreams.record_failure(task, 'goal_assessment', evidence)
+                except Exception as exc:
+                    logger.debug('Error registrando fallo en dreams: %s', exc)
             self.store.update(task['id'], state='DIAGNOSING', recovery_case_id=case_id)
             self.notify('El resultado no cubre lo solicitado: ' + evidence['reason'] + '. Revisaré la capacidad antes de repetir.')
             return False
@@ -2223,6 +2228,8 @@ class Coordinator:
                                     and intent['tool_call']['name'] == 'answer_question' else None)
                 self.store.update(tid, expected={'ROUTING'}, state='COMPLETED',
                                   routing_action='TOOL_CALL', tool_result=reply, response_task_id=response_task_id)
+                if intent.get('reply'):
+                    self.notify(intent['reply'])
                 if reply:
                     self.notify(reply)
                 return
@@ -2237,6 +2244,8 @@ class Coordinator:
                     call_id = self.conversations.record_call(task['source'], intent['tool_call'])
                     self.conversations.complete(task['source'], {'call_id': call_id,
                         'tool_call': intent['tool_call'], 'status': 'started', 'task_id': tid})
+                if intent.get('reply'):
+                    self.notify(intent['reply'])
             if action == 'ACTION_REQUIRED' and not direct:
                 planner = getattr(self.manager, 'action_planner', None)
                 if planner is not None:
