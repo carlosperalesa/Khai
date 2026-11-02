@@ -44,15 +44,15 @@ Khai convierte objetivos conversacionales en resultados verificables. Busca la s
 
 ---
 
-## 5. Modos de Inferencia, Cascada y Notificaciones
+## 5. Modos de Inferencia, Fallback y Notificaciones
 
 - **Modelo prioritario de evaluación:** Todas las pruebas complejas y tareas de desarrollo se realizan prioritariamente en **Modo High** (`qwen2.5-32b-abliterated` en GCE Spot GPU NVIDIA L4).
-- **Cascada estricta de respaldo:** `high > mid > low > nano`.
+- **Continuidad ante fallo o caída de perfil:** Ante la caída o fallo de un perfil de inferencia, se cambia inmediatamente a **Modo Nano** (Gemini) para asegurar la continuidad de la conversación y se le ofrece al usuario qué hacer desplegando la botonera interactiva con los modelos disponibles.
 - **Mensajería estricta durante transiciones:**
   - Al iniciar conexión o cambio de modo: `[Conectando con Modo <nombre>]`
   - Al completar la conexión exitosamente: `[Modo <nombre> conectado]`
-  - Al fallar un perfil: `[Modo <nombre> falló por: <motivo>]` (ej. `spot no disponible`, `tiempo de espera agotado`) continuando inmediatamente con el siguiente perfil de la escala.
-  - Si se agota la cascada y se pasa a Gemini: `[Modo nano conectado]`
+  - Al fallar un perfil: `[Modo <nombre> falló por: <motivo>]` (ej. `spot no disponible`, `tiempo de espera agotado`), cambiando a nano y ofreciendo la botonera con los modelos.
+  - Cuando se activa el respaldo: `[Modo nano conectado]`
 - **Sin ruido en la conversación:** Prohibido emitir resúmenes de facturación, detalles de crédito o logs en la conversación habitual (reservados exclusivamente para el comando `/mode ?`).
 
 ---

@@ -268,6 +268,7 @@ class HumanInterfaceTests(unittest.TestCase):
             # "dale" should be accepted as affirmative
             res = coord.handle_reply('owner:user1', 'dale', sid)
             self.assertTrue(res.handled)
+            print('ACTUAL_RES_TEXT:', repr(res.text), 'HANDLED:', res.handled)
             self.assertEqual(res.text, 'Ejecución autorizada.')
 
     def test_mixed_reply_approval_revises_goal(self):
@@ -376,6 +377,236 @@ class HumanInterfaceTests(unittest.TestCase):
         self.assertEqual(result, "Temperatura: 22 °C, Soleado")
         self.assertNotIn("¿Es este el resultado esperado?", result)
         self.assertNotIn("(y/n)", result)
+
+
+    def test_dynamic_intent_classification_approval(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import hashlib
+        import json
+        from pathlib import Path
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            class DynamicLLM:
+                def __init__(self, intent):
+                    self.intent = intent
+                    self.calls = 0
+                def generate_content(self, prompt):
+                    self.calls += 1
+                    return json.dumps({"intent": self.intent})
+
+            llm_inst = DynamicLLM("approve")
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock(), llm=llm_inst)
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_dyn_app'
+            art_code = b"print('ok')"
+            art_hash = hashlib.sha256(art_code).hexdigest()
+            art_path = f"{tmpdir}/art.py"
+            Path(art_path).write_bytes(art_code)
+
+            task = store.create(
+                'owner:user1', 'ejecutar accion',
+                state='WAITING_APPROVAL',
+                conversation_id=sid,
+                artifact=art_path,
+                artifact_hash=art_hash,
+                approval={'token': 'tok1', 'operation': None, 'expires': time.time() + 60, 'artifact_hash': art_hash},
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'execution', task['id'], task['revision'], 'WAITING_APPROVAL')
+            coord.conversations.delivered(sid, 'deliv_1', '¿Apruebas?', question_id=qid)
+
+            res = coord.handle_reply('owner:user1', 'me parece una excelente idea, dale adelante', sid)
+            self.assertTrue(res.handled)
+            self.assertEqual(res.text, 'Ejecución autorizada.')
+            self.assertGreater(llm_inst.calls, 0)
+
+    def test_dynamic_intent_classification_rejection(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import hashlib
+        import json
+        from pathlib import Path
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            class DynamicLLM:
+                def __init__(self, intent):
+                    self.intent = intent
+                    self.calls = 0
+                def generate_content(self, prompt):
+                    self.calls += 1
+                    return json.dumps({"intent": self.intent})
+
+            llm_inst = DynamicLLM("reject")
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock(), llm=llm_inst)
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_dyn_rej'
+            art_code = b"print('ok')"
+            art_hash = hashlib.sha256(art_code).hexdigest()
+            art_path = f"{tmpdir}/art.py"
+            Path(art_path).write_bytes(art_code)
+
+            task = store.create(
+                'owner:user1', 'ejecutar accion',
+                state='WAITING_APPROVAL',
+                conversation_id=sid,
+                artifact=art_path,
+                artifact_hash=art_hash,
+                approval={'token': 'tok2', 'operation': None, 'expires': time.time() + 60, 'artifact_hash': art_hash},
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'execution', task['id'], task['revision'], 'WAITING_APPROVAL')
+            coord.conversations.delivered(sid, 'deliv_2', '¿Apruebas?', question_id=qid)
+
+            res = coord.handle_reply('owner:user1', 'la verdad es que prefiero que no lo hagas', sid)
+            self.assertTrue(res.handled)
+            self.assertEqual(res.text, 'Ejecución cancelada.')
+            self.assertGreater(llm_inst.calls, 0)
+
+    def test_dynamic_intent_classification_unrelated_leaves_turn(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import hashlib
+        import json
+        from pathlib import Path
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            class DynamicLLM:
+                def __init__(self, intent):
+                    self.intent = intent
+                    self.calls = 0
+                def generate_content(self, prompt):
+                    self.calls += 1
+                    return json.dumps({"intent": self.intent})
+
+            llm_inst = DynamicLLM("unrelated")
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock(), llm=llm_inst)
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_dyn_unrelated'
+            art_code = b"print('ok')"
+            art_hash = hashlib.sha256(art_code).hexdigest()
+            art_path = f"{tmpdir}/art.py"
+            Path(art_path).write_bytes(art_code)
+
+            task = store.create(
+                'owner:user1', 'ejecutar accion',
+                state='WAITING_APPROVAL',
+                conversation_id=sid,
+                artifact=art_path,
+                artifact_hash=art_hash,
+                approval={'token': 'tok3', 'operation': None, 'expires': time.time() + 60, 'artifact_hash': art_hash},
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'execution', task['id'], task['revision'], 'WAITING_APPROVAL')
+            coord.conversations.delivered(sid, 'deliv_3', '¿Apruebas?', question_id=qid)
+
+            res = coord.handle_reply('owner:user1', 'además busca noticias de hoy', sid)
+            self.assertFalse(res.handled)
+
+    def test_telegraphic_fast_path_bypasses_llm(self):
+        from app.mind.coordinator import Coordinator
+        from app.pixy.control import ControlStore
+        from types import SimpleNamespace
+        import hashlib
+        import json
+        from pathlib import Path
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/test_control.sqlite3"
+            mem = MemoryEngine(data_dir=tmpdir, db_path=db_path)
+            store = ControlStore(db_path)
+            class DynamicLLM:
+                def __init__(self):
+                    self.calls = 0
+                def generate_content(self, prompt):
+                    self.calls += 1
+                    return json.dumps({"intent": "approve"})
+
+            llm_inst = DynamicLLM()
+            mgr = SimpleNamespace(memory=mem, store=store, state=SimpleNamespace(db_path=db_path),
+                                  voice_services=None, heart=MagicMock(), llm=llm_inst)
+            coord = Coordinator(mgr, MagicMock())
+            sid = 'conv_fast_path'
+            art_code = b"print('ok')"
+            art_hash = hashlib.sha256(art_code).hexdigest()
+            art_path = f"{tmpdir}/art.py"
+            Path(art_path).write_bytes(art_code)
+
+            task = store.create(
+                'owner:user1', 'ejecutar accion',
+                state='WAITING_APPROVAL',
+                conversation_id=sid,
+                artifact=art_path,
+                artifact_hash=art_hash,
+                approval={'token': 'tok4', 'operation': None, 'expires': time.time() + 60, 'artifact_hash': art_hash},
+                deadline=time.time() + 1800
+            )
+            qid = coord.conversations.question(sid, 'execution', task['id'], task['revision'], 'WAITING_APPROVAL')
+            coord.conversations.delivered(sid, 'deliv_4', '¿Apruebas?', question_id=qid)
+
+            res = coord.handle_reply('owner:user1', 'y', sid)
+            self.assertTrue(res.handled)
+            self.assertEqual(res.text, 'Ejecución autorizada.')
+            self.assertEqual(llm_inst.calls, 0)
+
+    def test_skill_canonical_version_format_and_archive(self):
+        from app.hand.hand import Hand
+        from app.pixy.pixy import PixyMind
+        from app.kernel.events import Events
+        from pathlib import Path
+        from types import SimpleNamespace
+        import json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            events = Events(root / 'events.sqlite3')
+            mock_llm = MagicMock()
+            mock_llm.generate_content.return_value = json.dumps({'safe': True, 'requires_approval': False})
+            pixy = PixyMind(SimpleNamespace(llm=mock_llm, telegram=MagicMock(), audit_db=root / 'pixy_audit.sqlite3'))
+            hand = Hand(root / 'skills', pixy, events, str(root / 'hand.sqlite3'))
+
+            code = '# MODE: SAFE\ndef main():\n    return 42\n'
+            manifest = {'purpose': 'compute', 'capabilities': []}
+
+            # Version 1 -> .001
+            v1 = hand.create('calc-tool', code, manifest)
+            self.assertEqual(v1['version_number'], '.001')
+            hand.approve(v1['version_id'], user_approved=True)
+
+            # Version 2 -> .002
+            v2 = hand.create('calc-tool', code + '\n# v2', manifest)
+            self.assertEqual(v2['version_number'], '.002')
+            hand.approve(v2['version_id'], user_approved=True)
+
+            # Verify v1 archive has format calc-tool.001.zip
+            v1_row = hand.version(v1['version_id'])
+            self.assertEqual(v1_row['status'], 'archived')
+            self.assertEqual(v1_row['archive_name'], 'calc-tool.001.zip')
+            self.assertTrue((root / 'skills' / 'calc-tool.001.zip').exists())
+
+            # Rollback to v1 creates version .003 with restored_from pointing to v1
+            v3 = hand.rollback(v1['version_id'], user_approved=True)
+            self.assertEqual(v3['version_number'], '.003')
+            self.assertEqual(v3['status'], 'active')
+            self.assertEqual(v3['restored_from_version_id'], v1['version_id'])
 
 
 if __name__ == '__main__':

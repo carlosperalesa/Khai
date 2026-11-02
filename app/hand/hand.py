@@ -517,9 +517,12 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 shutil.rmtree(draft)
             current = self.active(name)
             with connection(self.db) as conn:
-                count = conn.execute('SELECT COUNT(*) FROM versions WHERE skill_name=?',(name,)).fetchone()[0]
+                used = {r[0] for r in conn.execute('SELECT version_number FROM versions WHERE skill_name=?',(name,))}
             vid = uuid.uuid4().hex
-            number = version_number or 'v'+str(count+1)
+            n = 1
+            while f".{n:03d}" in used:
+                n += 1
+            number = version_number or f".{n:03d}" 
             op = self._operation('update' if current else 'create',name,current and current['version_id'],vid,correlation_id)
             try:
                 draft.mkdir()
@@ -636,11 +639,11 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                 raise ValueError('Immutable archive has changed')
             return
         n = 1
-        while (self.root/f"{v['skill_name']}{n:03d}.zip").exists():
+        while (self.root/f"{v['skill_name']}.{n:03d}.zip").exists() or (self.root/f"{v['skill_name']}{n:03d}.zip").exists():
             n += 1
         if n>999:
             raise ValueError('Three-digit archive namespace exhausted; no files removed')
-        path = self.root/f"{v['skill_name']}{n:03d}.zip"
+        path = self.root/f"{v['skill_name']}.{n:03d}.zip"
         with zipfile.ZipFile(path,'x',zipfile.ZIP_DEFLATED) as z:
             for part in ('app','data','other'):
                 z.writestr(v['skill_name']+'/'+part+'/',b'')
@@ -744,13 +747,19 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         current = self.active(v['skill_name'])
         number = None
         if rollback and current:
-            base = current['version_number'].split('.')[0]
             with connection(self.db) as conn:
                 used = {r[0] for r in conn.execute('SELECT version_number FROM versions WHERE skill_name=?',(v['skill_name'],))}
-            n = 1
-            while base+'.'+str(n) in used:
-                n += 1
-            number = base+'.'+str(n)
+            if current['version_number'].startswith('v'):
+                base = current['version_number'].split('.')[0]
+                n = 1
+                while base+'.'+str(n) in used:
+                    n += 1
+                number = base+'.'+str(n)
+            else:
+                n = 1
+                while f".{n:03d}" in used:
+                    n += 1
+                number = f".{n:03d}" 
         with zipfile.ZipFile(path) as z:
             code = z.read(v['skill_name']+'/app/main.py').decode('utf-8')
             draft = self.create(v['skill_name'],code,json.loads(v['manifest']),restored_from=vid,version_number=number)

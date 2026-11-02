@@ -4,7 +4,7 @@ Continuidad ya comprobada en el servidor: Nano respondió durante la carga de lo
 
 Continuidad de modelos implementada y en validación: `/mode <perfil>` devuelve un ID y prepara el cambio en segundo plano; `/mode cancel` o `/stop` lo cancelan. Brain conserva el servicio actual o confirma Nano antes de reemplazar la VM compartida. Si Nano falla, solicita elegir un perfil; no arranca otros automáticamente. El contrato de Mind usa el esquema nativo de Ollama y separa la orden actual del historial. Estado real de despliegue y pruebas en [CHECKPOINT](./CHECKPOINT.md).
 
-Validación local consolidada: 373 pruebas y 39 subpruebas aprobadas. Todas aprobadas; incluye el enmascaramiento de mensajes internos, precisión diagnóstica y normalización canónica en descriptores de servicios, serialización universal de firmas de herramientas y fallback reactivo. Los fixtures de modelos no sustituyen la aceptación real.
+Validación local consolidada: 389 pruebas y 39 subpruebas aprobadas. Todas aprobadas; incluye el enmascaramiento de mensajes internos, precisión diagnóstica y normalización canónica en descriptores de servicios, serialización universal de firmas de herramientas y fallback reactivo. Los fixtures de modelos no sustituyen la aceptación real.
 
 El propietario aprobó el [diario común de interacciones](./docs/COMMON_JOURNAL.md). La implementación enlaza modelos, chat, Hand, Pixy, Heart, informes y uso de skills mediante ciclos y eventos persistentes; `/p informe <ID>` consulta una rama sin iniciar reparación. Validación y despliegue de esta continuación se registran en CHECKPOINT.
 
@@ -32,14 +32,14 @@ La skill [`web-search`](./skills/web-search/SKILL.md) usa Brave Search API media
 
 El código `f4c845d`, desplegado el 31 de octubre, incluye mejoras de diagnóstico y verificación, herramientas básicas de Hand y Brave. La suite local pasó 273 pruebas y 22 subpruebas; la salud HTTPS, SQLite y ejecución real de búsqueda se verificaron en producción. Las evidencias están en `CHECKPOINT.md` y `docs/VALIDATION.md`; las transiciones cancelables entre modelos permanecen pendientes de implementación.
 
-La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (384 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
+La infraestructura del sistema se valida mediante pruebas de integridad locales en 8 suites canónicas (389 pruebas unitarias y 39 subpruebas aprobadas), mientras que su aceptación funcional se rige por recorridos conversacionales reales en producción documentados en [`docs/VALIDATION.md`](./docs/VALIDATION.md).
 
 ---
 
 ## Órganos del Sistema
 
 - **Mind / Brain:** Mind interpreta el lenguaje natural y actúa como el **wrapper humano bidireccional** del sistema: erradica la amnesia conversacional en preguntas de alcance (`scope`), controla el perfil y la base de conocimiento del usuario (idioma, ciudad base, unidades métricas), deduce parámetros contextuales evitando preguntas redundantes, humaniza las consultas de alcance y traduce las salidas técnicas (eliminando coletillas de auditoría como `(y/n)`) en respuestas fluidas. Además, conecta con Heart mediante la herramienta `report_issue` para registrar quejas y discrepancias semánticas como incidentes cognitivos. Incorpora **Brain** (`app/mind/brain/`) para coordinar el razonamiento profundo, la selección de modelos, la cascada de inferencia y el ciclo de vida de nodos acelerados.
-- **Hand:** Ciclo activo de herramientas persistente; investiga, construye código, valida esquemas, repara y evoluciona skills (creando versiones incrementales v2, v3 en sandbox sin red bajo el Protocolo de Evolución de Khai).
+- **Hand:** Ciclo activo de herramientas persistente; investiga, construye código, valida esquemas, repara y evoluciona skills bajo el estándar canónico de versionado de 3 dígitos (.001, .002, .003 y rollback correlativo desde zip en sandbox sin red bajo el Protocolo de Evolución de Khai).
 - **Pixy:** Custodia de gobernanza, autoridad, secretos, contratos y administración de nivel Root (personalidad en `agent.md` y directivas en `dynamic_guidelines`); solicita confirmación binaria explícita (`y`/`n`) para cualquier modificación root, efecto externo o costo.
 - **Heart:** Diagnóstico profundo ante fallos técnicos (`CoreEyes`) y autopsias cognitivas ante discrepancias semánticas (`cognitive_discrepancy`), emitiendo órdenes de evolución de habilidades (`evolve_skill`) hacia Hand.
 - **Voice:** Concentra el acceso a redes externas, gestión segura de secretos y puntos de enlace de mensajería (Telegram).
@@ -75,7 +75,7 @@ Khai opera bajo un esquema desacoplado y complementario:
 ```bash
 make start      # Inicia el sistema Khai
 make stop       # Detiene el sistema Khai
-make test       # Ejecuta las 8 suites de pruebas unitarias canónicas (362 pruebas)
+make test       # Ejecuta las 8 suites de pruebas unitarias canónicas (389 pruebas)
 make stats      # Verifica la integridad de las bases de datos SQLite
 make clean      # Limpia archivos temporales y logs respetando .venv
 ```

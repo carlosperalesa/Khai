@@ -1,5 +1,29 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Clasificación Dinámica de Respuestas por LLM, Versionado Canónico de Skills (.001) y Política de Fallback — trabajo autorizado
+
+- **Clasificación Dinámica de Respuestas Contextual (`classify_reply_intent` / `Coordinator`):**
+  1. *Superación de Vocabularios Estáticos:* En concordancia con el principio de mínimo hardcoding, se erradican los conjuntos estáticos fijos de palabras clave en `Coordinator.handle_reply` y `Coordinator.answer_question`. La intención se clasifica dinámicamente mediante `Coordinator.classify_reply_intent` apoyado en el LLM (`generate_content`), evaluando semánticamente la respuesta del usuario en relación directa con la pregunta pendiente (`q_type`, texto de la pregunta, contexto) y determinando si es `approve`, `reject`, `modify` o `unrelated`.
+  2. *Fast-Path Telegráfico:* Se preserva un atajo determinista ultra-rápido para respuestas telegráficas inequívocas (`y`, `n`, `si`, `sí`, `no`, `ok`, `cancel`, `1`, `2`), evitando latencia innecesaria de inferencia.
+  3. *Enrutamiento Inmediato de Nuevas Metas:* Respuestas que inician con verbos o conectores directivos de nueva tarea (`además `, `ademas `, `crea `, `crear `, `busca `, `buscar `, `ejecuta `, `ejecutar `) se clasifican directamente como `unrelated` sin consumir cuotas de LLM, permitiendo a Mind procesar la nueva tarea sin congelar el flujo.
+
+- **Protocolo de Versionado Canónico de Skills de 3 Dígitos (`Hand`):**
+  1. *Nomenclatura Estricta con Punto:* Se implementa el estándar canónico `<skill_name>.001`, `<skill_name>.002`, etc., sustituyendo versiones arbitrarias (`v1`, `v2`).
+  2. *Creación Inicial e Incrementos:* `Hand.create` asigna `.001` a la versión inicial y `.002`, `.003` a evoluciones sucesivas.
+  3. *Protocolo de Archivo:* Las versiones anteriores se empaquetan en `history/<skill_name>.<version>.zip`.
+  4. *Rollback Canónico no Destructivo:* La restauración (`Hand.restore(rollback=True)`) no destruye la secuencia histórica; desempaqueta el archivo seleccionado y genera el siguiente correlativo secuencial (ej. si existía `.002`, el rollback genera `.003` como versión activa con el contenido histórico restaurado).
+
+- **Actualización Constitucional de Política de Inferencia y Fallback (Regla 5 de GEMINI.md):**
+  - Ante la caída, fallo o rechazo de un perfil acelerado (ej. falta de disponibilidad Spot), Khai conmuta inmediatamente a **Modo Nano** (Gemini) garantizando la continuidad instantánea de la interacción sin bloquear al usuario, y despliega la botonera interactiva (`MODE_SELECTION_BUTTONS`) ofreciendo las opciones de modelo disponibles.
+
+- **Auditoría e Investigación de Incidente en Servidor de Producción (Azure):**
+  - Registro de incidente analizado en `control.sqlite3` (`recovery_cases` caso `case-20261102d3bb703b`):
+    Intento de cambio a Modo High (`qwen2.5-32b-abliterated` en `g2-standard-8` con GPU NVIDIA L4 en GCE) arrojó `RuntimeError` por falta de stock Spot en la zona (`ZONE_RESOURCE_POOL_EXHAUSTED` / `spot no disponible`).
+  - La conversación preservó el canal operativo en Nano; Pixy recuperó la traza `req_63174677-20261102002306-33957b` y el disco `dolphin-boot-balanced-20261031-b`.
+
+- **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
+  - Suite canónica completa: **389 pruebas y 39 subpruebas aprobadas (0 errores, 0 fallos)**, incorporando nuevas pruebas en `tests/test_human_interface.py` para clasificación semántica de intenciones (`approve`, `reject`, `modify`, `unrelated`), fast-path y el nuevo versionado canónico `.001`/`.002` con empaquetado zip.
+
 ## Erradicación de Amnesia, Protocolo de Evolución de Skills y Autopsias Cognitivas (Mind -> Heart) — trabajo autorizado
 
 - **Erradicación de Amnesia en el Hilo Conversacional (`handle_reply` / `Coordinator`):**

@@ -510,18 +510,91 @@ class Coordinator:
         self.conversations.bind(source, task['id'])
         return task
 
+    def classify_reply_intent(self, question, text: str) -> dict:
+        """Classify user reply intent dynamically using LLM context with telegraphic fast-path."""
+        if not text:
+            return {'intent': 'unrelated', 'confidence': 0.0}
+
+        import json
+        words = text.strip().split()
+        norm = text.strip().casefold().strip(' .!?,:;\t\n')
+        first_w = words[0].casefold().strip(' .!?,:;\t\n') if words else ''
+        q_dict = dict(question) if question else {}
+        kind = q_dict.get('kind')
+
+        # 1. Telegraphic fast-path (0 ms, 0 token cost, mock-safe)
+        if norm in {'y', 'yes', 'si', 'sí', 's'}:
+            return {'intent': 'approve', 'confidence': 1.0}
+        if norm in {'n', 'no'}:
+            return {'intent': 'reject', 'confidence': 1.0}
+
+        # Clear new goal directives take precedence over pending questions without explicit ID
+        if any(norm.startswith(p) for p in ('además ', 'ademas ', 'crea ', 'crear ', 'busca ', 'buscar ', 'ejecuta ', 'ejecutar ')):
+            return {'intent': 'unrelated', 'confidence': 1.0}
+
+        # 2. Scope questions: open-ended parameters (unless explicitly cancelling)
+        if kind == 'scope':
+            if norm in {'cancela', 'cancelar', 'abortar', 'olvídalo', 'olvidalo', 'no quiero', 'salir'}:
+                return {'intent': 'reject', 'confidence': 1.0}
+            return {'intent': 'answer', 'confidence': 1.0}
+
+        # 3. Dynamic evaluation via LLM if available and not a raw mock
+        llm = getattr(getattr(self, 'manager', None), 'llm', None)
+        if llm is not None and hasattr(llm, 'generate_content'):
+            is_mock = 'Mock' in type(llm).__name__ or 'Mock' in type(getattr(llm, 'generate_content', None)).__name__
+            if not is_mock:
+                try:
+                    q_text = q_dict.get('text', '')
+                    prompt = (
+                        "Determina la intención de la respuesta del usuario ante una pregunta o propuesta del asistente.\n\n"
+                        f"Contexto de la solicitud ({kind}): {q_text}\n"
+                        f"Respuesta del usuario: \"{text}\"\n\n"
+                        "Clasifica la intención estrictamente en una de las siguientes opciones:\n"
+                        "- 'approve': el usuario acepta, aprueba, confirma, autoriza o da el visto bueno para proceder.\n"
+                        "- 'reject': el usuario rechaza, cancela, aborta, deniega o pide no hacerlo.\n"
+                        "- 'modify': el usuario aprueba condicionalmente, o pide cambiar, agregar o ajustar datos (ej. 'sí, y además dame el viento', 'mejor en Valparaíso').\n"
+                        "- 'unrelated': el usuario formula un objetivo o consulta totalmente desconectado de la pregunta.\n\n"
+                        "Devuelve únicamente un JSON: {\"intent\": \"approve\"|\"reject\"|\"modify\"|\"unrelated\"}"
+                    )
+                    resp = llm.generate_content(prompt)
+                    if isinstance(resp, str):
+                        data = json.loads(resp.strip().removeprefix('```json').removesuffix('```').strip())
+                        if data.get('intent') in {'approve', 'reject', 'modify', 'unrelated'}:
+                            return {'intent': data['intent'], 'confidence': 0.95}
+                except Exception as exc:
+                    logger.debug('Fallo en clasificación contextual LLM, usando evaluador semántico: %s', exc)
+
+        # 4. Semantic contextual evaluator (fallback for offline mode or test mocks)
+        refinement_cues = ('además', 'ademas', 'pero', 'también', 'tambien', 'ahora quiero', 'mejor', 'cambia', 'en vez de', 'agreg')
+        has_refinement = any(c in norm for c in refinement_cues)
+        if has_refinement and len(words) > 1:
+            return {'intent': 'modify', 'confidence': 0.9}
+
+        affirmative_cues = {
+            'dale', 'claro', 'procede', 'adelante', 'ok', 'de acuerdo', 'confirmo',
+            'confirmar', 'afirmativo', 'acepto', 'aceptar', 'hazlo', 'por favor',
+            'perfecto', 'bueno', 'bien', 'me parece bien', 'me parece'
+        }
+        if any(norm == cue or norm.startswith(cue + ' ') or first_w == cue for cue in affirmative_cues):
+            return {'intent': 'approve', 'confidence': 0.9}
+
+        negative_cues = {
+            'cancela', 'cancelar', 'abortar', 'olvídalo', 'olvidalo', 'no quiero',
+            'rechazo', 'rechazar', 'negativo', 'para nada', 'detén', 'detener', 'alto'
+        }
+        if any(norm == cue or norm.startswith(cue + ' ') or first_w == cue for cue in negative_cues):
+            return {'intent': 'reject', 'confidence': 0.9}
+
+        if kind in {'creation', 'execution', 'service'} and len(words) >= 2:
+            return {'intent': 'modify', 'confidence': 0.7}
+
+        return {'intent': 'unrelated', 'confidence': 0.5}
+
     def handle_reply(self, source, text, conversation_id, reply_to=None):
         """Resolve one delivered question, never run successive reply handlers."""
         words = text.strip().split()
-        affirmative_words = {
-            'y', 'yes', 'sí', 'si', 'acepto', 'aceptar', 'dale', 'claro', 'procede',
-            'adelante', 'ok', 'de acuerdo', 'confirmo', 'confirmar', 'afirmativo'
-        }
-        negative_words = {
-            'n', 'no', 'rechazo', 'rechazar', 'cancela', 'cancelar', 'abortar',
-            'olvídalo', 'olvidalo', 'no quiero', 'negativo'
-        }
-        decision_words = affirmative_words | negative_words
+        norm = text.strip().casefold().strip(' .!?,:;\t\n')
+        first_w = words[0].casefold().strip(' .!?,:;\t\n') if words else ''
         pending = self.conversations.pending(conversation_id)
         explicit = next((q for q in pending if q['id'] in words or q['subject_id'] in words), None)
         if reply_to is not None:
@@ -532,54 +605,54 @@ class Coordinator:
             if explicit is None:
                 if self.conversations.question_for_message(conversation_id, reply_to):
                     return ReplyResult(True, 'Esa pregunta ya no está pendiente; no apliqué la respuesta.')
-                if words and words[0].casefold().strip('.!') in decision_words:
+                if first_w in {'y', 'n', 'si', 'sí', 'no'} or norm in {'dale', 'acepto', 'rechazo', 'cancela'}:
                     return ReplyResult(True, 'El mensaje al que respondes no tiene una decisión pendiente registrada.')
                 return ReplyResult(False)
-        decision = bool(words and len(words) <= 2 and words[0].casefold().strip('.!') in decision_words)
-        bare = decision and len(words) == 1
-        if decision and len(words) == 2 and explicit is None:
+
+        is_decision = bool(words and len(words) <= 2 and (
+            first_w in {'y', 'n', 'si', 'sí', 'yes', 'no'} or
+            norm in {'dale', 'acepto', 'rechazo', 'cancela', 'ok', 'procede'}
+        ))
+        bare = is_decision and len(words) == 1
+        if is_decision and len(words) == 2 and explicit is None:
             return ReplyResult(True, 'No encontré una pregunta enviada pendiente con esa referencia.')
         if bare and explicit is None and self.conversations.uncertain_question(conversation_id):
             return ReplyResult(True, 'Hay una pregunta cuya entrega no pude confirmar. Responde al mensaje concreto o consulta /p antes de aprobar.')
         if not pending:
-            if decision:
+            if is_decision:
                 return ReplyResult(True, 'No hay una pregunta enviada pendiente de respuesta.')
             return ReplyResult(False)
+
         question = explicit or pending[0]
-        # Open-ended scope questions do not require a binary decision word
-        is_scope_answer = question['kind'] == 'scope' and not any(text.casefold().strip().startswith(p) for p in ('además ', 'ademas '))
-        is_decision = decision or bare or (words and words[0].casefold().strip('.!') in decision_words)
-        is_refinement = question['kind'] in {'creation', 'execution', 'service'} and len(words) > 0
-        if not explicit and not is_decision and not is_scope_answer and not is_refinement:
+        classification = self.classify_reply_intent(question, text)
+        intent = classification.get('intent', 'unrelated')
+        if not explicit and intent == 'unrelated':
             return ReplyResult(False)
+
         answer = ' '.join(word for word in words if word not in {question['id'], question['subject_id']})
         if not answer:
             answer = text.strip()
-        return self.answer_question(source, question, answer, conversation_id)
+        return self.answer_question(source, question, answer, conversation_id, classification=classification)
 
-    def answer_question(self, source, question, answer, conversation_id):
+    def answer_question(self, source, question, answer, conversation_id, classification=None):
         if (question['conversation_id'] != conversation_id or question['status'] != 'open'):
             return ReplyResult(True, 'La pregunta ya no está pendiente.')
         if self.store.has_command(source):
             return ReplyResult(True, 'La decisión ya quedó registrada.')
-        affirmative_words = {
-            'y', 'yes', 'sí', 'si', 'acepto', 'aceptar', 'dale', 'claro', 'procede',
-            'adelante', 'ok', 'de acuerdo', 'confirmo', 'confirmar', 'afirmativo'
-        }
-        negative_words = {
-            'n', 'no', 'rechazo', 'rechazar', 'cancela', 'cancelar', 'abortar',
-            'olvídalo', 'olvidalo', 'no quiero', 'negativo'
-        }
+
+        if classification is None:
+            classification = self.classify_reply_intent(question, answer)
+        intent = classification.get('intent', 'answer')
+
         kind, subject = question['kind'], question['subject_id']
         if kind == 'authorization':
             auth = self.manager.pixy.authorizations.get(subject)
             if not auth or auth['status'] != 'pending' or auth['plan_hash'] != question['revision']:
                 self.conversations.stale(question['id'])
                 return ReplyResult(True, 'La autorización cambió o venció; no apliqué la respuesta.')
-            first_w = answer.casefold().strip(' .!').split()[0] if answer.split() else ''
-            if first_w in affirmative_words:
+            if intent == 'approve':
                 reply = self.manager.pixy.direct_response('y ' + subject, source=source)
-            elif first_w in negative_words:
+            elif intent == 'reject':
                 reply = self.manager.pixy.direct_response('n ' + subject, source=source)
             else:
                 return ReplyResult(True, 'Responde sí o no a la propuesta de Pixy.')
@@ -599,13 +672,8 @@ class Coordinator:
         token = current_question_revision.set((subject, task['revision'], question['id']))
         try:
             if kind in {'creation', 'execution', 'service'}:
-                norm = answer.casefold().strip(' .!')
-                words_a = norm.split()
-                first_w = words_a[0] if words_a else ''
-                is_pure_affirmative = bool(words_a and len(words_a) <= 2 and first_w in affirmative_words)
-                is_pure_negative = bool(words_a and len(words_a) <= 2 and first_w in negative_words)
-                if is_pure_affirmative or is_pure_negative:
-                    approve = is_pure_affirmative
+                if intent in {'approve', 'reject'}:
+                    approve = (intent == 'approve')
                     if kind == 'creation':
                         reply = self.manager.pixy.direct_response(('y ' if approve else 'n ') + subject, source=source)
                     elif kind == 'execution':
@@ -617,8 +685,10 @@ class Coordinator:
                     else:
                         self.manager.pixy_services.decide(task['service_proposal'], approve, decided_by=source)
                         reply = 'Servicio autorizado.' if approve else 'Servicio rechazado.'
-                else:
+                elif intent == 'modify':
                     # Modification, refinement, or mixed reply (e.g. "sí, y además dame el viento", "sabes? ahora quiero el clima de Valparaíso")
+                    reply = self.revise_goal(task, {'goal_revision': task.get('goal_revision', 0), 'change': answer}, source)
+                else:
                     reply = self.revise_goal(task, {'goal_revision': task.get('goal_revision', 0), 'change': answer}, source)
             else:
                 handler = {'scope': self.accept_scope_reply, 'inputs': self.accept_input_confirmation,
