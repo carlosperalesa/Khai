@@ -94,3 +94,13 @@ Actualización del 31 de octubre: la nueva capacidad de búsqueda es el candidat
      - Internacional y conflictos (emboscada en Haití, cancelación de foto en el G20 por presencia rusa, elecciones en Israel).
      - Ciencia y descubrimientos (posible planeta enano más allá de Plutón, estudio de meteoritos antiguos de la NASA).
   5. Cierre y confirmación: Presentación clara y profesional ofreciendo profundizar en cualquiera de las noticias y confirmada exitosamente con `si` (`id: 426`).
+# Validación del 4 de noviembre de 2026: estado conservado
+
+- Revisión final: 432 pruebas y 39 subpruebas aprobadas en Windows/Python 3.12 (287,56 s) y Linux/Python 3.10 (203,47 s). Linux sin red ni datos productivos, con los archivos finales montados en lectura sobre la imagen de pruebas derivada del despliegue.
+- Core y proxy arrancaron con las migraciones nuevas; salud HTTPS HTTP 200 y trece hashes protegidos conservados. Dos primitivas acreditadas por manifiesto. Las bases y respaldos originales permanecen presentes.
+- Conversación Nano real y búsqueda Brave real aprobadas. Búsqueda `task_68447803cd9c45fabe8d07bc2657392e`, run `run_21ccd6a988164a29bf04f411b3183642`: COMPLETED, una ejecución, cobertura verificada y revisión sintética explícita autorizada. Dreams registró una experiencia de éxito con ese run.
+- High falló por falta de capacidad Spot. Nano fue comprobado; se entregó aviso y selección de modelos. No se cambió de zona, presupuesto ni proveedor para evitar el fallo.
+- Parser: CSV sintético independiente ejecutado sin red ni datos productivos; `alpha=42`. No acredita entrega de adjuntos Telegram.
+- Creación sintética: rechazo del proveedor antes del worker; Heart recibió el fallo y Dreams registró routing sin run. La regresión final conserva LLMContentRejected antes de existir propuesta. Creación y recuperación conversacionales completas siguen pendientes; no se declara aceptación integral.
+- Telegram: 49 identificadores solicitados, un lote aceptado, cero lotes rechazados, 436 fuera de ventana. No se verificaron eliminaciones individuales. Los mensajes de aceptación posteriores permanecen.
+- Purga: validación offline de ocho bases aprobada; aplicación bloqueada por revisión automática. El propietario eligió conservar el estado y recibir [el comando manual](HISTORY_RESET_MANUAL.md). No se eliminaron bases, respaldos ni imágenes históricas.

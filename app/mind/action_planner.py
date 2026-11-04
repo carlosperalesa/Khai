@@ -239,6 +239,11 @@ class ActionPlanner:
         try:
             return self._propose(request, compatible, correction_context, conversation_context, task_context)
         except (ValueError, TypeError, KeyError) as exc:
+            # No proposal exists when inference or catalogue access failed.
+            # Preserve the original cause; only returned model data can violate
+            # the planner contract.
+            if _proposal_raw.get() is None:
+                raise
             evidence = None
             recorder = getattr(self.llm, 'record_contract_failure', None)
             if callable(recorder) and _proposal_raw.get() is not None:

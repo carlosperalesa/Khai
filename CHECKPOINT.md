@@ -1,5 +1,20 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Despliegue con estado conservado — 4 de noviembre de 2026
+
+Decisión vigente del propietario: desplegar las correcciones, conservar el estado y entregar el comando manual. La revisión automática rechazó la eliminación irreversible; **no se ejecutó la purga**. Las entradas anteriores que la describen como próxima operación quedan sustituidas por esta decisión. Procedimiento y alcance pendiente en [docs/HISTORY_RESET_MANUAL.md](docs/HISTORY_RESET_MANUAL.md).
+
+- Versión base 2bb6347 activada en Core y proxy; arranque correcto y salud HTTPS HTTP 200 con certificado verificado. Imagen nueva inspeccionada sin respaldos ni archivos de credenciales. La revisión posterior conserva la causa de rechazos previos a una propuesta. Las bases, respaldos, imágenes históricas y cachés permanecen conservados.
+- Migraciones aplicadas: dos versiones clasificadas como primitivas por hashes del manifiesto; cuatro versiones históricas permanecen legacy. Los trece archivos protegidos coinciden con el baseline. Antes de añadir las pruebas sintéticas se conservaron las 75 tareas, 613 mensajes, 35 autorizaciones y 13 órdenes originales.
+- Simulación offline validada en el host: ocho bases reconstruidas, tres skills y 23 archivos conservables; 187 archivos removibles según ese inventario. Solo se validó: no se sustituyó ninguna base ni se eliminó ningún respaldo.
+- Telegram: 485 identificadores conocidos; 436 fuera de ventana; 49 solicitados en un lote aceptado, sin rechazos. No hay acreditación individual ni vaciado completo; los mensajes sintéticos posteriores no pertenecen a ese lote.
+- Aceptación real: conversación Nano respondió `VALIDACION NANO OK`. High, interacción `telegram:1793801652574`, falló por falta de capacidad Spot; Nano fue comprobado y se entregaron botones de selección. No había transiciones activas al finalizar esa prueba.
+- Búsqueda real Brave: tarea `task_68447803cd9c45fabe8d07bc2657392e`, ejecución `run_21ccd6a988164a29bf04f411b3183642`, una única ejecución, cobertura verificada y cierre COMPLETED tras revisión sintética explícita `telegram:1793802148919`. La revisión forma parte de la aceptación autorizada; no es una respuesta espontánea del propietario. Quince entregas de estas pruebas confirmadas en outbox, sin pendientes en ese corte.
+- Lectura documental: parser ejecutado con CSV independiente en worker sin red ni datos productivos; salida contrastada `alpha=42`. Esta prueba aislada no acredita recepción de un documento mediante Telegram.
+- Creación conversacional sintética `task_bb5dab809a5d4d7f845a618567743a2e` bloqueada por rechazo del proveedor, sin worker ni candidata promovida. Se detectó una pérdida de causa: el planificador envolvía LLMContentRejected en PlannerContractError aun sin respuesta. La corrección preserva el tipo original antes de disponer de una propuesta; la regresión acredita clasificación provider_rejected. No se acredita creación/evolución/recuperación completa en producción con esta prueba.
+- Validación final: **432 pruebas y 39 subpruebas aprobadas**, Windows/Python 3.12 en 287,56 s y Linux/Python 3.10 en 203,47 s. La suite Linux usó la imagen de pruebas derivada del despliegue con los dos archivos finales montados en lectura, sin red ni datos productivos. Los recorridos de creación, reparación y aprendizaje tienen cobertura automatizada, pero la aceptación conversacional completa de creación y recuperación sigue pendiente por la condición del proveedor. No se declara cumplida la aceptación integral del plan.
+- Dreams conserva exactamente una experiencia de éxito para la búsqueda, con tarea y run reales, y una experiencia de fallo de creación en etapa routing, sin run. No se promovieron políticas ni se repitió el worker para evaluar su evidencia.
+
 ## Reparación, primitivas y purga selectiva — 4 de noviembre de 2026
 
 Trabajo solicitado por el propietario sobre f2036b3. Implementación y validación previa completadas en 82967a6; esta entrada no acredita todavía despliegue ni purga de producción.

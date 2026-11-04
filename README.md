@@ -2,6 +2,10 @@
 
 La reparación del 4 de noviembre incorpora decisiones activadas tras la entrega, verificación de objetivos con estado indeterminado, diagnósticos tipados y procedencia de habilidades. Búsqueda web y lectura de documentos son primitivas protegidas; Hand puede crear derivadas con otra identidad. Las suites completas de desarrollo y de la imagen Linux están verificadas; la aceptación de despliegue se registra en CHECKPOINT.
 
+Las correcciones están desplegadas con el estado conservado, por decisión del propietario tras el bloqueo automático de la eliminación irreversible. La purga no se ejecutó; su [comando manual y alcance pendiente](docs/HISTORY_RESET_MANUAL.md) están documentados. Conversación Nano y búsqueda Brave verificadas en producción; High no dispuso de capacidad Spot y la creación sintética fue rechazada por el proveedor. La aceptación integral de creación y recuperación permanece pendiente. El planificador preserva ese rechazo original cuando no existe propuesta, en lugar de inventar un fallo contractual.
+
+Validación final de la revisión: **432 pruebas y 39 subpruebas** aprobadas tanto en Windows/Python 3.12 como en Linux/Python 3.10, sin datos productivos en los contenedores de pruebas.
+
 El reinicio administrativo conserva identidad, secretos, configuración, preferencias, conocimiento depurado, habilidades y aprobación técnica de sus hashes. Elimina historial operativo y respaldos. La limpieza de Telegram usa únicamente la API del bot: sus límites pueden dejar mensajes antiguos en Telegram.
 
 El contexto de las imágenes excluye datos de ejecución, respaldos, bases, archivos de credenciales y logs históricos. La herramienta de purga se ejecuta offline desde el host del proyecto.

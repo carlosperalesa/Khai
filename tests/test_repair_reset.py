@@ -129,6 +129,18 @@ class AuditedBehaviorTests(Fixture):
         self.assertEqual(failure.exception.diagnostic['id'], 'rejection_audit')
         self.assertIn('use_existing_skill', self.llm.record_contract_failure.call_args.args[1])
 
+    def test_planner_preserves_provider_rejection_before_any_proposal(self):
+        from app.voice.gateway.llm_gateway import LLMContentRejected
+        rejection = LLMContentRejected('Provider rejected synthetic request')
+        self.llm.generate_content.side_effect = rejection
+        planner = ActionPlanner(self.llm, SimpleNamespace(active=lambda: []))
+        with self.assertRaises(LLMContentRejected) as failure:
+            planner.propose('build example', lambda spec: True)
+        self.assertIs(failure.exception, rejection)
+        self.llm.record_contract_failure.assert_not_called()
+        self.assertEqual(Recovery.classify_cause({'stage': 'routing',
+            'error': type(failure.exception).__name__})[0], 'provider_rejected')
+
     def test_failed_local_and_nano_never_announce_nano_connected(self):
         from app.voice.gateway.llm_gateway import ModelUnavailable
         from tests.test_model_contract import ModelContractTests
