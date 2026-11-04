@@ -5,6 +5,17 @@ data/rendered
 data/audio
 data/videos
 *.tar.gz
+*.tgz
+backups
+*.sqlite3*
+*.db
+*.db-wal
+*.db-shm
+.ssh
+.codex
+.claude
+.gemini
+DEPLOYMENT_LOG.md
 .git
 .env
 *.env
