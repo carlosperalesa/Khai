@@ -645,7 +645,14 @@ class PixyMind:
             return 'No pude interpretar la respuesta de supervisión. No solicité credenciales ni ejecuté cambios.'
         except Exception as exc:
             logger.warning('Fallo LLM en PixyMind.direct_response (%s); entregando resumen determinista', type(exc).__name__)
-            return f"Pixy (modo contingencia sin LLM):\nTareas recientes:\n{tasks_summary}\n\nCasos de Heart:\n{cases_summary}"
+            parts = ["Pixy (modo contingencia sin LLM): El servicio de inferencia no respondi?, te comparto el estado directo del sistema:"]
+            if tasks_summary and "No hay tareas recientes" not in tasks_summary:
+                parts.append("Actividad reciente:\n" + tasks_summary)
+            else:
+                parts.append("Tareas recientes:\n" + tasks_summary)
+            if cases_summary and "Sin casos" not in cases_summary:
+                parts.append("Casos de Heart:\n" + cases_summary)
+            return "\n\n".join(parts)
 
     @staticmethod
     def _fallback_diagnosis_text(case, plan, auth):

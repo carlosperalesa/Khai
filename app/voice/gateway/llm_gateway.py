@@ -10,7 +10,7 @@ from typing import Dict
 from app.pixy.budget import current_budget
 
 logger = logging.getLogger("LLMManager")
-DEFAULT_GEMINI_MODEL = os.getenv('KHAI_GEMINI_MODEL', 'gemini-flash-lite-latest')
+DEFAULT_GEMINI_MODEL = os.getenv('KHAI_GEMINI_MODEL', 'gemini-2.5-flash')
 
 
 
@@ -202,7 +202,7 @@ class LLMManager:
             refs={'profile': 'nano', 'provider': 'gemini'}) if journal else nullcontext()
         with scope:
             result = self._nano_call('generate', 'Devuelve exactamente {"ready":true}.', None,
-                  {'response_format': {'type': 'json_object'}, 'temperature': 0, '_timeout': 15,
+                  {'response_format': {'type': 'json_object'}, 'temperature': 0, '_timeout': 5,
                    '_deadline': min(deadline or float('inf'), time.time() + 15)})
             if json.loads(result) != {'ready': True}:
                 raise ModelUnavailable('Nano no supero la comprobacion de disponibilidad.')
@@ -432,7 +432,7 @@ class LLMManager:
             payload['tools'] = [{'functionDeclarations': declarations}]
         
         models_to_try = [model]
-        for fallback_m in [DEFAULT_GEMINI_MODEL, 'gemini-flash-lite-latest', 'gemini-2.5-flash-lite', 'gemini-3.1-flash-lite']:
+        for fallback_m in [DEFAULT_GEMINI_MODEL, 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-3.1-flash-lite']:
             if fallback_m not in models_to_try:
                 models_to_try.append(fallback_m)
 
@@ -594,8 +594,9 @@ class LLMManager:
         models_to_try = [model_name]
         if model_name != DEFAULT_GEMINI_MODEL:
             models_to_try.append(DEFAULT_GEMINI_MODEL)
-        if 'gemini-3.1-flash-lite' not in models_to_try:
-            models_to_try.append('gemini-3.1-flash-lite')
+        for m_candidate in ('gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-3.1-flash-lite'):
+            if m_candidate not in models_to_try:
+                models_to_try.append(m_candidate)
 
         response = None
         for m in models_to_try:
