@@ -1,5 +1,9 @@
 # Khai
 
+La reparación del 4 de noviembre incorpora decisiones activadas tras la entrega, verificación de objetivos con estado indeterminado, diagnósticos tipados y procedencia de habilidades. Búsqueda web y lectura de documentos son primitivas protegidas; Hand puede crear derivadas con otra identidad. El estado de pruebas y despliegue se registra en CHECKPOINT.
+
+El reinicio administrativo conserva identidad, secretos, configuración, preferencias, conocimiento depurado, habilidades y aprobación técnica de sus hashes. Elimina historial operativo y respaldos. La limpieza de Telegram usa únicamente la API del bot: sus límites pueden dejar mensajes antiguos en Telegram.
+
 Khai es un agente autónomo y personal diseñado para investigar, construir, revisar, ejecutar y aprender capacidades reutilizables de forma segura, verificable y transparente. Opera bajo una arquitectura modular de órganos especializados (Mind, Hand, Pixy, Heart, Voice y Dreams) con aislamiento riguroso en Docker y salida exclusiva de red por Voice.
 
 > [!NOTE]

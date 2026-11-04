@@ -204,6 +204,16 @@ class Recovery:
             details = err_str
 
         low = details.lower()
+        error_type = str(failure_info.get('error_type') or '') if isinstance(failure_info, dict) else ''
+        if error_type == 'UnchangedRecoveryError' or 'unchangedrecoveryerror' in low:
+            return 'recovery_loop_detected', 'No cambió el código, las entradas ni los servicios del intento fallido'
+        if 'modelunavailable' in low or 'llm unavailable' in low or error_type == 'ModelUnavailable':
+            return 'model_unavailable', err_str or 'No hay inferencia disponible'
+        if 'llmcontentrejected' in low or error_type == 'LLMContentRejected':
+            return 'provider_rejected', err_str or 'Solicitud rechazada por el proveedor'
+        if isinstance(failure_info, dict) and failure_info.get('stage') == 'routing' and any(
+                name in low for name in ('typeerror', 'keyerror', 'attributeerror')):
+            return 'core_fault', err_str
 
         if isinstance(failure_info, dict) and failure_info.get('stage') == 'routing' and failure_info.get('diagnostic'):
             return 'invalid_result', err_str or 'Model response rejected by the routing contract'
@@ -250,7 +260,7 @@ class Recovery:
                 or (isinstance(failure_info, dict) and failure_info.get('kind') == 'cognitive_discrepancy'):
             return 'cognitive_discrepancy', err_str or 'Discrepancia semántica o resultado insatisfactorio corregido por el usuario'
 
-        return 'syntax_or_code', err_str or 'Fallo no especificado durante la ejecución'
+        return 'unknown', err_str or 'Causa no acreditada por la evidencia disponible'
 
     @staticmethod
     def _recipe_binding_evidence(task, failure_info=None):
@@ -392,7 +402,9 @@ class Recovery:
         self._move(case_id, 'COLLECTING_EVIDENCE', expected={'COLLECTING_EVIDENCE'}, evidence=evidence)
         try:
             with self.journal.activate(Journal.cycle_id('repair', case_id)):
-                diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail, 'task_id': task_id, 'task': task if isinstance(task, dict) else None})
+                diagnosis = self.diagnose(evidence, failure_override={'cause_code': cause_code, 'detail': detail,
+                    'task_id': task_id, 'skill_name': task.get('skill_name') if isinstance(task, dict) else None,
+                    'task': task if isinstance(task, dict) else None})
                 case = self._move(case_id, 'DIAGNOSED', expected={'COLLECTING_EVIDENCE'}, diagnosis=diagnosis)
                 plan = self.design(case_id, diagnosis)
         except Exception as exc:
@@ -646,7 +658,7 @@ class Recovery:
             findings.append(item)
 
         latest_failed = None
-        focus_task = evidence.get('focus_task')
+        focus_task = (failure_override or {}).get('task') or evidence.get('focus_task')
         if evidence.get('incident_scope') == 'model_transition' and not failure_override:
             brain = evidence.get('brain') or {}
             events = brain.get('recent_transitions', []) if isinstance(brain, dict) else []
@@ -680,12 +692,14 @@ class Recovery:
             tid = failure_override.get('task_id')
             skill_name = failure_override.get('skill_name')
             if cause_code == 'cognitive_discrepancy':
-                action = f'evolve_skill:{skill_name}' if skill_name else 'remediate_task'
+                action = 'evolve_skill' if skill_name else 'remediate_task'
             elif cause_code == 'budget_exhausted':
                 action = 'retry_task'
             else:
                 action = 'remediate_task'
-            remedy = f"{action}:{tid}" if (tid and not action.startswith('evolve_skill:')) else action
+            remedy = f"{action}:{tid}" if tid else None
+            if cause_code in {'model_unavailable', 'provider_rejected', 'core_fault', 'unknown', 'uncertain_effect', 'missing_credential', 'recovery_loop_detected'}:
+                remedy = None
             override_task = failure_override.get('task') or (focus_task if focus_task and focus_task.get('id') == tid else None)
             failure = (override_task or {}).get('result') or {}
             if (cause_code == 'temporary_provider' and failure.get('stage') == 'dependency_preparation'
@@ -760,7 +774,13 @@ class Recovery:
                 attempts = latest_failed.get('attempt_number', 1)
                 recovery_hist = latest_failed.get('recovery_history') or []
                 hand_fails = latest_failed.get('hand_failures', 0)
-                is_loop = (attempts >= 2 or len(recovery_hist) >= 1 or hand_fails >= 2)
+                current_failure = latest_failed.get('result') or {}
+                is_loop = bool(recovery_hist and any(
+                    old.get('artifact_hash') == latest_failed.get('artifact_hash')
+                    and old.get('version_id') == latest_failed.get('version_id')
+                    and old.get('params') == latest_failed.get('params')
+                    and old.get('result') == current_failure
+                    for old in recovery_hist)) or (hand_fails >= 2 and not latest_failed.get('feedback'))
 
                 is_coverage_or_capability = any(term in err_str.lower() for term in (
                     'cobertura', 'replantear capacidades', 'insuficiente', 'missing action'
@@ -776,18 +796,21 @@ class Recovery:
                     skill_id = latest_failed.get('skill_name') or 'skill'
                     add('cognitive_discrepancy', 'high',
                         f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') requiere evolución de capacidad: {err_str[:300]}.",
-                        remedy=f"evolve_skill:{skill_id}",
+                        remedy=f"evolve_skill:{latest_failed['id']}",
                         corrective_instruction=f"Evolucionar la capacidad para cubrir los requisitos faltantes: {err_str[:200]}",
                         task_binding_info=task_binding(latest_failed))
                 else:
                     add('task_failure', 'high',
                         f"La tarea {latest_failed['id']} ('{latest_failed.get('request', '')[:80]}') presentó estado {latest_failed['state']}: {err_str[:300]}.",
-                        remedy=f"retry_task:{latest_failed['id']}",
+                        remedy=(None if self.classify_cause(latest_failed.get('result') or {'error': err_str})[0]
+                                in {'model_unavailable', 'provider_rejected', 'core_fault', 'unknown', 'uncertain_effect', 'missing_credential'}
+                                else f"remediate_task:{latest_failed['id']}"),
                         task_binding_info=task_binding(latest_failed))
 
         scoped_evidence = {**evidence, 'core_logs': {**(evidence.get('core_logs') or {}), 'text': text}}
         prepared_resume = any(str(f.get('remedy') or '').startswith('resume_prepared_task:') for f in findings)
-        llm_diag = None if prepared_resume else self._llm_analyze_incident(scoped_evidence, findings, latest_task=latest_failed)
+        protected_cause = any(f['code'] in {'model_unavailable', 'provider_rejected', 'core_fault', 'unknown', 'recovery_loop_detected'} for f in findings) or bool(latest_failed and self.classify_cause(latest_failed.get('result') or {'error': latest_failed.get('error')})[0] in {'model_unavailable', 'provider_rejected', 'core_fault', 'unknown'})
+        llm_diag = None if prepared_resume or protected_cause else self._llm_analyze_incident(scoped_evidence, findings, latest_task=latest_failed)
         if isinstance(llm_diag, dict):
             instr = str(llm_diag.get('corrective_instruction') or '').strip()
             root_cause = str(llm_diag.get('root_cause') or '').strip()
@@ -862,7 +885,7 @@ class Recovery:
         task_remedy = next((f for f in remedies if f['remedy'].startswith(('remediate_task:', 'retry_task:', 'create_skill:', 'resume_prepared_task:', 'evolve_skill:'))), None)
         if task_remedy:
             action, tid = task_remedy['remedy'].split(':', 1) if ':' in task_remedy['remedy'] else (task_remedy['remedy'], 'none')
-            steps = [{'action': action, 'target': 'skill' if action.startswith('evolve_skill') else 'task'}]
+            steps = [{'action': action, 'target': 'task'}]
             from app.heart.catalog import task_binding
             binding = task_remedy.get('task_binding') or diagnosis.get('task_binding')
             if not binding:
@@ -884,6 +907,12 @@ class Recovery:
                 'corrective_instruction': instruction,
                 'proposed_steps': proposed,
             }
+            if action == 'evolve_skill':
+                observed = diagnosis.get('observed_task') or diagnosis.get('task') or {}
+                if observed.get('id') != tid or not all(observed.get(k) for k in ('skill_name', 'version_id', 'artifact_hash')):
+                    return None
+                plan['evolution'] = {'skill_id': observed['skill_name'], 'version_id': observed['version_id'],
+                    'artifact_hash': observed.get('skill_artifact_hash') or observed['artifact_hash'], 'requirements': instruction}
             validate_plan(plan)
             if instruction:
                 summary = f"Aplicar remediación técnica: {instruction[:240]}"

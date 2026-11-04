@@ -1,0 +1,70 @@
+{
+  "open_meteo": {
+    "service_id": "open_meteo",
+    "operation": "forecast",
+    "version": "v1",
+    "url": "https://api.open-meteo.com/v1/forecast",
+    "method": "GET",
+    "parameters": [
+      "latitude",
+      "longitude",
+      "daily",
+      "timezone"
+    ],
+    "content_types": [
+      "application/json"
+    ],
+    "max_bytes": 65536,
+    "timeout": 15,
+    "per_minute": 10,
+    "effect": "read",
+    "credential_ref": null,
+    "credential_header": "Authorization",
+    "credential_prefix": "",
+    "effect_contract": null
+  },
+  "github": {
+    "service_id": "github",
+    "operation": "search_repositories",
+    "version": "v1",
+    "url": "https://api.github.com/search/repositories",
+    "method": "GET",
+    "parameters": [
+      "q",
+      "per_page"
+    ],
+    "content_types": [
+      "application/json"
+    ],
+    "max_bytes": 65536,
+    "timeout": 15,
+    "per_minute": 10,
+    "effect": "read",
+    "credential_ref": null,
+    "credential_header": "Authorization",
+    "credential_prefix": "",
+    "effect_contract": null
+  },
+  "brave": {
+    "service_id": "brave_search",
+    "operation": "search",
+    "version": "v1",
+    "url": "https://api.search.brave.com/res/v1/web/search",
+    "method": "GET",
+    "parameters": [
+      "q",
+      "count"
+    ],
+    "content_types": [
+      "application/json"
+    ],
+    "max_bytes": 65536,
+    "timeout": 15,
+    "per_minute": 10,
+    "effect": "read",
+    "credential_ref": "BRAVE_SEARCH_API_KEY",
+    "credential_header": "X-Subscription-Token",
+    "credential_prefix": "",
+    "effect_contract": null
+  }
+}

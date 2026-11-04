@@ -208,8 +208,8 @@ class PixyPort:
     def pending(self):
         return self.__authorizations.pending()
 
-    def pending_all(self):
-        return self.__authorizations.pending_all()
+    def pending_all(self, **kwargs):
+        return self.__authorizations.pending_all(**kwargs)
 
     def decide(self, *args, **kwargs):
         return self.__plane.decide_and_enable_order(*args, **kwargs)
@@ -449,9 +449,7 @@ class ControlPlane:
     def _authorization(record):
         if not record:
             return None
-        result = dict(record)
-        result['capabilities'] = json.loads(result['capabilities'])
-        return result
+        return AuthorizationStore._row(record)
 
     @_audited_authority
     def decide_and_enable_order(self, authorization_id, approve, decided_by):
@@ -462,7 +460,7 @@ class ControlPlane:
             self.authorizations._expire(conn)
             conn.execute(
                 'UPDATE pixy_authorizations SET status="expired" '
-                'WHERE status IN ("pending","approved") AND expires_at<=?',
+                'WHERE status IN ("pending","approved") AND (CASE WHEN delivery_required=1 THEN delivered_at+(expires_at-created_at) ELSE expires_at END)<=?',
                 (now,),
             )
             record = self._authorization(repos.decisions.get(authorization_id))
@@ -523,7 +521,7 @@ class ControlPlane:
         self.authorizations._expire(conn)
         conn.execute(
             'UPDATE pixy_authorizations SET status="expired" '
-            'WHERE status IN ("pending","approved") AND expires_at<=?',
+            'WHERE status IN ("pending","approved") AND (CASE WHEN delivery_required=1 THEN delivered_at+(expires_at-created_at) ELSE expires_at END)<=?',
             (now,),
         )
         auth = self._authorization(repos.decisions.get(authorization_id))

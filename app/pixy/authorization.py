@@ -8,7 +8,7 @@ from app.kernel.database import connection, migrate
 from app.kernel.journal import Journal
 from app.heart.catalog import validate_case_id, TARGETS
 
-STATUSES = {'pending', 'approved', 'denied', 'consumed', 'expired', 'superseded'}
+STATUSES = {'pending_delivery', 'pending', 'approved', 'denied', 'consumed', 'expired', 'superseded'}
 
 
 def _audited_operation(method):
@@ -59,6 +59,14 @@ class AuthorizationStore:
             [
                 'ALTER TABLE pixy_authorizations ADD COLUMN trace_id TEXT',
                 'CREATE INDEX IF NOT EXISTS idx_pixy_auth_trace ON pixy_authorizations(trace_id)',
+            ],
+            [
+                'ALTER TABLE pixy_authorizations ADD COLUMN delivery_required INTEGER NOT NULL DEFAULT 0',
+                'ALTER TABLE pixy_authorizations ADD COLUMN delivered_at REAL',
+                '''CREATE TRIGGER pixy_authorizations_delivery_once BEFORE UPDATE ON pixy_authorizations
+                   WHEN NEW.delivery_required IS NOT OLD.delivery_required OR
+                     (OLD.delivered_at IS NOT NULL AND NEW.delivered_at IS NOT OLD.delivered_at)
+                   BEGIN SELECT RAISE(ABORT,'delivery origin is immutable'); END''',
             ]
         ], component='pixy-authorizations')
 
@@ -68,13 +76,47 @@ class AuthorizationStore:
             return None
         record = dict(row)
         record['capabilities'] = json.loads(record['capabilities'])
+        if record.get('delivery_required') and record.get('delivered_at') is not None:
+            record['expires_at'] = record['delivered_at'] + (record['expires_at'] - record['created_at'])
         return record
 
     def _expire(self, conn):
+        waiting_delivery = conn.execute("SELECT authorization_id FROM pixy_authorizations WHERE status='pending_delivery'").fetchall()
+        # Activation is derived from the durable transport receipt, so a crash
+        # between delivery and its callback cannot lose or duplicate authority.
+        if conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('voice_outbox','conversation_questions')").fetchone()[0] == 2:
+            conn.execute('''UPDATE pixy_authorizations SET status='pending', delivered_at=(
+                SELECT MIN(o.sent_at) FROM voice_outbox o
+                JOIN conversation_questions q ON q.id=json_extract(o.metadata,'$.question_id')
+                WHERE o.status='delivered' AND json_array_length(o.message_ids)>0
+                  AND json_extract(o.metadata,'$.authorization_id')=authorization_id
+                  AND q.subject_id=authorization_id AND q.revision=plan_hash AND q.status IN ('queued','open'))
+                WHERE status='pending_delivery' AND EXISTS (
+                SELECT 1 FROM voice_outbox o
+                JOIN conversation_questions q ON q.id=json_extract(o.metadata,'$.question_id')
+                WHERE o.status='delivered' AND o.sent_at IS NOT NULL
+                  AND json_array_length(o.message_ids)>0
+                  AND json_extract(o.metadata,'$.authorization_id')=authorization_id
+                  AND q.subject_id=authorization_id AND q.revision=plan_hash AND q.status IN ('queued','open'))''')
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_questions'").fetchone():
+            conn.execute('''UPDATE pixy_authorizations SET status='pending', delivered_at=(
+                SELECT MIN(q.sent_at) FROM conversation_questions q
+                JOIN conversation_messages m ON m.source=q.delivery_id AND m.role='assistant'
+                WHERE q.kind='authorization' AND q.subject_id=authorization_id AND q.revision=plan_hash
+                  AND q.status='open' AND q.sent_at IS NOT NULL AND json_array_length(q.message_ids)>0)
+                WHERE status='pending_delivery' AND EXISTS (
+                SELECT 1 FROM conversation_questions q JOIN conversation_messages m ON m.source=q.delivery_id AND m.role='assistant'
+                WHERE q.kind='authorization' AND q.subject_id=authorization_id AND q.revision=plan_hash
+                  AND q.status='open' AND q.sent_at IS NOT NULL AND json_array_length(q.message_ids)>0)''')
+        expiry = '(CASE WHEN delivery_required=1 THEN delivered_at+(expires_at-created_at) ELSE expires_at END)'
+        for row in waiting_delivery:
+            activated = conn.execute("SELECT status FROM pixy_authorizations WHERE authorization_id=?", (row[0],)).fetchone()
+            if activated[0] == 'pending':
+                self.journal.event(Journal.cycle_id('authorization', row[0]), 'delivery_confirmed', status='waiting', conn=conn)
         expired = conn.execute('SELECT authorization_id,case_id,trace_id FROM pixy_authorizations '
-                               'WHERE status IN ("pending","approved") AND expires_at<=?',
+                               'WHERE status IN ("pending","approved") AND ' + expiry + '<=?',
                                (time.time(),)).fetchall()
-        conn.execute('UPDATE pixy_authorizations SET status="expired" WHERE status IN ("pending","approved") AND expires_at<=?',
+        conn.execute('UPDATE pixy_authorizations SET status="expired" WHERE status IN ("pending","approved") AND ' + expiry + '<=?',
                      (time.time(),))
         for row in expired:
             cycle = self.journal.start('authorization', row['authorization_id'], trace_id=row['trace_id'],
@@ -104,7 +146,7 @@ class AuthorizationStore:
         raise PermissionError('trace_id solo correlaciona; presenta authorization_id y términos completos')
 
     @_audited_operation
-    def issue(self, case_id, capabilities, target, plan_hash, requested_by, trace_id=None):
+    def issue(self, case_id, capabilities, target, plan_hash, requested_by, trace_id=None, delivery_required=False):
         validate_case_id(case_id)
         if target not in TARGETS or not isinstance(capabilities, list) or not capabilities:
             raise ValueError('Autorización sin alcance válido')
@@ -119,17 +161,18 @@ class AuthorizationStore:
                 tid = case_id
         record = dict(authorization_id='auth_' + uuid.uuid4().hex, case_id=case_id, trace_id=tid, issued_by='pixy',
                       authorized_for='hand', requested_by=str(requested_by), capabilities=sorted(capabilities),
-                      target=target, plan_hash=plan_hash, nonce=secrets.token_hex(16), status='pending',
-                      created_at=now, expires_at=now + self.ttl)
+                      target=target, plan_hash=plan_hash, nonce=secrets.token_hex(16),
+                      status='pending_delivery' if delivery_required else 'pending',
+                      created_at=now, expires_at=now + self.ttl, delivery_required=int(delivery_required), delivered_at=None)
         with connection(self.path) as conn:
             conn.execute('BEGIN IMMEDIATE')
             self._expire(conn)
             conn.execute('''INSERT INTO pixy_authorizations(authorization_id,case_id,trace_id,issued_by,authorized_for,
-                requested_by,capabilities,target,plan_hash,nonce,status,created_at,expires_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                requested_by,capabilities,target,plan_hash,nonce,status,created_at,expires_at,delivery_required)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (record['authorization_id'], case_id, tid, 'pixy', 'hand', record['requested_by'],
-                 json.dumps(record['capabilities']), target, plan_hash, record['nonce'], 'pending', now,
-                 record['expires_at']))
+                 json.dumps(record['capabilities']), target, plan_hash, record['nonce'], record['status'], now,
+                 record['expires_at'], int(delivery_required)))
             cycle = self.journal.start('authorization', record['authorization_id'], trace_id=tid,
                 source=str(requested_by), refs={'authorization_id': record['authorization_id'], 'case_id': case_id}, conn=conn)
             self.journal.event(cycle, 'issued', status='waiting', conn=conn)
@@ -139,11 +182,12 @@ class AuthorizationStore:
         records = self.pending_all()
         return records[-1] if records else None
 
-    def pending_all(self):
+    def pending_all(self, include_undelivered=False):
         with connection(self.path) as conn:
             self._expire(conn)
             return [self._row(row) for row in conn.execute(
-                'SELECT * FROM pixy_authorizations WHERE status="pending" ORDER BY created_at')]
+                'SELECT * FROM pixy_authorizations WHERE status IN (?,?) ORDER BY created_at',
+                ('pending', 'pending_delivery' if include_undelivered else 'pending'))]
 
     @_audited_operation
     def decide(self, authorization_id, approve, decided_by):

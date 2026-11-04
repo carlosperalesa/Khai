@@ -139,6 +139,11 @@ class MemoryEngine:
         if outcome not in {'success', 'failure'}:
             raise ValueError('Episode outcome must be success or failure')
         with self._get_conn() as conn:
+            if conn.execute('''SELECT 1 FROM episode_notes WHERE task_id IS ? AND run_id IS ?
+                    AND outcome=? AND stage=? AND summary=? AND evidence_json=?''',
+                    (task_id, run_id, outcome, str(stage)[:80], str(summary)[:8000],
+                     json.dumps(evidence or {}, ensure_ascii=False))).fetchone():
+                return
             conn.execute('''INSERT INTO episode_notes(task_id,run_id,objective,outcome,stage,summary,
                             evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?)''',
                          (task_id, run_id, str(objective)[:8000], outcome, str(stage)[:80],

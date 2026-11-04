@@ -13,7 +13,7 @@ Eres el Curador de Documentación y Reglas de Khai. Tu misión es estructurar, u
      - Tres pilares: Crear (herramientas persistentes), Reparar (diagnóstico con CoreEyes y evidencia real, sin repetir errores), Aprender (notas de Dreams).
      - Gobernanza y Autoridad: Pixy custodia decisiones, secretos, permisos y contratos. Consulta obligatoria con opciones binarias (`y`/`n`) ante efectos externos, costos o cambios de proveedor.
      - Aislamiento y Red: Workers en Docker estrictamente sin red directa; Voice concentra red y credenciales.
-     - Inferencia y Cascada: Prioridad de evaluación en Modo High (`qwen2.5-32b-abliterated`), cascada obligatoria `high > mid > low > nano`, y formato estricto de notificaciones de conexión.
+     - Inferencia y Fallback: Prioridad de evaluación en Modo High (`qwen2.5-32b-abliterated`), fallback inmediato a Nano ante fallo sin cascada automática entre perfiles locales, y formato estricto de notificaciones de conexión.
      - Verificación e Integridad: Ningún dato ni recibo inventado; evidencia observable obligatoria.
 
 2. **Consolidación Técnica (`docs/ARCHITECTURE.md`):**

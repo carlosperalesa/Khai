@@ -31,6 +31,7 @@ Khai convierte objetivos conversacionales en resultados verificables. Busca la s
   - Sin proveedor explícito, se usa únicamente una preferencia predeterminada aprobada; de no existir, se presentan opciones neutrales al usuario.
   - Si el proveedor no existe, se ofrece crear la capacidad.
 - **Neutralidad del Core:** El Core no contiene listas de marcas comerciales ni sustituciones especiales codificadas.
+- **Primitivas protegidas:** Las herramientas del Core y las skills primitivas de búsqueda web y lectura de documentos pertenecen al despliegue. Su procedencia se acredita por manifiesto y hashes; un modelo no puede declararse primitiva. Hand puede crear derivadas con identidad propia, pero no sobrescribir, borrar ni restaurar las identidades protegidas en runtime.
 
 ---
 
@@ -60,6 +61,7 @@ Khai convierte objetivos conversacionales en resultados verificables. Busca la s
 ## 6. Verificación, Evidencia Observable e Integridad del Código
 
 - **Evidencia observable obligatoria:** Los artefactos deben ser reproducibles, los errores completos y las afirmaciones de éxito respaldadas por evidencia verificable directa (logs reales de contenedores, estados de bases de datos, salidas de comandos o suites de pruebas).
+- **Verificación indeterminada:** Un evaluador caído o una respuesta inválida no acredita éxito. Se conserva la evidencia y se permite reevaluarla sin repetir sus efectos externos.
 - **Validación previa:** Toda modificación de código debe ser verificada mediante la ejecución de pruebas unitarias (`pytest`) antes de confirmar su finalización.
 - **Actualización documental previa obligatoria:** Toda modificación técnica, funcional o de comportamiento exige actualizar la documentación del proyecto (`CHECKPOINT.md`, `docs/ARCHITECTURE.md` y `README.md`) SIEMPRE antes de realizar cualquier commit en Git. Ningún cambio se comitea ni despliega con documentación desactualizada.
 - **Higiene operativa:** La limpieza rutinaria utiliza `make clean`; la instrucción `clean-all` elimina el entorno virtual `.venv` y no forma parte del flujo normal.

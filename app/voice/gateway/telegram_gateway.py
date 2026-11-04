@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Any
 import logging
 import functools
 from app.voice.help import HELP_TEXT, HELP_BUTTONS
+from app.voice.buttons import validate_buttons
 utils_logger = logging.getLogger("Utils")
 
 
@@ -39,6 +40,7 @@ def private_transport(cls):
             try:
                 return method(*args,**kwargs)
             except requests.RequestException:
+                utils_logger.error('Telegram transport failed; delivery requires reconciliation')
                 raise RuntimeError('Telegram transport failed') from None
         return call
     for name,method in list(vars(cls).items()):
@@ -68,7 +70,6 @@ class TelegramHandler:
             except requests.RequestException:
                 raise RuntimeError('Telegram document delivery failed') from None
     
-    @retry(max_attempts=3, delay=2)
     def send_message(
         self,
         text: str,
@@ -94,17 +95,10 @@ class TelegramHandler:
         if buttons is None and text == HELP_TEXT:
             buttons = HELP_BUTTONS
         if buttons:
-            if isinstance(buttons[0], list):
-                inline_keyboard = [
-                    [{"text": btn['label'], "callback_data": btn['value']} for btn in row]
-                    for row in buttons
-                ]
-            else:
-                inline_keyboard = [
-                    [{"text": btn['label'], "callback_data": btn['value']}]
-                    for btn in buttons
-                ]
-            payload["reply_markup"] = json.dumps({"inline_keyboard": inline_keyboard})
+            rows = validate_buttons(buttons)
+            payload["reply_markup"] = json.dumps({"inline_keyboard": [
+                [{"text": btn['label'], "callback_data": btn['value']} for btn in row]
+                for row in rows]})
         
         try:
             if image_path:

@@ -11,6 +11,7 @@ class StartArguments(Arguments):
     goal: str = Field(min_length=3, max_length=8000)
     capability: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,63}$')
     provider: str | None = Field(default=None, pattern=r'^[a-z][a-z0-9_-]{0,63}$')
+    provider_source_text: str | None = Field(default=None, max_length=1000)
     creation_requested: bool = False
 
 
@@ -119,6 +120,7 @@ class AssistantTurn(Arguments):
         if call.name == 'start_task':
             return {'action': 'ACTION_REQUIRED', 'extracted_goal': args['goal'], 'reply': self.reply,
                     'capability': args.get('capability'), 'provider': args.get('provider'),
+                    'provider_source_text': args.get('provider_source_text'),
                     'creation_requested': args.get('creation_requested', False),
                     'tool_call': call.model_dump()}
         return {'action': 'TOOL_CALL', 'reply': self.reply, 'tool_call': call.model_dump()}

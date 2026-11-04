@@ -723,6 +723,7 @@ class RecipeExecutionTests(unittest.TestCase):
             state=SimpleNamespace(db_path=root / 'control.sqlite3'), data_dir=root,
             runtime=Mock(), llm=Mock(), mind=Mock(), hand=hand, pixy=Mock(), rules=Mock(),
             memory=Mock(), telegram=Mock(), dreams=Mock())
+        self.manager.llm.generate_content.return_value = '{"satisfied":true,"missing":[],"reason":"fixture evidence"}'
         self.manager.pixy.preflight.return_value = {'safe': True}
         self.manager.pixy.review.return_value = {'safe': True, 'requires_approval': False}
         self.manager.rules.active.return_value = []
@@ -1849,6 +1850,7 @@ class ResultPresenterTests(unittest.TestCase):
                         'service': 'mail', 'operation': 'send',
                         'params': {'to': 'carlos@ejemplo.com', 'noticias': news_items},
                     })
+                    manager.llm.generate_content = Mock(return_value='{"satisfied":true,"missing":[],"reason":"fixture evidence"}')
                     proxy.get.return_value = {
                         'status': 'finished', 'returncode': 0,
                         'stdout': '{"enviado": true}',

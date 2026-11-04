@@ -30,8 +30,8 @@ class Dreams:
     def record_failure(self, task, stage, evidence):
         """A technical failure before execution is useful without inventing a run receipt."""
         if self.memory and hasattr(self.memory, 'record_episode'):
-            self.memory.record_episode(task['id'], None, task.get('request', ''), 'failure', stage,
-                                       'Fallo técnico anterior al despacho; evidencia conservada para Heart.', evidence)
+            self.memory.record_episode(task['id'], task.get('execution_id'), task.get('request', ''), 'failure', stage,
+                                       'Fallo técnico en ' + stage + '; evidencia conservada para Heart.', evidence)
 
     def record(self, task, success, evidence):
         run = task.get('execution_id')

@@ -1,28 +1,38 @@
 # CHECKPOINT - PROYECTO KHAI
 
+## Reparación, primitivas y purga selectiva — 4 de noviembre de 2026
+
+Trabajo solicitado por el propietario sobre f2036b3. Implementación preparada; esta entrada no acredita todavía despliegue ni purga de producción.
+
+- Corregidos contratos de botones, autorización desde entrega durable, verificación indeterminada, selección de proveedor y sujeto de consultas breves a Pixy.
+- Diagnóstico tipado, rechazo contractual del planificador conservado en Voice, evolución con identidad y hash fijados, y eliminación del fallback de cobertura fabricada. Un rechazo técnico de Pixy vuelve a Heart antes de repetir generación.
+- Primitivas de búsqueda y documentos identificadas mediante manifiesto; los hashes de código instalados fueron contrastados con el repositorio. El catálogo conserva origen y derivación; Hand bloquea mutaciones de identidades protegidas.
+- Herramienta offline de purga selectiva con simulación, validación, reconstrucción de bases y eliminación de respaldos. Conserva identidad, secretos, preferencias, conocimiento depurado, skills y aprobación técnica. Administración de Telegram limitada a mensajes conocidos que permita borrar la API del bot.
+- Entorno local Python 3.12 preparado con pytest, pytest-subtests y fixtures PDF/XLSX. Suite conjunta: 430 pruebas y 39 subpruebas aprobadas en Windows (293,65 s) y en imagen Linux/Python 3.10 sin red ni datos productivos (199,01 s). Después se añadió el bloqueo de reintentos con código, entradas y servicios idénticos: sus suites afectadas aprobaron 51 pruebas; la suite final ampliada y aceptación de despliegue se registrarán al completar la ejecución.
+
 ## Correcciones del Auditor, Alineación Constitucional y Fuente Única de Verdad (2 de noviembre de 2026) — trabajo autorizado
 
-- **Resolución de Aprobaciones Ambiguas en Coordinator (pp/mind/coordinator.py):**
-  1. *Priorización de Negaciones Compuestas:* En classify_reply_intent, las frases y locuciones de rechazo (cancela, bortar, olvídalo, 
-o quiero, 
+- **Resolución de Aprobaciones Ambiguas en Coordinator (app/mind/coordinator.py):**
+  1. *Priorización de Negaciones Compuestas:* En classify_reply_intent, las frases y locuciones de rechazo (cancela, abortar, olvídalo,
+o quiero,
 o lo hagas, claro que no, por favor no, para nada) se evalúan en primer lugar con confianza 0.95.
   2. *Erradicación de Falsos Positivos por Muletillas:* Se eliminaron del conjunto afirmativo términos ambiguos o de cortesía ('por favor', 'bien', 'bueno'), clasificándolos como unrelated a menos que acompañen una afirmación explícita.
   3. *Calificación Contextual de 'ok' y 'claro':* No otorgan aprobación si van seguidos inmediatamente por partículas de negación.
 
 - **Alineación de Modelos, Fallback a Nano y Erradicación de Cascada Residual:**
   1. *Mensajería Constitucional Estricta:* llm_gateway.py extrae motivos limpios ('tiempo de espera agotado', 'spot no disponible') y emite exactamente [Modo {mode} falló por: {reason}] [Modo nano conectado] desplegando MODE_SELECTION_BUTTONS.
-  2. *Eliminación de Métodos Residuales Engañosos:* Se eliminó mark_fallback_to_low en pp/mind/brain/controller.py.
-  3. *Alineación Documental:* Erradicadas todas las menciones a cascadas automáticas en README.md, docs/ARCHITECTURE.md y rain/__init__.py.
+  2. *Eliminación de Métodos Residuales Engañosos:* Se eliminó mark_fallback_to_low en app/mind/brain/controller.py.
+  3. *Alineación Documental:* Erradicadas todas las menciones a cascadas automáticas en README.md, docs/ARCHITECTURE.md y brain/__init__.py.
 
-- **Refinamiento de Detección Anti-Bucle en Heart (pp/heart/recovery.py):**
-  1. *Corrección de Falsos Bucles en Intento 1:* Se eliminó ool(latest_failed.get('recovery_case_id')) de la condición is_loop. La detección de bucle exige estrictamente ttempts >= 2, antecedentes de recuperación (len(recovery_history) >= 1) o fallos repetidos de generación (hand_failures >= 2).
+- **Refinamiento de Detección Anti-Bucle en Heart (app/heart/recovery.py):**
+  1. *Corrección de Falsos Bucles en Intento 1:* Se eliminó bool(latest_failed.get('recovery_case_id')) de la condición is_loop. La detección de bucle exige estrictamente attempts >= 2, antecedentes de recuperación (len(recovery_history) >= 1) o fallos repetidos de generación (hand_failures >= 2).
 
 - **Sanitización de Seguridad y Consolidación de Fuente Única de Verdad:**
   1. *Exposición Perimetral Erradicada:* Eliminadas IPs públicas (20.237.211.250), usuarios SSH (carlos@) y hostnames internos en toda la documentación pública (docs/ARCHITECTURE.md, CHECKPOINT.md, etc.), reemplazados por marcadores neutros [AZURE_SERVER_IP], [AZURE_USER] y [AZURE_VM_NAME].
-  2. *Archivo de Auditoría Histórica:* Se archivó udit_report.md en docs/historical/audit_report_20261031.md censurando snippets de tokens.
+  2. *Archivo de Auditoría Histórica:* Se archivó audit_report.md en docs/historical/audit_report_20261031.md censurando snippets de tokens.
   3. *Plantilla Única de Secretos:* Consolidada una única fuente canónica en config/secrets.env.example, eliminando la copia duplicada en la raíz.
   4. *Erradicación de Conteos Dispersos:* Los conteos fijos de pruebas fueron centralizados exclusivamente en CHECKPOINT.md; README.md y docs/ARCHITECTURE.md delegan en make test.
-  5. *Limpieza de Caracteres Corruptos:* Eliminados caracteres de control (, ) y tildes corruptas (?) en CHECKPOINT.md, docs/ARCHITECTURE.md y docs/VALIDATION.md.
+  5. *Limpieza de Caracteres Corruptos:* Eliminados caracteres de control (a, v) y tildes corruptas (?) en CHECKPOINT.md, docs/ARCHITECTURE.md y docs/VALIDATION.md.
 
 - **Suite Canónica de Pruebas Unitarias Aprobada al 100%:**
   - Se añadieron pruebas adversariales en 	ests/test_action_planner_evolution.py (rechazo de negaciones compuestas y fillers) y en 	ests/test_model_contract.py (formato constitucional del mensaje de fallo).

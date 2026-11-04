@@ -301,7 +301,7 @@ class Coordinator:
             destination = self.conversations.get_conversation(sid)
             if destination and destination.get('status') == 'deleted':
                 return
-            kinds = {'WAITING_SCOPE': 'scope', 'WAITING_INPUT_CONFIRMATION': 'inputs',
+            kinds = {'WAITING_PROVIDER': 'provider', 'WAITING_SCOPE': 'scope', 'WAITING_INPUT_CONFIRMATION': 'inputs',
                      'WAITING_CREATION_APPROVAL': 'creation', 'WAITING_APPROVAL': 'execution',
                      'WAITING_SERVICE_APPROVAL': 'service', 'UNVERIFIED': 'review',
                      'WAITING_FEEDBACK': 'review', 'WAITING_EFFECT_DETAIL': 'effect_detail',
@@ -311,14 +311,16 @@ class Coordinator:
                     sid, kinds[task['state']], task_id, task['revision'], task['state'])
             elif task and task.get('recovery_authorization_id'):
                 auth = self.manager.pixy.authorizations.get(task['recovery_authorization_id'])
-                if auth and auth['status'] == 'pending':
+                if auth and auth['status'] in {'pending', 'pending_delivery'}:
+                    metadata['authorization_id'] = auth['authorization_id']
                     metadata['question_id'] = self.conversations.question(
                         sid, 'authorization', auth['authorization_id'], auth['plan_hash'], 'pending')
             elif context.get('source'):
-                auths = (self.manager.pixy.authorizations.pending_all()
+                auths = (self.manager.pixy.authorizations.pending_all(include_undelivered=True)
                          if getattr(getattr(self.manager, 'pixy', None), 'authorizations', None) else [])
                 for auth in reversed(auths):
                     if auth.get('requested_by') == context['source']:
+                        metadata['authorization_id'] = auth['authorization_id']
                         metadata['question_id'] = self.conversations.question(
                             sid, 'authorization', auth['authorization_id'], auth['plan_hash'], 'pending')
                         break
@@ -471,6 +473,9 @@ class Coordinator:
         failure = {'status': 'unknown' if dispatched else 'failed', 'stage': stage,
                    'dispatched': dispatched, 'error': type(exc).__name__,
                    'error_type': type(exc).__name__}
+        diagnostic = getattr(exc, 'diagnostic', None)
+        if isinstance(diagnostic, dict) and diagnostic.get('id'):
+            failure['diagnostic'] = diagnostic
         if dispatched:
             failure['execution_id'] = current['execution_id']
         blocked = ('uncertain_execution' if dispatched else
@@ -655,7 +660,8 @@ class Coordinator:
                 return ReplyResult(True, 'Hay varias preguntas pendientes. Responde al mensaje de la propuesta que quieres resolver o usa su botón.')
             return ReplyResult(False)
         question = explicit or pending[0]
-        classification = self.classify_reply_intent(question, text)
+        classification = ({'intent': 'answer'} if question['kind'] == 'provider'
+                          else self.classify_reply_intent(question, text))
         intent = classification.get('intent', 'unrelated')
         if not explicit and intent == 'unrelated':
             return ReplyResult(False)
@@ -676,6 +682,20 @@ class Coordinator:
         intent = classification.get('intent', 'answer')
 
         kind, subject = question['kind'], question['subject_id']
+        if kind == 'provider':
+            task = self.store.get(subject)
+            if (not task or task['state'] != 'WAITING_PROVIDER' or str(task['revision']) != question['revision']
+                    or task.get('conversation_id') != conversation_id or time.time() >= task['deadline']):
+                self.conversations.stale(question['id'])
+                return ReplyResult(True, 'La selección de proveedor ya no está pendiente.')
+            provider = answer.strip().casefold()
+            if not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', provider):
+                return ReplyResult(True, 'Indica el identificador del proveedor que quieres utilizar.')
+            intent = dict(task['routing_intent'], provider=provider, provider_source_text=answer)
+            self.store.update(subject, state='ROUTING', routing_intent=intent, provider_choice=provider,
+                              provider_authority={'source': source, 'question_id': question['id']})
+            self.conversations.answered(question['id'], source)
+            return ReplyResult(True, 'Proveedor seleccionado para esta solicitud.', subject)
         if kind == 'authorization':
             auth = self.manager.pixy.authorizations.get(subject)
             if not auth or auth['status'] != 'pending' or auth['plan_hash'] != question['revision']:
@@ -1079,17 +1099,34 @@ class Coordinator:
 
     def _check_goal_result(self, task):
         from app.mind.quality import assess_result
+        import hashlib
+        result = task.get('recipe_result') if task.get('recipe_result') is not None else task.get('result')
+        if task.get('recipe'):
+            result = {'output': result, 'steps': [{key: receipt.get(key) for key in ('step_id', 'status', 'output')}
+                                                for receipt in task.get('recipe_receipts', [])]}
+        goal = task.get('original_request') or task['request']
+        goal_hash = hashlib.sha256(goal.encode()).hexdigest()
+        result_hash = hashlib.sha256(json.dumps(result, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        previous = task.get('goal_assessment') or {}
+        if (previous.get('success') is True and (previous.get('evidence') or {}).get('result_sha256') == result_hash
+                and previous['evidence'].get('goal_sha256') == goal_hash):
+            return True
         llm = getattr(self.manager, 'llm', None)
         if llm is None:
-            return True
+            self.store.update(task['id'], state='UNVERIFIED', goal_assessment={'success': None, 'evidence': {'reason': 'Evaluador no disponible'}})
+            return False
         budget_token = current_budget.set(lambda: self.store.consume(task['id'], 'llm_calls', allow_review=True))
         try:
-            satisfied, evidence = assess_result(llm, task.get('original_request') or task['request'],
-                                                task.get('recipe_result') or task.get('result'))
+            satisfied, evidence = assess_result(llm, goal, result)
         finally:
             current_budget.reset(budget_token)
+        evidence['goal_sha256'] = goal_hash
         self.store.update(task['id'], result=task.get('result'),
                           goal_assessment={'success': satisfied, 'evidence': evidence})
+        if satisfied is None:
+            self.store.update(task['id'], state='UNVERIFIED')
+            self.notify('La ejecución terminó, pero todavía no pude verificar que cubra el objetivo. La evidencia está conservada; no repetiré la ejecución.')
+            return False
         if satisfied is False:
             case_id = None
             recovery = getattr(getattr(self.manager, 'heart', None), 'recovery', None)
@@ -2209,7 +2246,8 @@ class Coordinator:
                                                            conversation_history=history, questions=questions))
             if intent.get('error'):
                 failure = {'status': 'failed', 'stage': 'routing', 'dispatched': False,
-                           'error': str(intent['error']), 'diagnostic': intent.get('diagnostic')}
+                           'error': str(intent['error']), 'diagnostic': intent.get('diagnostic'),
+                           'failure_evidence': intent.get('failure_evidence')}
                 if intent['error'] == 'ContentRejected':
                     self.store.update(tid, expected={'ROUTING'}, state='FAILED', error=str(intent['error']), result=failure)
                     self.store.event(tid, 'routing_rejection', failure)
@@ -2249,6 +2287,31 @@ class Coordinator:
                     self.notify(reply)
                 return
             if action == 'ACTION_REQUIRED':
+                from app.mind.provider_resolution import explicit_provider
+                source_request = task.get('source_request') or task['request']
+                suggested = intent.get('provider')
+                provider = task.get('provider_choice') or explicit_provider(
+                    suggested, source_request, intent.get('provider_source_text'))
+                capability = intent.get('capability')
+                preference = self.manager.memory.get_preference('default_provider_' + capability) if capability else None
+                if not provider and isinstance(preference, dict) and preference.get('approved_at') and preference.get('source'):
+                    provider = preference.get('provider')
+                catalog = getattr(getattr(self.manager, 'hand', None), 'catalog', None)
+                available = catalog.providers(capability) if capability and catalog else []
+                available = available if isinstance(available, list) else []
+                records = catalog.active() if capability and catalog else []
+                records = records if isinstance(records, list) else []
+                offline_capability = (any(r['spec'].get('capability') == capability
+                                          and not r['spec'].get('provider') and not r['spec'].get('services')
+                                          for r in records) if capability and catalog else False)
+                if (suggested or available or capability and not offline_capability) and not provider:
+                    self.store.update(tid, state='WAITING_PROVIDER', routing_intent=intent,
+                                      suggested_provider=suggested, available_providers=available)
+                    self.notify('¿Qué proveedor quieres utilizar para esta solicitud? '
+                                + ('Opciones instaladas: ' + ', '.join(available) + '.' if available
+                                   else 'Indica el proveedor; comprobaré si la capacidad está disponible.'))
+                    return
+                intent = dict(intent, provider=provider)
                 request = intent.get('extracted_goal') or request
                 self.store.update(tid, expected={'ROUTING'}, kind='objective', request=request,
                                   original_request=request, source_request=task.get('source_request') or task['request'],
@@ -2260,12 +2323,13 @@ class Coordinator:
                     self.conversations.complete(task['source'], {'call_id': call_id,
                         'tool_call': intent['tool_call'], 'status': 'started', 'task_id': tid})
                 if intent.get('reply'):
-                    self.notify(intent['reply'])
+                    self.notify('Comprobaré la capacidad y los requisitos para realizar tu solicitud.')
             if action == 'ACTION_REQUIRED' and not direct:
                 planner = getattr(self.manager, 'action_planner', None)
                 if planner is not None:
                     proposal = planner.propose(intent.get('extracted_goal') or request, lambda spec:
                         spec['runtime'] != 'AGENT'
+                        and (not spec.get('provider') or spec.get('provider') == intent.get('provider'))
                         and self._services_available(spec['services']),
                         correction_context=task.get('effect_constraints'),
                         conversation_context=(history if history is not None else self.manager.memory.get_chat_history(limit=12)),
@@ -2519,6 +2583,9 @@ class Coordinator:
             if current['state'] != 'GENERATING' or current.get('goal_revision', 0) != task.get('goal_revision', 0):
                 raise StaleGoalRevision('La generación terminó para una revisión obsoleta')
             artifact, sha = crafter.snapshot(code)
+            if not selected_version_id:
+                from app.mind.recovery_attempt import assert_changed_attempt
+                assert_changed_attempt(task, sha)
             skill_spec_hash = None
             if hasattr(self.manager, 'hand'):
                 if selected_version_id:
@@ -2535,6 +2602,7 @@ class Coordinator:
                         name, code, task['manifest'], correlation_id=tid,
                         skill_metadata={'capability': task.get('requested_capability'),
                                         'provider': task.get('requested_provider'),
+                                        'derived_from_version_id': (task.get('planned_skill_spec') or {}).get('derived_from_version_id'),
                                         'aliases': task.get('provider_aliases', [])})
                 if task.get('recipe') and task.get('planned_skill_spec'):
                     recipe = json.loads(json.dumps(task['recipe']))
@@ -2550,6 +2618,7 @@ class Coordinator:
             reused = task.get('reuse_authorized_hash') == sha
             self.store.update(tid, expected={'GENERATING'},
                               state='READY' if reused else 'REVIEWING', code=code,
+                              skill_artifact_hash=version.get('artifact_hash') if hasattr(self.manager, 'hand') else None,
                               artifact=artifact, artifact_hash=sha, mode=mode,
                               dependencies=deps, grants=[],
                               authorized_hash=sha if reused else None,
@@ -2591,8 +2660,11 @@ class Coordinator:
                          'services': task.get('services', [])})
             self.store.event(tid, 'review', {'artifact_hash': task['artifact_hash'], 'decision': review})
             if not review['safe']:
-                self.notify(f"Pixy rechazó el código generado ({review.get('reason')}). Reintentando generación...")
-                self.store.update(tid, expected={'REVIEWING'}, state='GENERATING', feedback=review.get('reason', 'Rechazado'))
+                failure = {'status': 'failed', 'stage': 'skill_review', 'dispatched': False,
+                           'error_type': 'ReviewRejected', 'error': str(review.get('reason') or 'Código rechazado por Pixy')}
+                self.store.update(tid, expected={'REVIEWING'}, state='DIAGNOSING', result=failure, feedback=failure)
+                self.learning.record_failure(task, 'skill_review', failure)
+                self.notify('Pixy rechazó la candidata. Heart revisará la evidencia antes de otro intento.')
             elif (task.get('creation_consent') and not task.get('selected_version_id')
                   and task.get('version_id')
                   and self.manager.hand.version(task['version_id'])['status'] == 'draft'
@@ -2781,15 +2853,16 @@ class Coordinator:
                                 "No aceptaré el objetivo como completo. "
                                 "Explica qué observaste o cancela.")
                     return
-                if not self._check_goal_result(dict(task, result=result)):
-                    return
                 success, evidence = verify_result(result, task.get('criterion'), workspace,
                                                   receipts, task['execution_id'])
+                self.store.update(tid, machine_verification={'success': success, 'evidence': evidence})
+                if success is not False and not self._check_goal_result(dict(task, result=result)):
+                    return
                 if success is None or success is True:
                     self.store.update(tid, expected={'RUNNING'}, state='UNVERIFIED', result=result,
                                       machine_verification={'success': success, 'evidence': evidence})
                     stdout_text = humanize_worker_output(result.get('stdout', ''), request=task.get('original_request') or task.get('request'), llm=getattr(self.manager, 'llm', None))
-                    msg = stdout_text or "Tarea completada con éxito."
+                    msg = stdout_text or "La ejecución terminó; su resultado sigue pendiente de verificación."
                     self.notify(msg)
                 else:
                     self.store.update(tid, expected={'RUNNING'}, state='VERIFYING', result=result,
@@ -2799,6 +2872,8 @@ class Coordinator:
                 self.notify(f'{tid}: respuesta del ejecutor desconocida; requiere inspección.')
         elif state == 'VERIFYING':
             v = task['verification']
+            if v['success'] and not self._check_goal_result(task):
+                return
             if v['success'] and task.get('recipe'):
                 for receipt in task.get('recipe_receipts', []):
                     version = self.manager.hand.version(receipt['version_id'])
@@ -2877,7 +2952,7 @@ class Coordinator:
             if plan and plan.get('target') == 'task':
                 if plan.get('requires_approval'):
                     if case['state'] == 'SOLUTION_PROPOSED':
-                        auth = self.manager.pixy.request_recovery_approval(case, task['source'])
+                        auth = self.manager.pixy.request_recovery_approval(case, task['source'], delivery_required=True)
                         self.store.update(tid, expected={'DIAGNOSING'},
                                           recovery_case_id=case['case_id'],
                                           recovery_authorization_id=auth['authorization_id'])
@@ -2886,9 +2961,18 @@ class Coordinator:
                         clean_summary = re.sub(r'\b[a-zA-Z0-9_-]+\.py\b', 'el módulo técnico', clean_summary)
                         if not clean_summary:
                             clean_summary = "actualizar la capacidad requerida"
+                        sid = task.get('conversation_id')
+                        if not sid:
+                            telegram = getattr(self.manager, 'telegram', None)
+                            if telegram is None or not isinstance(telegram.user_id, (str, int)):
+                                return  # No delivery channel: never fabricate a question or activate authority.
+                            owner = str(telegram.user_id)
+                            sid = self.conversations.session(owner, owner)
+                            self.store.update(tid, conversation_id=sid)
+                        qid = self.conversations.question(sid, 'authorization', auth['authorization_id'], auth['plan_hash'], 'pending')
                         buttons = [
-                            {"text": "Sí, proceder", "callback_data": f"/approve {auth['authorization_id']}"},
-                            {"text": "No, cancelar", "callback_data": f"/deny {auth['authorization_id']}"},
+                            {"label": "Sí, proceder", "value": "y " + qid},
+                            {"label": "No, cancelar", "value": "n " + qid},
                         ]
                         self.notify(f"Detecté un requerimiento técnico para completar tu objetivo: {clean_summary}. ¿Deseas que proceda con esta actualización?", buttons=buttons)
                     elif case['state'] in {'DENIED', 'FAILED', 'UNKNOWN'}:

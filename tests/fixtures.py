@@ -26,6 +26,7 @@ class Fixture(unittest.TestCase):
         self.state = StateManager(str(self.root / 'memory'))
         self.store = ControlStore(self.state.db_path)
         self.llm = Mock()
+        self.llm.generate_content.return_value = '{"satisfied":true,"missing":[],"reason":"fixture evidence verified"}'
         self.rules = Rules(self.state.db_path)
         self.events = Mock()
         self.dreams = Dreams(self.state.db_path, self.rules, self.events, memory=self.memory)

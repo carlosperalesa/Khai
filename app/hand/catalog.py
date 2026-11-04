@@ -17,6 +17,8 @@ class SkillCatalog:
                  FOREIGN KEY(version_id) REFERENCES versions(version_id))''',
             'CREATE INDEX IF NOT EXISTS skill_specs_active ON skill_specs(status,skill_id)',
         ]], component='hand-catalog')
+        from app.hand.provenance import initialize
+        initialize(db_path)
 
     def stage(self, version_id, spec):
         validate_skill_spec(spec)
@@ -76,8 +78,8 @@ class SkillCatalog:
 
     def active(self):
         with connection(self.db_path) as conn:
-            rows = conn.execute('''SELECT s.version_id,s.skill_id,s.spec_hash,s.spec_json,s.artifact_hash
-                                   FROM skill_specs s JOIN versions v USING(version_id)
+            rows = conn.execute('''SELECT s.version_id,s.skill_id,s.spec_hash,s.spec_json,s.artifact_hash,o.kind AS origin,o.source_version,o.parent_version_id
+                                   FROM skill_specs s JOIN versions v USING(version_id) LEFT JOIN skill_origins o USING(version_id)
                                    WHERE s.status='active' AND v.status='active'
                                    ORDER BY s.skill_id''').fetchall()
         return [{**dict(row), 'spec': json.loads(row['spec_json'])} for row in rows]

@@ -439,6 +439,13 @@ async def webhook(request: Request):
         if not actionable_update(data):
             return {'ok': True}
         manager = request.app.state.manager
+        memory = getattr(manager, 'memory', None)
+        cutoff = memory.get_preference('history_reset_cutoff') if memory else None
+        if isinstance(cutoff, (float, int)):
+            origin_message = data.get('message') or (data.get('callback_query') or {}).get('message') or {}
+            timestamp = origin_message.get('date')
+            if not isinstance(timestamp, int) or timestamp < cutoff:
+                return {'ok': True}  # A reset never replays updates or buttons from the old history.
         update_id = data.get('update_id', 'msg')
         trace_id = new_trace_id(prefix=f"req_{update_id}")
         with trace_scope(trace_id):

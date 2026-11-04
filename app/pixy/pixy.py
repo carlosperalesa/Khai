@@ -404,6 +404,11 @@ class PixyMind:
         c = getattr(self.manager, 'coordinator', None)
         if c:
             recent_tasks = c.store.all()[-5:]
+            from app.mind.conversation import current_turn
+            context = current_turn.get() or {}
+            if context.get('conversation_id'):
+                recent_tasks = [t for t in c.store.all() if t.get('conversation_id') == context['conversation_id']
+                    and t.get('source') != context.get('source') and t.get('kind') != 'turn'][-5:]
         tasks_summary = "\n".join(
             f"- {t['id']}: estado={t['state']}, solicitud=\"{t.get('request', '')[:80]}\", error={t.get('error') or t.get('feedback') or 'ninguno'}"
             for t in reversed(recent_tasks)
@@ -474,7 +479,8 @@ class PixyMind:
                     return 'La decisión no corresponde a una solicitud pendiente: ' + selected_id
             if not candidates:
                 return 'No hay una aprobación pendiente de Pixy ni creación pendiente.'
-            # Sin ID: la decisión se aplica a la solicitud pendiente más reciente.
+            if len(candidates) != 1:
+                return 'Hay varias decisiones pendientes. Responde a la pregunta concreta o utiliza su botón.'
             def _stamp(item):
                 rec = item[2] or {}
                 return rec.get('updated_at') or rec.get('created_at') or rec.get('issued_at') or 0
@@ -566,6 +572,19 @@ class PixyMind:
                 return "Creación cancelada."
 
         lowered = request.lower().strip()
+        if re.fullmatch(r'[¿?\s]*(?:qu[eé] pas[oó]|qu[eé] ocurri[oó]|y ahora|qu[eé] fall[oó])[¿?\s.!]*', lowered):
+            from app.mind.conversation import current_turn
+            context = current_turn.get() or {}
+            c = getattr(self.manager, 'coordinator', None)
+            tasks = ([t for t in c.store.all() if t.get('conversation_id') == context.get('conversation_id')
+                      and t.get('source') != source and t.get('kind') != 'turn'
+                      and (t.get('error') or t.get('recovery_case_id') or t.get('state') == 'DIAGNOSING')]
+                     if c and context.get('conversation_id') else [])
+            if tasks:
+                subject = max(tasks, key=lambda t: t.get('updated_at') or t.get('created_at') or 0)
+                return ('La solicitud anterior está en ' + subject['state'] + '. '
+                        + str(subject.get('error') or 'Heart está revisando la evidencia del incidente.'))
+            return 'No encuentro una incidencia vinculada a esta conversación. Indica la solicitud que quieres revisar.'
         if any(term in lowered for term in (
                 'diagn', 'estado', 'error', 'log', 'salud', 'health', 'status',
                 'informe', 'report', 'recuper', 'fallo', 'falló', 'tarea', 'task', 'repar', 'solucion', 'arregl', 'heart',
@@ -648,15 +667,19 @@ class PixyMind:
             lines.append("apruebas: y/n")
         return "\n".join(lines)
 
-    def request_recovery_approval(self, case, source):
+    def request_recovery_approval(self, case, source, delivery_required=None):
         """Issue the exact Heart plan through Pixy's existing authorization port."""
         plan = case['plan']
         if not self.authorizations or case['state'] != 'SOLUTION_PROPOSED':
             raise ValueError('No hay una propuesta de Heart disponible para aprobar')
         recovery = self.manager.heart.recovery
+        if delivery_required is None:
+            from app.mind.conversation import current_turn
+            delivery_required = bool((current_turn.get() or {}).get('conversation_id'))
         with recovery.journal.activate(Journal.cycle_id('repair', case['case_id'])):
             auth = self.authorizations.issue(case['case_id'], plan['capabilities'], plan['target'],
-                                             case['plan_hash'], requested_by=source)
+                                             case['plan_hash'], requested_by=source,
+                                             delivery_required=delivery_required)
             recovery.await_approval(case['case_id'], auth)
         return auth
 

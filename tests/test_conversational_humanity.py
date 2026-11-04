@@ -100,7 +100,7 @@ class ConversationalHumanityTests(unittest.TestCase):
             coordinator._run_task(task)
 
             # The conversational response was notified immediately to outbox
-            self.assertIn("Consulto el clima de inmediato con la estación meteorológica.", notifications)
+            self.assertIn("Comprobaré la capacidad y los requisitos para realizar tu solicitud.", notifications)
 
     def test_organic_conversational_flow_without_pending_question(self):
         """Casual conversation words like 'dale' or 'ok' without a pending question do not trigger bureaucratic errors."""

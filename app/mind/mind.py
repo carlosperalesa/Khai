@@ -101,6 +101,7 @@ class Mind:
             "answer_question solo selecciona una pregunta realmente entregada y su respuesta debe copiar literalmente el mensaje del propietario; no inventes aprobaciones. "
             "Para salud interna usa get_system_status. "
             "Interpreta objetivos como capacidad, proveedor opcional y objetivo: no deduzcas un proveedor si el usuario no lo dijo. "
+            "Si nombras un proveedor, copia su mención literal en provider_source_text. No prometas entregas antes de resolver capacidad, proveedor y permisos. "
             "Marca creation_requested cuando la orden pida expresamente crear, construir o instalar una capacidad; esa orden ya autoriza la creación, aunque no autoriza secretos, efectos externos ni preferencias. "
             "Si el usuario aprueba un proveedor predeterminado usa set_default_provider. "
             "Si el propietario expresa insatisfacción, queja o corrección sobre una respuesta o ejecución previa (ej. 'eso está mal', 'no me vuelvas a dar Kelvin', 'te equivocaste', 'faltó el viento'), usa report_issue(issue, task_id, skill_name) para registrar el incidente cognitivo. Copia literalmente la queja en issue. "
@@ -177,7 +178,8 @@ class Mind:
             if type(exc).__name__ == 'LLMContentRejected':
                 return {'action': 'ROUTING_ERROR', 'reply': str(exc), 'error': 'ContentRejected'}
             if type(exc).__name__ == 'ModelUnavailable':
-                return {'action': 'ROUTING_ERROR', 'reply': str(exc), 'error': 'ModelUnavailable'}
+                return {'action': 'ROUTING_ERROR', 'reply': str(exc), 'error': 'ModelUnavailable',
+                        'failure_evidence': getattr(exc, 'evidence', {})}
             if "Todos los LLM están ocupados" in str(exc):
                 return {'action': 'ROUTING_ERROR', 'reply': '', 'error': 'AllLLMsBusy'}
             return {'action': 'ROUTING_ERROR', 'reply': 'No pude interpretar el mensaje; no ejecute ninguna accion.',

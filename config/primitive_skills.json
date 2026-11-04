@@ -1,0 +1,25 @@
+{
+  "web-search": {
+    "source_version": "f2036b3",
+    "artifact_hashes": [
+      "d8b81a9fa0d4e5e11906e63a2a8f7c8f6898100136935d7a669bb742d8856e0e"
+    ],
+    "source_files": {
+      "service.json": "d5a576014be4ffb545704ee7f35c50afa184a6b5ce9f72ca0303eb66ab582088",
+      "skill.json": "02e72c30ea15500154fe2cefd87d47ad934eb775b152b689dd1f3faca9a300bf",
+      "SKILL.md": "b49f374caf168fc326690e1152536cb01c3abc699716b3a40624784a296630af",
+      "app/main.py": "048050a2a230a65d7704a3eafc5f987f45be274c36c1f1da147c99c86d8ead57"
+    }
+  },
+  "document-parser": {
+    "source_version": "f2036b3",
+    "artifact_hashes": [
+      "7c7753a4629365f1e611da8cb065d914081d53f4abb5698c41069abc1d7cd508"
+    ],
+    "source_files": {
+      "skill.json": "68b33b1b382bfc6b23f306d60149dff165c9dc353a8f3c28f44a1854c03042ab",
+      "SKILL.md": "fa6447958213785ea147f0078706f70e6ab2560f3516e897b484db4261a15a49",
+      "app/main.py": "bc0a1964942eafe20575f6984068ac74238d98e4845827c250484563ccb91d0c"
+    }
+  }
+}

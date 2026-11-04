@@ -6,11 +6,29 @@ from app.heart.catalog import task_binding
 from app.pixy.control import ControlStore, INITIAL_TASK_BUDGET
 
 
+class UnchangedRecoveryError(ValueError):
+    """A repaired attempt must change the failing implementation or its inputs."""
+
+
+def assert_changed_attempt(task, code_hash):
+    """A new grant does not make an unchanged failed implementation a repair."""
+    for old in task.get('recovery_history') or []:
+        if (old.get('artifact_hash') == code_hash and old.get('params') == task.get('params')
+                and old.get('services', []) == task.get('services', [])):
+            raise UnchangedRecoveryError('Recovery produced unchanged code, inputs and services; execution blocked')
+
+
 def build_attempt(task, order):
     plan, header = order['plan'], order['header']
     if task_binding(task) != plan['task_binding']:
         raise PermissionError('El objetivo o el intento cambió desde el diagnóstico de Heart')
     instruction = plan['corrective_instruction']
+    evolution = plan.get('evolution')
+    if evolution:
+        if (not task or task.get('version_id') != evolution['version_id']
+                or task.get('skill_name') != evolution['skill_id']
+                or (task.get('skill_artifact_hash') or task.get('artifact_hash')) != evolution['artifact_hash']):
+            raise PermissionError('Evolution base changed since diagnosis')
     resume = plan['steps'] == [{'action': 'resume_prepared_task', 'target': 'task'}]
     preserved = {}
     if resume:
@@ -63,6 +81,10 @@ def build_attempt(task, order):
     if reroute:
         task.update(manifest=None, recipe=None)
     task['recovery_plan_steps'] = copy.deepcopy(plan['proposed_steps'])
+    if evolution:
+        task['evolution'] = copy.deepcopy(evolution)
+        task['planned_skill_name'] = evolution['skill_id']
+        task['feedback'] += '\nEvolucionar la versión fijada; no ampliar servicios ni permisos.'
     if resume:
         task.update(preserved, state='READY', diagnosed=True)
     return task

@@ -15,8 +15,14 @@ ACTIONS = {
     'remediate_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
     'resume_prepared_task': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
     'create_skill': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
+    'evolve_skill': {'capability': 'TaskRemediate', 'mutating': True, 'targets': {'task'}},
 }
 CAUSE_TAXONOMY = {
+    'model_unavailable': {'description': 'Inferencia no disponible', 'remediable': False, 'requires_new_version': False},
+    'provider_rejected': {'description': 'Solicitud rechazada por el proveedor', 'remediable': False, 'requires_new_version': False},
+    'core_fault': {'description': 'Fallo del Core; requiere mantenimiento', 'remediable': False, 'requires_new_version': False},
+    'unknown': {'description': 'Causa sin evidencia suficiente', 'remediable': False, 'requires_new_version': False},
+    'cognitive_discrepancy': {'description': 'Objetivo no satisfecho', 'remediable': True, 'requires_new_version': True},
     'stale_draft_or_lock': {
         'description': 'Colisión con borrador huérfano o bloqueo en el espacio de trabajo',
         'remediable': True,
@@ -146,6 +152,17 @@ def validate_plan(plan):
                 or len(canonical(proposed)) > 16000):
             raise ValueError('Instrucciones de reparación fuera del contrato')
         core.update(corrective_instruction=instruction, proposed_steps=proposed)
+        if any(s['action'] == 'evolve_skill' for s in steps):
+            evolution = plan.get('evolution')
+            if (steps != [{'action': 'evolve_skill', 'target': 'task'}]
+                    or not isinstance(evolution, dict)
+                    or set(evolution) != {'skill_id', 'version_id', 'artifact_hash', 'requirements'}
+                    or not all(isinstance(evolution[k], str) and evolution[k] for k in evolution)
+                    or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', evolution['skill_id'])
+                    or not re.fullmatch(r'[a-f0-9]{64}', evolution['artifact_hash'])
+                    or not instruction):
+                raise ValueError('Evolution requires a pinned skill, version, hash and corrective requirements')
+            core['evolution'] = dict(evolution)
         if any(s['action'] == 'resume_prepared_task' for s in steps):
             if steps != [{'action': 'resume_prepared_task', 'target': 'task'}] or proposed:
                 raise ValueError('Resume must preserve the approved artifact without additional actions')

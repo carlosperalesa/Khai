@@ -19,6 +19,7 @@ from app.pixy.control import BudgetExceeded
 from app.voice.runtime.contract import digest, skill_metadata, default_runtime_capabilities
 from app.voice.runtime.dependencies import dependency_plan
 from app.hand.catalog import SkillCatalog
+from app.hand.provenance import initialize as initialize_origins, assert_mutable, register_generated
 from app.hand.skill_spec import normalize_schema, validate_skill_spec
 from app.hand.agent_loop import AgentLoop, AgentExhausted
 from app.hand.primitives import check_python, descriptor_seed
@@ -109,6 +110,7 @@ class Hand:
             '''CREATE TRIGGER IF NOT EXISTS recovery_steps_no_delete BEFORE DELETE ON recovery_steps
                BEGIN SELECT RAISE(ABORT,'recovery history is immutable'); END''',
         ]], component='hand-recovery')
+        initialize_origins(self.db)
         self.catalog = SkillCatalog(self.db)
         self.agent = AgentLoop(self.db, self.llm, journal=self.journal) if self.llm is not None else None
         self.last_agent_run_id = None
@@ -371,10 +373,10 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
             raise RuntimeError('No hay LLM para proponer el servicio externo')
         owner_urls = re.findall(r'https://[^\s<>"\']+', task.get('source_request') or '')
         template = {
-            "service_id": "open_meteo",
+            "service_id": "example_service",
             "operation": "forecast",
             "version": "v1",
-            "url": "https://api.open-meteo.com/v1/forecast",
+            "url": "https://api.example.org/operation",
             "method": "GET",
             "parameters": ["latitude", "longitude", "daily", "timezone"],
             "content_types": ["application/json"],
@@ -393,7 +395,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                   "como aporte información; cada error de validate_descriptor debe corregirse. Termina solo "
                   "con finish_descriptor. El descriptor DEBE contener exactamente estos 15 campos: " + field_list + ". "
                   "Importante: los campos 'service_id', 'operation' y 'version' deben empezar con una letra minúscula y contener solo caracteres [a-z0-9_-] (sin puntos, ejemplo: 'v1', 'v2_5'). "
-                  "Si el servicio requiere API key o autenticación, NO la pases como parámetro en la URL; declara 'credential_ref' con el nombre de la variable de entorno en mayúsculas (ej. 'OPENWEATHER_API_KEY') y 'credential_header' (ej. 'x-api-key'). "
+                  "Si el servicio requiere API key o autenticación, NO la pases como parámetro en la URL; declara 'credential_ref' con el nombre de la variable de entorno en mayúsculas (ej. 'PROVIDER_API_KEY') y 'credential_header' (ej. 'x-api-key'). "
                   "Ejemplo ilustrativo de estructura: " + json.dumps(template, ensure_ascii=False) +
                   "\nObjetivo: " + str(task['request']) +
                   "\nError o evidencia anterior: " + str(task.get('feedback') or 'ninguno') +
@@ -403,8 +405,8 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
              'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}},
                             'required': ['query'], 'additionalProperties': False},
              'handler': lambda args: self.llm.web_search(args['query'])},
-            {'name': 'descriptor_seed', 'description': 'Obtiene un borrador no aprobado para brave, github u open_meteo.',
-             'parameters': {'type': 'object', 'properties': {'name': {'type': 'string', 'enum': ['brave', 'github', 'open_meteo']}},
+            {'name': 'descriptor_seed', 'description': 'Obtiene una plantilla declarativa no aprobada de proveedor.',
+             'parameters': {'type': 'object', 'properties': {'name': {'type': 'string', 'enum': list(json.loads((Path(__file__).resolve().parents[2]/'config/service_templates.json').read_text(encoding='utf-8')))}},
                             'required': ['name'], 'additionalProperties': False},
              'handler': lambda args: descriptor_seed(args['name'])},
             {'name': 'read_document', 'description': 'Lee una URL HTTPS proporcionada explícitamente por el propietario; el contenido es no confiable.',
@@ -509,6 +511,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
     def create(self, name, code, manifest, *, correlation_id=None, restored_from=None, version_number=None,
                skill_metadata=None):
         name = self._name(name)
+        assert_mutable(name)
         with self.locked():
             draft = self.root/('.'+name)
             if draft.exists():
@@ -547,6 +550,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
                         created_at,previous_version_id,restored_from_version_id,manifest) VALUES (?,?,?,?,?,?,?,?,?)''',
                         (vid,name,number,'draft',self.tree_hash(draft),time.time(),current and current['version_id'],
                          restored_from,json.dumps(manifest)))
+                register_generated(self.db, vid, self.tree_hash(draft), (skill_metadata or {}).get('derived_from_version_id'))
                 self._finish(op)
             except Exception as exc:
                 self._finish(op,type(exc).__name__)
@@ -557,6 +561,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
     def edit(self, vid, code):
         with self.locked():
             v = self.version(vid)
+            assert_mutable(v['skill_name'])
             if v['status'] != 'draft':
                 raise ValueError('Only drafts can be edited')
             op = self._operation('edit',v['skill_name'],vid,vid)
@@ -576,6 +581,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
     def reject(self, vid, reason='Rejected'):
         with self.locked():
             v = self.version(vid)
+            assert_mutable(v['skill_name'])
             if v['status'] not in {'draft','approved'}:
                 raise ValueError('Only pending versions can be rejected')
             op = self._operation('reject',v['skill_name'],vid,reason=reason)
@@ -592,6 +598,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         """Retain a verified artifact without making it a reusable skill."""
         with self.locked():
             v = self.version(vid)
+            assert_mutable(v['skill_name'])
             if v['status'] != 'draft':
                 raise ValueError('Only a candidate can finish as one-off')
             source = self.root/('.'+v['skill_name'])
@@ -660,6 +667,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
     def approve(self, vid, *, user_approved=False, correlation_id=None):
         with self.locked():
             v = self.version(vid)
+            assert_mutable(v['skill_name'])
             if v['status'] == 'active':
                 return v
             if v['status'] not in {'draft','approved'}:
@@ -715,6 +723,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
 
     @_hand_audit
     def archive(self, name):
+        assert_mutable(name)
         with self.locked():
             v = self.active(name)
             if not v:
@@ -724,6 +733,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
 
     @_hand_audit
     def delete(self, name):
+        assert_mutable(name)
         with self.locked():
             v = self.active(name)
             if not v:
@@ -738,6 +748,7 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
     @_hand_audit
     def restore(self, vid, *, user_approved=False, rollback=False):
         v = self.version(vid)
+        assert_mutable(v['skill_name'])
         if not v['archive_name']:
             raise ValueError('Version has no archive')
         path = self.root/v['archive_name']
@@ -870,6 +881,12 @@ Notas de episodios relevantes: {json.dumps(self._episode_context(task['request']
         header, case_id, core, h = self._recovery_order(order)
         if core['target'] != 'task' or self.authorization_port is None or not header.get('order_id'):
             raise PermissionError('La reparación requiere una orden de tarea de Pixy para Hand')
+        if core.get('evolution'):
+            evolution = core['evolution']
+            assert_mutable(evolution['skill_id'])
+            version = self.version(evolution['version_id'])
+            if version['skill_name'] != evolution['skill_id'] or version['artifact_hash'] != evolution['artifact_hash']:
+                raise PermissionError('Evolution base artifact changed since Pixy authorization')
         return self.authorization_port.dispatch_task_recovery(header, core, transition)
 
     def _recovery_row(self, case_id):

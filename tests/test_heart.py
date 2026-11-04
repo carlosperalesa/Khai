@@ -507,7 +507,11 @@ class RecipeBindingDiagnosisTests(unittest.TestCase):
                     'root_cause': 'Inspect the specific observed failure',
                     'corrective_instruction': 'Validate the actual failing contract', 'steps': []}) as analyze:
                     case = self.recovery.open_incident_case(task, failure)
-                analyze.assert_called_once()
+                if scenario in {'authorization', 'inactive_version'}:
+                    analyze.assert_not_called()
+                    self.assertIsNone(case['plan'])
+                else:
+                    analyze.assert_called_once()
                 self.assertNotIn('recipe_binding_failure', case['diagnosis'])
 
 
@@ -643,7 +647,7 @@ class Phase4TaxonomyAndDeduplicationTests(unittest.TestCase):
         self.recovery._llm_analyze_incident = Mock(return_value=None)
         case = self.recovery.open_case('revisa el último error', 'owner:error')
         self.assertEqual(case['diagnosis']['task']['id'], failed_id)
-        self.assertEqual(case['plan']['task_id'], failed_id)
+        self.assertIsNone(case['plan'])  # Model availability is not skill code failure.
 
     def test_model_incident_does_not_repair_unrelated_failed_task(self):
         self.senses.evidence.return_value['pixy']['recent_tasks'] = [

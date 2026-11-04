@@ -2,6 +2,26 @@
 import json
 import logging
 import re
+from contextvars import ContextVar
+from pydantic import BaseModel, ConfigDict
+
+_proposal_raw = ContextVar('planner_proposal_raw', default=None)
+
+
+class TemplateStep(BaseModel):
+    model_config = ConfigDict(extra='allow')
+    id: str | None = None
+    use_existing_skill: str | None = None
+    skill_id: str | None = None
+    version_id: str | None = None
+    new_skill: dict | None = None
+    bindings: dict[str, str] | None = None
+
+
+class PlannerContractError(ValueError):
+    def __init__(self, message, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 logger = logging.getLogger('khai.mind.action_planner')
 
@@ -68,11 +88,14 @@ class ActionPlanner:
 
         for idx, item in enumerate(steps_list, start=1):
             if not isinstance(item, dict):
-                continue
+                raise ValueError('Each action step must be an object')
+            TemplateStep.model_validate(item)
             step_id = re.sub(r'[^a-z0-9_-]', '_', str(item.get('id') or f'step_{idx}').lower())
             if not step_id or not step_id[0].isalpha():
                 step_id = f'step_{idx}'
             existing = item.get('use_existing_skill') or item.get('skill_id') or item.get('version_id')
+            if existing is not None and not isinstance(existing, str):
+                raise ValueError('steps.use_existing_skill must be a string identifier or null')
             rec = by_skill.get(existing) or by_ver.get(existing)
             if rec and not item.get('new_skill'):
                 ver_id = rec['version_id']
@@ -165,6 +188,10 @@ class ActionPlanner:
         target_step['version_id'] = new_vid
 
         skill_id = old_spec.get('skill_id') or step_id
+        from app.hand.provenance import primitives
+        primitive_base = skill_id in primitives()
+        if primitive_base:
+            skill_id = _sanitize_skill_id(skill_id[:48] + '-derived')
         missing_text = ', '.join(missing_items) if missing_items else 'funcionalidad ampliada'
         base_desc = old_spec.get('description', '')
         new_desc = f"{base_desc}. Ampliada orgánicamente para cubrir: {missing_text}."
@@ -193,6 +220,8 @@ class ActionPlanner:
             'is_evolution': True,
             'previous_version_id': old_vid,
         }
+        if primitive_base:
+            action.update(is_evolution=False, derived_from_version_id=old_vid)
 
         spec = {k: action[k] for k in ('skill_id', 'description', 'use_cases', 'input_schema', 'output_schema')}
         spec.update(runtime='SAFE', dependencies=[], services=[], verifier={'kind': 'owner_criterion'})
@@ -202,30 +231,25 @@ class ActionPlanner:
         return True
 
     def _fallback_web_search(self, request, records):
-        """Si la habilidad específica no cubre el objetivo ni pudo evolucionar, recurrir a búsqueda web si está disponible."""
-        search_rec = next((r for r in records if r.get('skill_id') == 'web-search'), None)
-        if not search_rec:
-            return None
-        vid = search_rec['version_id']
-        recipe = {
-            'recipe_id': 'consulta-web-search',
-            'input_schema': {
-                'type': 'object',
-                'properties': {'query': {'type': 'string'}},
-                'required': ['query'],
-                'additionalProperties': False
-            },
-            'steps': [{'id': 'search_step', 'version_id': vid, 'bindings': {'query': 'input.query'}}],
-            'output': 'search_step.result'
-        }
-        return {
-            'recipe': recipe,
-            'inputs': {'query': request},
-            'missing_specs': {},
-            'coverage': {'sufficient': True, 'missing': []}
-        }
+        """An unverified alternative cannot establish coverage or provider authority."""
+        return None
 
     def propose(self, request, compatible, correction_context=None, conversation_context='', task_context=None):
+        token = _proposal_raw.set(None)
+        try:
+            return self._propose(request, compatible, correction_context, conversation_context, task_context)
+        except (ValueError, TypeError, KeyError) as exc:
+            evidence = None
+            recorder = getattr(self.llm, 'record_contract_failure', None)
+            if callable(recorder) and _proposal_raw.get() is not None:
+                evidence = recorder('action_planner', _proposal_raw.get(),
+                    [{'loc': [], 'type': 'contract_violation', 'msg': str(exc)[:1000]}],
+                    {'type': 'object', 'properties': {'steps': {'type': 'array', 'items': TemplateStep.model_json_schema()}}})
+            raise PlannerContractError(str(exc), evidence if isinstance(evidence, dict) else None) from exc
+        finally:
+            _proposal_raw.reset(token)
+
+    def _propose(self, request, compatible, correction_context=None, conversation_context='', task_context=None):
         active = self.catalog.active()
         records = [r for r in active if compatible(r['spec'])]
         skill_names = [{'skill_id': r['skill_id'], 'version_id': r['version_id'],
@@ -277,6 +301,7 @@ class ActionPlanner:
             + '. Si hay correcciones, usa sus operaciones y resource_id; jamás repitas una creación.'
         )
         raw = self.llm.generate_content(prompt, response_format={'type': 'json_object'})
+        _proposal_raw.set(raw)
         proposal = _clean_llm_json(raw)
         if not isinstance(proposal, dict):
             raise ValueError('El planificador no devolvió un objeto')
@@ -329,6 +354,13 @@ class ActionPlanner:
                 if set(action) != {'skill_id', 'description', 'use_cases', 'input_schema',
                                    'output_schema', 'capabilities'}:
                     raise ValueError('Invalid missing action contract')
+                from app.hand.provenance import primitives
+                if action['skill_id'] in primitives():
+                    base = next((r for r in active if r['skill_id'] == action['skill_id']), None)
+                    if not base:
+                        raise ValueError('Primitive identity is reserved by the deployment')
+                    action['skill_id'] = _sanitize_skill_id(action['skill_id'][:48] + '-derived')
+                    action['derived_from_version_id'] = base['version_id']
                 raw_caps = action.get('capabilities') or []
                 if not isinstance(raw_caps, list):
                     raw_caps = [raw_caps]

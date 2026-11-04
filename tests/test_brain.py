@@ -444,8 +444,8 @@ class BrainTests(unittest.TestCase):
             }
             diag = rec.diagnose(evidence)
             tf = next(f for f in diag['findings'] if f['code'] == 'task_failure')
-            self.assertEqual(tf['remedy'], 'retry_task:task_' + '2' * 32)
-            self.assertIn('Open-Meteo', tf['corrective_instruction'])
+            self.assertIsNone(tf['remedy'])  # Missing evidence does not authorize a retry.
+            llm_heart.generate_content.assert_not_called()
 
             # Verificar que retry_task sin manifest reanuda en ROUTING (sin KeyError)
             mgr = SimpleNamespace(

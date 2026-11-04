@@ -473,7 +473,9 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(manager.memory.db_path,manager.state.db_path)
                 self.assertEqual(Path(manager.memory.db_path),root/'control.sqlite3')
                 manager.telegram = Mock()
+                manager.llm.generate_content = Mock(return_value='{"satisfied":true,"missing":[],"reason":"fixture evidence"}')
                 manager.hand.generate = Mock(return_value=(CODE,'SAFE',[]))
+                manager.hand.describe = Mock(return_value=None)
                 manager.pixy.review = Mock(return_value={'safe':True,'requires_approval':False})
                 proxy = Mock()
                 proxy.submit.return_value = {'status':'queued'}
@@ -704,7 +706,7 @@ class CoordinatorTests(Fixture):
         self.manager.pixy.review = Mock(return_value={'safe':False,'reason':'invalid'})
         self.c.tick()
         self.c.tick()
-        self.assertEqual(self.store.get(task['id'])['state'], 'EXHAUSTED')
+        self.assertEqual(self.store.get(task['id'])['state'], 'FAILED')
         self.llm.generate_content.assert_not_called()
 
     def test_cancel_waits_for_proxy_confirmation(self):
@@ -727,7 +729,7 @@ class CoordinatorTests(Fixture):
     def test_full_offline_lifecycle_preserves_objective(self):
         request = '/make compute [MANIFEST] ' + json.dumps({'purpose':'compute','capabilities':[]})
         task = self.c.intake('telegram:lifecycle', request)
-        self.llm.generate_content.return_value = json.dumps({'questions': []})
+        self.llm.generate_content.return_value = json.dumps({'questions': [], 'satisfied': True, 'missing': [], 'reason': 'fixture evidence'})
         self.manager.hand.generate = Mock(return_value=('# MODE: SAFE\nprint(42)', 'SAFE', []))
         self.manager.pixy.review = Mock(return_value={'safe':True,'requires_approval':False,'reason':'offline'})
         self.proxy.submit.return_value = {'status':'queued'}

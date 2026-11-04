@@ -7,6 +7,7 @@ from contextlib import nullcontext
 
 from app.kernel.database import connection, migrate
 from app.kernel.journal import Journal
+from app.voice.buttons import validate_buttons
 
 
 class VoiceMailbox:
@@ -103,6 +104,8 @@ class VoiceMailbox:
         return True
 
     def enqueue(self, text, metadata=None, *, delivery_id=None, conn=None):
+        if metadata and metadata.get('buttons'):
+            validate_buttons(metadata['buttons'])
         if not isinstance(text, str) or not text or len(text) > 64000:
             raise ValueError('Invalid notification')
         delivery_id = delivery_id or 'delivery-' + uuid.uuid4().hex

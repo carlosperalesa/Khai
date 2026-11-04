@@ -144,9 +144,7 @@ class ActionPlannerEvolutionTests(unittest.TestCase):
         planner = ActionPlanner(llm, catalog)
         result = planner.propose('noticias del día', lambda spec: True)
 
-        self.assertIsNotNone(result)
-        self.assertEqual(result['recipe']['recipe_id'], 'consulta-web-search')
-        self.assertEqual(result['inputs'], {'query': 'noticias del día'})
+        self.assertIsNone(result)  # Search availability cannot establish coverage or authority.
 
 
 class HeartAntiLoopAndPixyTests(unittest.TestCase):
@@ -174,7 +172,7 @@ class HeartAntiLoopAndPixyTests(unittest.TestCase):
             state='DIAGNOSING',
             conversation_id='conv_loop_1',
             attempt_number=2,
-            recovery_history=[{'case_id': 'case-1', 'result': 'retry'}],
+            recovery_history=[{'artifact_hash': None, 'version_id': None, 'params': None, 'result': {}}],
             feedback={'error': 'ValueError: El plan no acredita cobertura'}
         )
 
@@ -233,7 +231,8 @@ class HeartAntiLoopAndPixyTests(unittest.TestCase):
 
         findings = case.get('diagnosis', {}).get('findings', [])
         codes = [f['code'] for f in findings]
-        self.assertIn('recovery_loop_detected', codes)
+        self.assertIn('cognitive_discrepancy', codes)
+        self.assertNotIn('recovery_loop_detected', codes)  # Attempt number alone is not a loop.
         self.assertNotIn('conversation_evidence_insufficient', codes)
 
     def test_first_failure_not_marked_as_loop_even_with_case_id(self):

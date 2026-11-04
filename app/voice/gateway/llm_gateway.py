@@ -20,6 +20,10 @@ class LLMContentRejected(ValueError):
 
 class ModelUnavailable(RuntimeError):
     """No healthy effective model; a profile choice belongs to the owner."""
+    def __init__(self, message, failures=None):
+        super().__init__(message)
+        self.evidence = {'stage': 'inference', 'component': 'voice', 'error_type': 'ModelUnavailable',
+                         'attempts': list(failures or [])[-8:]}
 
 
 class LLMManager:
@@ -160,6 +164,7 @@ class LLMManager:
         pool = [c for c in self.api_keys_pool
                 if c['type'] == 'gemini' and now > status.get(c['id'], 0)]
         rejected = 0
+        failures = []
         for credential in pool:
             budget = current_budget.get()
             if budget:
@@ -181,11 +186,14 @@ class LLMManager:
             except Exception as exc:
                 logger.warning('Nano no disponible (%s)', type(exc).__name__)
                 code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                failures.append({'profile': 'nano', 'provider': 'gemini', 'error_type': type(exc).__name__, 'http_status': code})
                 self._mark_key_failed(credential['id'], 300 if code in {401, 403, 429} else 60)
         if pool and rejected == len(pool):
             self._notify('La solicitud fue rechazada por el proveedor; no se ejecutó ninguna acción.')
             raise LLMContentRejected('Nano rechazo la solicitud; no se ejecuto ninguna accion.')
-        raise ModelUnavailable('Nano no responde. Elige el modelo al que deseas cambiar con /mode low, /mode mid o /mode high.')
+        from app.voice.help import MODE_SELECTION_BUTTONS
+        self._notify('Nano no está disponible. Elige un modo para continuar.', buttons=MODE_SELECTION_BUTTONS)
+        raise ModelUnavailable('Nano no responde. Elige el modelo al que deseas cambiar con /mode low, /mode mid o /mode high.', failures)
 
     def probe_nano(self, deadline=None):
         from contextlib import nullcontext
@@ -234,7 +242,15 @@ class LLMManager:
                 raise
             except Exception as exc:
                 logger.warning('Modelo efectivo %s no responde (%s); comprobando Nano', mode, type(exc).__name__)
-                self.probe_nano(deadline=kwargs['_deadline'])
+                try:
+                    self.probe_nano(deadline=kwargs['_deadline'])
+                except ModelUnavailable as unavailable:
+                    from app.voice.help import MODE_SELECTION_BUTTONS
+                    unavailable.evidence['attempts'].insert(0, {'profile': mode, 'provider': 'ollama',
+                        'error_type': type(exc).__name__, 'http_status': getattr(getattr(exc, 'response', None), 'status_code', None)})
+                    self._notify(f'[Modo {mode} falló por: inferencia no disponible] Nano tampoco está disponible. Elige otro modo.',
+                                 buttons=MODE_SELECTION_BUTTONS)
+                    raise
                 if manager.publish_nano_fallback(mode, generation):
                     from app.voice.help import MODE_SELECTION_BUTTONS
                     err_msg = str(exc).lower()
