@@ -6,6 +6,8 @@ Las correcciones están desplegadas con el estado conservado, por decisión del 
 
 Validación final de la revisión: **432 pruebas y 39 subpruebas** aprobadas tanto en Windows/Python 3.12 como en Linux/Python 3.10, sin datos productivos en los contenedores de pruebas.
 
+El código 1525aae fue comprobado dentro del contenedor activo, con salud HTTPS correcta y sin VM de inferencia activa al cierre. Las revisiones documentales posteriores conservan el mismo código.
+
 El reinicio administrativo conserva identidad, secretos, configuración, preferencias, conocimiento depurado, habilidades y aprobación técnica de sus hashes. Elimina historial operativo y respaldos. La limpieza de Telegram usa únicamente la API del bot: sus límites pueden dejar mensajes antiguos en Telegram.
 
 El contexto de las imágenes excluye datos de ejecución, respaldos, bases, archivos de credenciales y logs históricos. La herramienta de purga se ejecuta offline desde el host del proyecto.

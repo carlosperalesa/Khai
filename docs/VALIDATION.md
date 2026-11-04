@@ -94,7 +94,8 @@ Actualización del 31 de octubre: la nueva capacidad de búsqueda es el candidat
      - Internacional y conflictos (emboscada en Haití, cancelación de foto en el G20 por presencia rusa, elecciones en Israel).
      - Ciencia y descubrimientos (posible planeta enano más allá de Plutón, estudio de meteoritos antiguos de la NASA).
   5. Cierre y confirmación: Presentación clara y profesional ofreciendo profundizar en cualquiera de las noticias y confirmada exitosamente con `si` (`id: 426`).
-# Validación del 4 de noviembre de 2026: estado conservado
+
+## Validación del 4 de noviembre de 2026: estado conservado
 
 - Revisión final: 432 pruebas y 39 subpruebas aprobadas en Windows/Python 3.12 (287,56 s) y Linux/Python 3.10 (203,47 s). Linux sin red ni datos productivos, con los archivos finales montados en lectura sobre la imagen de pruebas derivada del despliegue.
 - Core y proxy arrancaron con las migraciones nuevas; salud HTTPS HTTP 200 y trece hashes protegidos conservados. Dos primitivas acreditadas por manifiesto. Las bases y respaldos originales permanecen presentes.
@@ -104,3 +105,4 @@ Actualización del 31 de octubre: la nueva capacidad de búsqueda es el candidat
 - Creación sintética: rechazo del proveedor antes del worker; Heart recibió el fallo y Dreams registró routing sin run. La regresión final conserva LLMContentRejected antes de existir propuesta. Creación y recuperación conversacionales completas siguen pendientes; no se declara aceptación integral.
 - Telegram: 49 identificadores solicitados, un lote aceptado, cero lotes rechazados, 436 fuera de ventana. No se verificaron eliminaciones individuales. Los mensajes de aceptación posteriores permanecen.
 - Purga: validación offline de ocho bases aprobada; aplicación bloqueada por revisión automática. El propietario eligió conservar el estado y recibir [el comando manual](HISTORY_RESET_MANUAL.md). No se eliminaron bases, respaldos ni imágenes históricas.
+- Código 1525aae comprobado dentro del contenedor activo: salud HTTPS HTTP 200, SHA-256 del planificador coincidente y excepción LLMContentRejected preservada en prueba directa. Imagen nueva sin respaldos, bases ni credenciales. GCP sin VM de inferencia; trece archivos protegidos intactos. Siete quick_check online ok; proxy-owner bloqueada durante servicio, validada previamente offline.
