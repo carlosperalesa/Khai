@@ -2,13 +2,14 @@
 
 ## Reparación, primitivas y purga selectiva — 4 de noviembre de 2026
 
-Trabajo solicitado por el propietario sobre f2036b3. Implementación preparada; esta entrada no acredita todavía despliegue ni purga de producción.
+Trabajo solicitado por el propietario sobre f2036b3. Implementación y validación previa completadas en 82967a6; esta entrada no acredita todavía despliegue ni purga de producción.
 
 - Corregidos contratos de botones, autorización desde entrega durable, verificación indeterminada, selección de proveedor y sujeto de consultas breves a Pixy.
 - Diagnóstico tipado, rechazo contractual del planificador conservado en Voice, evolución con identidad y hash fijados, y eliminación del fallback de cobertura fabricada. Un rechazo técnico de Pixy vuelve a Heart antes de repetir generación.
 - Primitivas de búsqueda y documentos identificadas mediante manifiesto; los hashes de código instalados fueron contrastados con el repositorio. El catálogo conserva origen y derivación; Hand bloquea mutaciones de identidades protegidas.
 - Herramienta offline de purga selectiva con simulación, validación, reconstrucción de bases y eliminación de respaldos. Conserva identidad, secretos, preferencias, conocimiento depurado, skills y aprobación técnica. Administración de Telegram limitada a mensajes conocidos que permita borrar la API del bot.
-- Entorno local Python 3.12 preparado con pytest, pytest-subtests y fixtures PDF/XLSX. Suite conjunta: 430 pruebas y 39 subpruebas aprobadas en Windows (293,65 s) y en imagen Linux/Python 3.10 sin red ni datos productivos (199,01 s). Después se añadió el bloqueo de reintentos con código, entradas y servicios idénticos: sus suites afectadas aprobaron 51 pruebas; la suite final ampliada y aceptación de despliegue se registrarán al completar la ejecución.
+- Suite final: **431 pruebas y 39 subpruebas aprobadas** en Windows/Python 3.12 (368,78 s) y en una imagen de pruebas derivada de la imagen exacta de despliegue Linux/Python 3.10 (211,99 s), sin red ni datos productivos. Incluye bloqueo de reintentos con código, entradas y servicios idénticos. pytest, pytest-subtests y fixtures PDF/XLSX están completos en los entornos de pruebas.
+- Previo al corte: Core y proxy operativos, sin entregas ni transiciones pendientes; consulta GCP confirmó que no existe VM de inferencia activa. Baseline de conservación contiene solo hashes y conteos: tres preferencias, cuatro versiones/especificaciones/aprobaciones técnicas y trece archivos protegidos; tres skills activas. La aceptación de purga, webhook y despliegue se registrará después de ejecutarla.
 
 ## Correcciones del Auditor, Alineación Constitucional y Fuente Única de Verdad (2 de noviembre de 2026) — trabajo autorizado
 

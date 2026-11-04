@@ -1,6 +1,6 @@
 # Khai
 
-La reparación del 4 de noviembre incorpora decisiones activadas tras la entrega, verificación de objetivos con estado indeterminado, diagnósticos tipados y procedencia de habilidades. Búsqueda web y lectura de documentos son primitivas protegidas; Hand puede crear derivadas con otra identidad. El estado de pruebas y despliegue se registra en CHECKPOINT.
+La reparación del 4 de noviembre incorpora decisiones activadas tras la entrega, verificación de objetivos con estado indeterminado, diagnósticos tipados y procedencia de habilidades. Búsqueda web y lectura de documentos son primitivas protegidas; Hand puede crear derivadas con otra identidad. Las suites completas de desarrollo y de la imagen Linux están verificadas; la aceptación de despliegue se registra en CHECKPOINT.
 
 El reinicio administrativo conserva identidad, secretos, configuración, preferencias, conocimiento depurado, habilidades y aprobación técnica de sus hashes. Elimina historial operativo y respaldos. La limpieza de Telegram usa únicamente la API del bot: sus límites pueden dejar mensajes antiguos en Telegram.
 
